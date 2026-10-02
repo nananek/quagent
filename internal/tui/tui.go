@@ -31,8 +31,10 @@ type Launch struct {
 	MountTmp bool `json:"mount_tmp"`
 	SSH      bool `json:"ssh"`
 	// NestedVirt は VM の中で KVM を使えるようにする。
-	NestedVirt bool   `json:"nested_virt"`
-	Agent      string `json:"agent"`
+	NestedVirt bool `json:"nested_virt"`
+	// LocalHead はブランチをローカルの先頭 (未 push のコミットを含む) で渡す。
+	LocalHead bool   `json:"local_head"`
+	Agent     string `json:"agent"`
 }
 
 // ErrQuit は TUI で終了を選んだ (または中断した)。
@@ -154,6 +156,9 @@ func startForm(agents []string) (Launch, error) {
 	if l.NestedVirt {
 		extras = append(extras, "nested")
 	}
+	if l.LocalHead {
+		extras = append(extras, "local")
+	}
 	ok := true
 	err = newForm(huh.NewGroup(
 		huh.NewInput().Title("対象 repo").Description("VM の /work にコピーする git repo").
@@ -171,6 +176,7 @@ func startForm(agents []string) (Launch, error) {
 			huh.NewOption("repo の .tmp と VM の /work/.tmp を受け渡す (終了時に回収)", "tmp"),
 			huh.NewOption("ssh で入れるようにする", "ssh"),
 			huh.NewOption("VM の中で KVM を使えるようにする (入れ子の仮想化)", "nested"),
+			huh.NewOption("ブランチをローカルの先頭で渡す (未 push のコミットも渡る)", "local"),
 		).Value(&extras),
 		huh.NewConfirm().Title("この設定で起動する?").Affirmative("起動").Negative("戻る").Value(&ok),
 	)).Run()
@@ -183,6 +189,7 @@ func startForm(agents []string) (Launch, error) {
 	l.Repo = gitTop(l.Repo)
 	l.MountTmp, l.SSH = slices.Contains(extras, "tmp"), slices.Contains(extras, "ssh")
 	l.NestedVirt = slices.Contains(extras, "nested")
+	l.LocalHead = slices.Contains(extras, "local")
 	l.CPUs, _ = strconv.Atoi(cpus)
 	l.MemMiB, _ = strconv.Atoi(mem)
 	saveLast(l)

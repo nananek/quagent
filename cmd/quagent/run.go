@@ -42,6 +42,9 @@ type runOpts struct {
 	MountTmp bool
 	// NestedVirt は VM の中で KVM を使えるようにする (VM の中で VM を動かす開発用)。
 	NestedVirt bool
+	// LocalHead は checkout 中のブランチをローカルの先頭 (未 push のコミットを含む) で
+	// VM に渡す。既定では upstream (fetch 済みの先頭) で渡す。
+	LocalHead bool
 	// Agent は VM 内で動かすエージェント (agents のキー)。
 	Agent string
 }
@@ -295,7 +298,7 @@ runcmd:
 	}
 
 	logf("repo を /work へコピー: %s", repo)
-	if err := copyRepo(g, repo, work, markKey); err != nil {
+	if err := copyRepo(g, repo, work, markKey, o.LocalHead); err != nil {
 		return err
 	}
 	if tmpDir != "" {
@@ -584,21 +587,20 @@ func repoRoot(dir string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// copyRepo は履歴ごと (git bundle) VM の /work に取り込み、host と同じブランチを
-// checkout する。未コミットの変更は渡らない。/work が空でなくても取り込めるよう
-// clone ではなく init + fetch にする (.tmp のマウント先があってもよい)。
-func copyRepo(g vmGuest, repo, work, markKey string) error {
-	bundle := filepath.Join(work, "repo.bundle")
-	if out, err := exec.Command("git", "-C", repo, "bundle", "create", "-q", bundle, "--all").CombinedOutput(); err != nil {
-		return fmt.Errorf("git bundle に失敗: %v: %s", err, out)
-	}
-	head, err := exec.Command("git", "-C", repo, "symbolic-ref", "-q", "--short", "HEAD").Output()
+// copyRepo は host で checkout しているブランチを履歴ごと (git bundle) VM の /work に
+// 取り込み、同じ名前で checkout する。渡すのはそのブランチと origin の remote-tracking
+// (origin に公開済みのもの) だけで、ほかのローカルブランチやタグは渡さない。ブランチの
+// 先頭は既定では upstream (fetch 済みのもの) で、未 push のコミットは VM に見せない
+// (localHead のときだけローカルの先頭)。未コミットの変更も渡らない。/work が空でなくても
+// 取り込めるよう clone ではなく init + fetch にする (.tmp のマウント先があってもよい)。
+func copyRepo(g vmGuest, repo, work, markKey string, localHead bool) error {
+	src, dst, checkout, err := pickHead(repo, localHead)
 	if err != nil {
-		// detached HEAD ならコミットを直接 checkout する
-		head, err = exec.Command("git", "-C", repo, "rev-parse", "HEAD").Output()
-		if err != nil {
-			return err
-		}
+		return err
+	}
+	bundle := filepath.Join(work, "repo.bundle")
+	if out, err := exec.Command("git", "-C", repo, "bundle", "create", "-q", bundle, src, "--remotes=origin").CombinedOutput(); err != nil {
+		return fmt.Errorf("git bundle に失敗: %v: %s", err, out)
 	}
 	name, email, err := gitIdentity(repo)
 	if err != nil {
@@ -639,13 +641,43 @@ git config --global commit.gpgsign true
 git config --global tag.gpgsign false
 cd /work
 git init -q -b quagent-init
-git fetch -q /tmp/repo.bundle '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*' '+refs/remotes/*:refs/remotes/*'
-git checkout -q ` + shellQuote(strings.TrimSpace(string(head))) + `
+git fetch -q /tmp/repo.bundle '+refs/remotes/*:refs/remotes/*' ` + shellQuote("+"+src+":"+dst) + `
+git checkout -q ` + checkout + `
 rm /tmp/repo.bundle`
 	if out, err := g.sh(script, nil); err != nil {
 		return fmt.Errorf("VM 内での取り込みに失敗: %v: %s", err, out)
 	}
 	return nil
+}
+
+// pickHead は VM に渡す先頭を決める。src は host の ref (bundle に入れるもの)、dst は
+// VM で受ける ref、checkout は VM で git checkout に渡す引数。
+func pickHead(repo string, localHead bool) (src, dst, checkout string, err error) {
+	git := func(args ...string) string {
+		out, _ := exec.Command("git", append([]string{"-C", repo}, args...)...).Output()
+		return strings.TrimSpace(string(out))
+	}
+	ref := git("symbolic-ref", "-q", "HEAD")
+	if !strings.HasPrefix(ref, "refs/heads/") {
+		// detached HEAD: そのコミットを渡す。既定では origin などに公開済みのコミットに限る
+		if !localHead && git("for-each-ref", "--count=1", "--contains", "HEAD", "refs/remotes") == "" {
+			return "", "", "", fmt.Errorf("HEAD のコミットはどのリモートにも無い (未 push)。VM に渡すなら --local-head を付ける")
+		}
+		return "HEAD", "refs/quagent/head", "--detach refs/quagent/head", nil
+	}
+	name := strings.TrimPrefix(ref, "refs/heads/")
+	if localHead {
+		logf("%s をローカルの先頭で VM に渡す (未 push のコミットも渡る)", name)
+		return ref, ref, shellQuote(name), nil
+	}
+	up := git("rev-parse", "--symbolic-full-name", name+"@{upstream}")
+	if !strings.HasPrefix(up, "refs/remotes/") {
+		return "", "", "", fmt.Errorf("%s に upstream (リモートのブランチ) が無い。ローカルの先頭を VM に渡すなら --local-head を付ける", name)
+	}
+	if n := git("rev-list", "--count", up+"..HEAD"); n != "" && n != "0" {
+		logf("%s の未 push のコミット %s 件は VM に渡さない (渡すなら --local-head)", name, n)
+	}
+	return up, ref, shellQuote(name), nil
 }
 
 // gitIdentity は repo で使われる user.name / user.email を返す (repo ごとの設定があれば

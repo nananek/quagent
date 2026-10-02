@@ -34,7 +34,11 @@ sshd は既定で止める (systemd-ssh-generator が作る vsock / unix ソケ�
 - ベースイメージ: OS ごとのレシピから焼く (下記)。どれも rootless docker と
   opencode 入りで、rootful の docker デーモンは動かさない。
 - ユーザー `agent` (sudo なし)。作業ディレクトリは `/work` で、ここに対象 repo を
-  履歴ごと取り込み、host と同じブランチを checkout する (未コミットの変更は渡らない)。
+  履歴ごと取り込み、host と同じブランチを checkout する。渡すのは checkout 中の
+  ブランチと origin の remote-tracking だけで、ほかのローカルブランチやタグは渡さない。
+  ブランチの先頭は既定では upstream (fetch 済みのもの) で、未 push のコミットは渡らない
+  (upstream が無ければ起動しない)。ローカルの先頭で渡すなら `--local-head` (TUI の
+  オプション)。未コミットの変更はどちらでも渡らない。
 - VM は毎回ベースイメージの overlay から起動し、終了時に破棄する。強制終了で
   残った作業ディレクトリは、次に起動したときに掃除する。
 - VM には CPU の仮想化支援 (svm / vmx) を見せないので、VM の中では KVM を使えない。
@@ -235,13 +239,11 @@ push 先は `origin` で固定。保護ブランチ (既定: main / master / dev
 同名のブランチが既にあれば上書きしない。コミットは利用者の名前で作られる (VM には
 host の git の `user.name` / `user.email` だけを渡す。署名鍵や認証の設定は渡さない)。
 
-既知の制限 (承知のうえで受け入れている): VM には host の repo の全ブランチ
-(`git bundle --all`) が渡るので、エージェントは host にしか無い未 push のコミットを
-指すブランチを作り、PR として origin へ公開できる (上の 3 のとおり、host にある
+VM に渡すのは既定で origin に公開済みのコミットだけなので、host にしか無い未 push の
+コミットは PR に入らない。`--local-head` を付けると checkout 中のブランチの未 push の
+コミットも VM に渡り、PR として origin へ公開されうる (上の 3 のとおり、host にある
 コミットは署名し直さずにそのまま積む)。PR の作成には今のところ人の承認が無いので、
-PR ができたら GitHub で中身 (含まれるコミット) を確認する前提にしている。なお中身は
-VM に渡っているので、ブランチの範囲を絞っても、VM で作り直したコミットとして
-同じ内容は出せる。PR 作成の承認制は今後の検討事項。
+PR ができたら GitHub で中身を確認する前提。PR 作成の承認制は今後の検討事項。
 
 ## 現状
 
