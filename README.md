@@ -45,7 +45,8 @@ sshd は既定で止める。`quagent run --ssh` のときだけ、使い捨て�
 ## 使い方
 
 ```sh
-CGO_ENABLED=0 go build -o bin/quagent ./cmd/quagent   # VM に持ち込むので静的リンクにする
+make build                     # bin/quagent (VM に持ち込むので静的リンク)
+make install                   # ~/.local/bin/quagent に入れる (PREFIX で変更可)
 cd <repo> && quagent           # TUI: 起動設定 (repo・OS・CPU・メモリ) とベースイメージの管理
 ```
 
