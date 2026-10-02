@@ -158,7 +158,10 @@ runcmd:
 	}
 	defer hostLog.Close()
 	logger := log.New(hostLog, "", log.Ltime)
-	svc := hostsvc.New(filepath.Join(work, "host.sock"))
+	svc, err := hostsvc.New(filepath.Join(work, "host.sock"))
+	if err != nil {
+		return err
+	}
 	providers, err := authproxy.Register(svc.Mux, cfg.Providers, logger)
 	if err != nil {
 		return err
@@ -242,7 +245,7 @@ runcmd:
 	if err := copyRepo(g, repo, work); err != nil {
 		return err
 	}
-	if err := ag.setup(g, cfg, providers); err != nil {
+	if err := ag.setup(g, cfg, providers, svc.Token); err != nil {
 		return err
 	}
 	if o.SSH {

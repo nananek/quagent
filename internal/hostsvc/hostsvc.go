@@ -7,6 +7,9 @@ package hostsvc
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
@@ -24,18 +27,50 @@ const (
 
 // Server は窓口の HTTP サーバー。
 type Server struct {
-	Mux  *http.ServeMux
-	sock string
-	srv  *http.Server
+	Mux *http.ServeMux
+	// Token は run ごとの合言葉。エージェントの設定にだけ書き、/healthz 以外は
+	// これを持たないリクエストを拒否する (VM 内のエージェント以外のプロセスや
+	// コンテナが、プロキシ経由で鍵や MCP を使えないように)。
+	Token string
+	sock  string
+	srv   *http.Server
 }
 
 // New は sock で待ち受けるサーバーを作る。ルートは Mux に登録してから Start する。
-func New(sock string) *Server {
+func New(sock string) (*Server, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return nil, err
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})
-	return &Server{Mux: mux, sock: sock}
+	return &Server{Mux: mux, Token: "qa-" + hex.EncodeToString(b), sock: sock}, nil
+}
+
+// authorized はリクエストが合言葉を持っているかを返す。
+func (s *Server) authorized(r *http.Request) bool {
+	want := []byte(s.Token)
+	for _, got := range []string{
+		strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "),
+		r.Header.Get("X-Api-Key"),
+	} {
+		if subtle.ConstantTimeCompare([]byte(got), want) == 1 {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" && !s.authorized(r) {
+			http.Error(w, "quagent: unauthorized", http.StatusUnauthorized)
+			return
+		}
+		s.Mux.ServeHTTP(w, r)
+	})
 }
 
 // Start は待ち受けを始める。
@@ -49,7 +84,7 @@ func (s *Server) Start() error {
 		l.Close()
 		return err
 	}
-	s.srv = &http.Server{Handler: s.Mux, ReadHeaderTimeout: 30 * time.Second}
+	s.srv = &http.Server{Handler: s.handler(), ReadHeaderTimeout: 30 * time.Second}
 	go func() { _ = s.srv.Serve(l) }()
 	return nil
 }

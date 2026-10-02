@@ -109,6 +109,11 @@ cloud-init)。今は `debian` と `arch`。`~/.config/quagent/images/<名前>/` 
 
 ## LLM API の認証プロキシ
 
+host の窓口 (LLM プロキシと MCP) は run ごとの合言葉 (トークン) を要求する。
+トークンはエージェントの設定ファイル (権限 600) にだけ書くので、エージェントの
+設定を読まないプロセスは窓口を使えない (VM 内の docker コンテナは、そもそも窓口に
+経路が無い)。ただしエージェントと同じユーザーで動くプロセスは設定ファイルを読める。
+
 API キーは VM に入れない。VM 内の opencode は `http://quagent.host/llm/<provider>`
 を baseURL として使い、host 側のプロキシが本物の鍵を付けて本来の API へ転送する。
 VM からは API のドメインにも直接出られない (既定の外向き通信はゼロ)。
@@ -128,7 +133,7 @@ VM からは API のドメインにも直接出られない (既定の外向き�
 ```
 
 Claude Code を使うときは `providers` に `anthropic` を入れる (VM 内の Claude Code は
-`ANTHROPIC_BASE_URL` をプロキシに向け、ダミーの鍵を `apiKeyHelper` で渡す):
+`ANTHROPIC_BASE_URL` をプロキシに向け、鍵の代わりにトークンを `apiKeyHelper` で渡す):
 
 ```json
 "anthropic": {
