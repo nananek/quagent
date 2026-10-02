@@ -81,9 +81,7 @@ func cmdRun(args []string) error {
 	repo := fs.String("repo", "", "VM に渡す git repo (既定: cwd の git toplevel)")
 	cpus := fs.Int("cpus", 4, "VM の CPU 数")
 	mem := fs.Int("mem", 8192, "VM のメモリ (MiB)")
-	// 暫定: 認証プロキシができるまで opencode の API へ直接出す。
-	allow := fs.String("allow", "opencode.ai api.opencode.ai models.opencode.ai models.dev",
-		"egress を許すドメイン (空白区切り)")
+	allow := fs.String("allow", "", "egress を許すドメイン (空白区切り)。LLM API は認証プロキシ経由なので不要")
 	_ = fs.Parse(args)
 	return run(runOpts{
 		Repo:   *repo,

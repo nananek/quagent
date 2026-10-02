@@ -28,3 +28,6 @@ func ImagesDir() string { return filepath.Join(DataDir(), "images") }
 
 // RunsDir は run ごとの作業ディレクトリの親。
 func RunsDir() string { return filepath.Join(StateDir(), "runs") }
+
+// LogsDir は run 終了後も残す host 側ログの置き場。
+func LogsDir() string { return filepath.Join(StateDir(), "logs") }

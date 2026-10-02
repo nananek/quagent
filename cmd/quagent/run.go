@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -10,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nananek/quagent/internal/authproxy"
+	"github.com/nananek/quagent/internal/config"
 	"github.com/nananek/quagent/internal/hostsvc"
 	"github.com/nananek/quagent/internal/image"
 	"github.com/nananek/quagent/internal/netns"
@@ -29,6 +33,10 @@ func logf(format string, a ...any) {
 }
 
 func run(o runOpts) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
 	repo, err := repoRoot(o.Repo)
 	if err != nil {
 		return err
@@ -55,8 +63,9 @@ func run(o runOpts) error {
 		return err
 	}
 	defer func() {
+		saveLogs(work)
 		os.RemoveAll(work)
-		logf("VM を破棄した")
+		logf("VM を破棄した (ログ: %s)", filepath.Join(paths.LogsDir(), filepath.Base(work)))
 	}()
 
 	// run ごとに使い捨ての ssh 鍵
@@ -85,7 +94,20 @@ bootcmd:
 	}
 
 	// guest からの唯一の窓口 (guestfwd -> unix socket)
+	hostLog, err := os.Create(filepath.Join(work, "host.log"))
+	if err != nil {
+		return err
+	}
+	defer hostLog.Close()
+	logger := log.New(hostLog, "", log.Ltime)
 	svc := hostsvc.New(filepath.Join(work, "host.sock"))
+	providers, err := authproxy.Register(svc.Mux, cfg.Providers, logger)
+	if err != nil {
+		return err
+	}
+	if len(providers) == 0 {
+		logf("認証プロキシの provider が未設定 (%s)。VM から LLM API は使えない", config.Path())
+	}
 	if err := svc.Start(); err != nil {
 		return err
 	}
@@ -136,6 +158,10 @@ bootcmd:
 		return err
 	}
 
+	if err := writeOpencodeConfig(ssh, providers); err != nil {
+		return err
+	}
+
 	logf("VM に接続 (exit で破棄)")
 	sh := ssh.Command([]string{"-t"}, "cd /work && exec bash -l")
 	sh.Stdin, sh.Stdout, sh.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -178,4 +204,37 @@ git config --global user.email quagent@localhost`
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// writeOpencodeConfig は guest の opencode が provider を認証プロキシ経由で使うよう設定する。
+// apiKey はダミー (本物はプロキシが host 側で付ける)。
+func writeOpencodeConfig(ssh vm.SSH, providers []string) error {
+	prov := map[string]any{}
+	for _, id := range providers {
+		prov[id] = map[string]any{"options": map[string]any{
+			"baseURL": authproxy.GuestBaseURL(hostsvc.GuestHost, id),
+			"apiKey":  "quagent-proxy",
+		}}
+	}
+	b, err := json.MarshalIndent(map[string]any{
+		"$schema":  "https://opencode.ai/config.json",
+		"provider": prov,
+	}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return ssh.WriteFile("~/.config/opencode/opencode.json", b)
+}
+
+// saveLogs は host 側のログだけを残す (VM のディスクや鍵は残さない)。
+func saveLogs(work string) {
+	dst := filepath.Join(paths.LogsDir(), filepath.Base(work))
+	if err := os.MkdirAll(dst, 0o700); err != nil {
+		return
+	}
+	for _, name := range []string{"host.log", "launcher.log", "console.log"} {
+		if b, err := os.ReadFile(filepath.Join(work, name)); err == nil {
+			_ = os.WriteFile(filepath.Join(dst, name), b, 0o600)
+		}
+	}
 }

@@ -156,6 +156,17 @@ func (s SSH) CopyTo(src, dst string) error {
 	return nil
 }
 
+// WriteFile は guest の path (~ 始まり可) に data を書く。
+func (s SSH) WriteFile(path string, data []byte) error {
+	dir := path[:strings.LastIndex(path, "/")]
+	cmd := s.Command(nil, fmt.Sprintf("mkdir -p %s && cat > %s", dir, path))
+	cmd.Stdin = strings.NewReader(string(data))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("guest への書き込みに失敗 (%s): %v: %s", path, err, out)
+	}
+	return nil
+}
+
 // WaitReady は ssh が通るまで待つ。fail が non-nil を返したら中断する。
 func (s SSH) WaitReady(timeout time.Duration, fail func() error) error {
 	deadline := time.Now().Add(timeout)

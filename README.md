@@ -36,11 +36,33 @@ host に必要なもの: `qemu-system-x86_64` (KVM)、`qemu-img`、`xorriso`、
 `slirp4netns`、`unshare`/`nsenter` (util-linux)、`nft`、`ssh`、`git`。
 unprivileged user namespace が有効であること。
 
+## LLM API の認証プロキシ
+
+API キーは VM に入れない。VM 内の opencode は `http://quagent.host/llm/<provider>`
+を baseURL として使い、host 側のプロキシが本物の鍵を付けて本来の API へ転送する。
+VM からは API のドメインにも直接出られない (既定の外向き通信はゼロ)。
+
+`~/.config/quagent/config.json`:
+
+```json
+{
+  "providers": {
+    "opencode-go": {
+      "upstream": "https://opencode.ai/zen/go/v1",
+      "secret_command": ["pass", "show", "opencode/go"]
+    }
+  }
+}
+```
+
+provider ID は opencode の provider ID と揃える。秘密の取り出し方は
+`secret_env` (環境変数名)・`secret_file` (パス)・`secret_command` (コマンド) の
+いずれか。ヘッダは既定で `Authorization: Bearer <秘密>` (`header` / `prefix` で変更可)。
+秘密は run 開始時に一度だけ取り出す。
+
 ## 現状
 
-最小構成のみ。暫定で opencode の API ドメインへの 443 だけを固定で許可している。
-今後: MCP による接続先申請と承認 UI (tmux)、host 側での認証付与プロキシ、
-PR の作成と署名、起動時 TUI。
+今後: MCP による接続先申請と承認 UI (tmux)、PR の作成と署名、起動時 TUI。
 
 ## ライセンス
 
