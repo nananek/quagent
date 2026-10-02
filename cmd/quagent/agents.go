@@ -28,8 +28,9 @@ const DefaultAgent = "opencode"
 
 var agents = map[string]agentSpec{
 	"opencode": {
-		setup:   setupOpencode,
-		command: "cd /work && opencode --auto /work; exec bash -l",
+		setup: setupOpencode,
+		// 更新確認とモデル一覧の取得は外へ出られず DNS の拒否が並ぶだけなので止める
+		command: "cd /work && OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 opencode --auto /work; exec bash -l",
 	},
 	"claude": {
 		setup:   setupClaude,
@@ -60,8 +61,9 @@ func setupOpencode(g vmGuest, cfg *config.Config, providers []string, token stri
 		}}
 	}
 	conf := map[string]any{
-		"$schema":  "https://opencode.ai/config.json",
-		"provider": prov,
+		"$schema":    "https://opencode.ai/config.json",
+		"autoupdate": false,
+		"provider":   prov,
 		"mcp": map[string]any{
 			"quagent": map[string]any{"type": "remote", "url": guestMCPURL(), "enabled": true, "oauth": false,
 				"headers": map[string]string{"Authorization": "Bearer " + token}},
@@ -89,6 +91,7 @@ func setupClaude(g vmGuest, cfg *config.Config, providers []string, token string
 			"ANTHROPIC_BASE_URL":                       authproxy.GuestBaseURL(hostsvc.GuestOrigin(), claudeProvider),
 			"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
 			"DISABLE_AUTOUPDATER":                      "1",
+			"CLAUDE_CODE_DISABLE_TERMINAL_TITLE":       "1",
 		},
 	}
 	if cfg.Claude.Model != "" {

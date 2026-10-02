@@ -450,13 +450,27 @@ func runTmux(session string, agent, consoleArgv []string, quit <-chan struct{}) 
 		return nil
 	}
 	agentSh := shellJoin(agent) + "; tmux kill-session -t " + shellQuote(session)
-	if err := tmux("new-session", "-d", "-s", session, "-x", "200", "-y", "50", "sh", "-c", agentSh); err != nil {
+	if err := tmux("new-session", "-d", "-s", session, "-n", "quagent", "-x", "200", "-y", "50", "sh", "-c", agentSh); err != nil {
 		return err
 	}
 	defer func() { _ = exec.Command("tmux", "kill-session", "-t", session).Run() }()
-	// VM の出力で窓の名前を書き換えたり、tmux を素通りして外の端末へ送ったりさせない
-	_ = tmux("set-option", "-w", "-t", session+":", "allow-rename", "off")
-	_ = tmux("set-option", "-w", "-t", session+":", "allow-passthrough", "off")
+	// VM の出力で窓の名前や端末のタイトルを書き換えたり、tmux を素通りして外の端末へ
+	// 送ったりさせない。$TMUX の中から使うと利用者の tmux にこのセッションが出るので、
+	// どれもこのセッション・窓だけに設定する。
+	for _, opt := range [][]string{
+		{"-w", "allow-rename"}, {"-w", "automatic-rename"}, {"-w", "allow-set-title"},
+		{"-w", "allow-passthrough"}, {"", "set-titles"},
+	} {
+		target := session
+		args := []string{"set-option"}
+		if opt[0] != "" {
+			target += ":"
+			args = append(args, opt[0])
+		}
+		if err := tmux(append(args, "-t", target, opt[1], "off")...); err != nil {
+			logf("%v", err)
+		}
+	}
 	if err := tmux(append([]string{"split-window", "-v", "-l", "30%", "-t", session + ":"}, consoleArgv...)...); err != nil {
 		return err
 	}
