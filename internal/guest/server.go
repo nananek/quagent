@@ -117,22 +117,33 @@ func baseEnv() []string {
 		vars["XDG_RUNTIME_DIR"] = "/run/user/" + u.Uid
 	}
 	vars["SHELL"] = "/bin/bash"
-	// /etc/environment (DOCKER_HOST など)
-	if b, err := os.ReadFile("/etc/environment"); err == nil {
-		for _, line := range strings.Split(string(b), "\n") {
-			line = strings.TrimSpace(line)
-			k, v, ok := strings.Cut(line, "=")
-			if !ok || strings.HasPrefix(line, "#") {
-				continue
-			}
-			vars[k] = strings.Trim(v, `"'`)
-		}
+	// システムのロケール (Arch は /etc/locale.conf、Debian は /etc/default/locale)
+	for _, path := range []string{"/etc/default/locale", "/etc/locale.conf"} {
+		readEnvFile(path, vars, func(k string) bool { return k == "LANG" || strings.HasPrefix(k, "LC_") })
 	}
+	// /etc/environment (DOCKER_HOST など)
+	readEnvFile("/etc/environment", vars, func(string) bool { return true })
 	env := make([]string, 0, len(vars))
 	for k, v := range vars {
 		env = append(env, k+"="+v)
 	}
 	return env
+}
+
+// readEnvFile は KEY=VALUE の行が並ぶファイルから、want に当たる変数を vars に入れる。
+func readEnvFile(path string, vars map[string]string, want func(string) bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		k, v, ok := strings.Cut(line, "=")
+		if !ok || strings.HasPrefix(line, "#") || !want(k) {
+			continue
+		}
+		vars[k] = strings.Trim(v, `"'`)
+	}
 }
 
 func handle(c net.Conn, env []string) {

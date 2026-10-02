@@ -148,6 +148,10 @@ runcmd:
 %s  - [sh, -c, "mkdir -p /run/quagent-seed && mount -o ro /dev/disk/by-label/cidata /run/quagent-seed && install -m 755 /run/quagent-seed/quagent-guest /usr/local/bin/quagent-guest && umount /run/quagent-seed"]
   - [systemd-run, --unit=quagent-guest, --uid=%s, -p, Restart=always, /usr/local/bin/quagent-guest, %s, "%d"]
 `, hostsvc.GuestHost, maskCmd(sshUnits(o.SSH)), mountCmds(shares), vm.GuestUser, guestCommand, svc.Port)
+	// 時刻の表示 (承認の期限やコミットの日時) を host とそろえる
+	if tz := hostTimezone(); tz != "" {
+		userData += "timezone: " + tz + "\n"
+	}
 	var sshPort int
 	var sshKey string
 	if o.SSH {
@@ -282,6 +286,26 @@ runcmd:
 	agent := g.interactiveArgv(ag.command)
 	session := "quagent-" + filepath.Base(work)
 	return runTmux(session, agent, []string{self, consoleCommand, filepath.Join(work, "console.sock")}, con.Quit)
+}
+
+// hostTimezone は host のタイムゾーン名 (例: Asia/Tokyo)。分からなければ空。
+// tz database の名前でないもの ("JST-9" など) は VM で設定できないので使わない。
+func hostTimezone() string {
+	tz := strings.TrimPrefix(os.Getenv("TZ"), ":")
+	if tz == "" {
+		link, err := os.Readlink("/etc/localtime")
+		if err != nil {
+			return ""
+		}
+		_, tz, _ = strings.Cut(link, "zoneinfo/")
+	}
+	if tz == "" || strings.HasPrefix(tz, "/") || strings.Contains(tz, "..") || strings.ContainsAny(tz, " \t\n\"'") {
+		return ""
+	}
+	if fi, err := os.Stat(filepath.Join("/usr/share/zoneinfo", tz)); err != nil || !fi.Mode().IsRegular() {
+		return ""
+	}
+	return tz
 }
 
 // sshUnits は VM で止める ssh のユニット。distro で名前が違う (Debian は ssh.*、

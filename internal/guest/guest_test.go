@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -99,5 +100,17 @@ func TestReadLineBounded(t *testing.T) {
 	line, err := readLine(br, 1<<20)
 	if err != nil || len(line) != 10001 {
 		t.Fatalf("len=%d err=%v", len(line), err)
+	}
+}
+
+func TestReadEnvFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "locale.conf")
+	if err := os.WriteFile(path, []byte("# c\nLANG=\"en_US.UTF-8\"\nLC_TIME=C\nPATH=/evil\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	vars := map[string]string{"LANG": "C.UTF-8", "PATH": "/bin"}
+	readEnvFile(path, vars, func(k string) bool { return k == "LANG" || strings.HasPrefix(k, "LC_") })
+	if vars["LANG"] != "en_US.UTF-8" || vars["LC_TIME"] != "C" || vars["PATH"] != "/bin" {
+		t.Fatalf("vars = %v", vars)
 	}
 }
