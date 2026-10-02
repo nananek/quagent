@@ -233,6 +233,35 @@ func TestDenyCooldown(t *testing.T) {
 	}
 }
 
+func TestDeniedForgetsExpired(t *testing.T) {
+	m, _ := newTestManager(t)
+	now := time.Now()
+	m.now = func() time.Time { return now }
+	r, _ := m.Submit([]string{"a.example"}, "x")
+	_ = m.Decide(r.ID, Decision{Status: Denied})
+	now = now.Add(DenyCooldown + time.Second)
+	r, _ = m.Submit([]string{"b.example"}, "y")
+	_ = m.Decide(r.ID, Decision{Status: Denied})
+	if _, ok := m.denied["a.example"]; ok || len(m.denied) != 1 {
+		t.Fatalf("再申請できるようになった記録が残っている: %v", m.denied)
+	}
+}
+
+func TestAlwaysFileIsPrivate(t *testing.T) {
+	m, _ := newTestManager(t)
+	r, _ := m.Submit([]string{"pypi.org"}, "x")
+	if err := m.Decide(r.ID, Decision{Status: Approved, Kind: Always}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(m.alwaysPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("権限が %o", perm)
+	}
+}
+
 func TestTimeoutAlsoCoolsDown(t *testing.T) {
 	m, _ := newTestManager(t)
 	r, _ := m.Submit([]string{"a.example"}, "x")

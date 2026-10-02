@@ -452,7 +452,7 @@ func (m *Manager) addAlways(domains []string) error {
 		return err
 	}
 	tmp := m.alwaysPath + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, m.alwaysPath)
@@ -483,7 +483,14 @@ func (m *Manager) finish(r *Request, res Result) {
 	r.result = res
 	close(r.done)
 	if res.Status == Denied || res.Status == TimedOut {
-		until := m.now().Add(DenyCooldown)
+		now := m.now()
+		// 再申請できるようになったものは消す (長い run で溜め続けない)
+		for d, until := range m.denied {
+			if !now.Before(until) {
+				delete(m.denied, d)
+			}
+		}
+		until := now.Add(DenyCooldown)
 		for _, d := range r.Domains {
 			m.denied[d] = until
 		}
@@ -543,7 +550,7 @@ func RemoveAlways(path string, domains []string) ([]string, error) {
 		return nil, err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
 		return nil, err
 	}
 	return removed, os.Rename(tmp, path)

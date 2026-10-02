@@ -58,7 +58,8 @@ func handler(id string, up *url.URL, header, value string, logger *log.Logger) h
 		FlushInterval: -1,
 		ErrorLog:      logger,
 		ModifyResponse: func(resp *http.Response) error {
-			logger.Printf("llm %s %s %s -> %d", id, resp.Request.Method, resp.Request.URL.Path, resp.StatusCode)
+			// path は VM が決めるので %q で書く (改行や制御文字でログを偽装させない)
+			logger.Printf("llm %s %s %q -> %d", id, resp.Request.Method, resp.Request.URL.Path, resp.StatusCode)
 			return nil
 		},
 	}
