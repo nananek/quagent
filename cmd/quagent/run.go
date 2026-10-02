@@ -124,7 +124,14 @@ func run(o runOpts) error {
 	if err != nil {
 		return err
 	}
-	providers, err := authproxy.Register(svc.Mux, cfg.Providers, logger)
+	// 許可していない LLM API の操作は、承認コンソールができてからそこに出す
+	llmDenied := make(chan string, 16)
+	providers, err := authproxy.Register(svc.Mux, cfg.Providers, logger, func(s string) {
+		select {
+		case llmDenied <- s:
+		default: // 溢れた分は host.log にだけ残る
+		}
+	})
 	if err != nil {
 		return err
 	}
@@ -217,6 +224,19 @@ runcmd:
 		return err
 	}
 	go relayDenied(l, con)
+	go func() {
+		// 連打で承認コンソールを埋めないよう 1 分に 10 件まで (残りは host.log にある)
+		var window time.Time
+		shown := 0
+		for s := range llmDenied {
+			if now := time.Now(); now.Sub(window) >= time.Minute {
+				window, shown = now, 0
+			}
+			if shown++; shown <= 10 {
+				con.Log("LLM プロキシで拒否: " + s)
+			}
+		}
+	}()
 	protected := cfg.PR.ProtectedBranches
 	if len(protected) == 0 {
 		protected = pr.DefaultProtected

@@ -68,6 +68,9 @@ type Provider struct {
 	SecretEnv     string   `json:"secret_env,omitempty"`
 	SecretFile    string   `json:"secret_file,omitempty"`
 	SecretCommand []string `json:"secret_command,omitempty"`
+	// Allow は転送してよい操作 ("POST /messages" のようなメソッドと upstream からの
+	// 相対パス。末尾の "*" は前方一致)。空なら推論とモデル一覧だけ (authproxy.DefaultAllow)。
+	Allow []string `json:"allow,omitempty"`
 }
 
 // Path は設定ファイルのパス。

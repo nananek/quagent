@@ -196,6 +196,12 @@ provider ID は opencode の provider ID と揃える。秘密の取り出し方
 秘密は run 開始時に一度だけ取り出す。`opencode.model` は VM 内 opencode の既定
 モデルで、`providers` に挙げた provider のものを指定する。
 
+プロキシが鍵を付けて転送するのは推論とモデル一覧の操作だけ (`POST /messages`・
+`/messages/count_tokens`・`/chat/completions`・`/responses`、`GET /models`、それぞれ
+`/v1` 付きも)。ファイルやバッチなどほかの API は 403 で断り、承認コンソールに出す。
+足りなければ provider ごとに `"allow": ["POST /messages", "GET /models/*"]` のように
+指定する (upstream からの相対パス。末尾の `*` は前方一致。指定すると既定は使わない)。
+
 ## PR の作成と署名
 
 エージェントは `/work` の保護されていないブランチにコミットし、MCP の
