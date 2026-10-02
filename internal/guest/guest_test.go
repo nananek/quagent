@@ -1,6 +1,7 @@
 package guest
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"net"
@@ -68,5 +69,35 @@ func TestExecTTY(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "33 77") {
 		t.Fatalf("端末サイズが伝わらない: %q", out.String())
+	}
+}
+
+func TestHostOnlyRejectsOthers(t *testing.T) {
+	l, err := net.Listen("unix", filepath.Join(t.TempDir(), "h.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go serve(&hostOnly{l})
+	c, err := net.Dial("unix", l.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_, _ = c.Write([]byte(`{"argv":["true"]}` + "\n"))
+	if n, err := c.Read(make([]byte, 1)); err == nil {
+		t.Fatalf("vsock の host 以外からの接続に %d バイト応答した", n)
+	}
+}
+
+func TestReadLineBounded(t *testing.T) {
+	br := bufio.NewReader(strings.NewReader(strings.Repeat("a", 100) + "\n"))
+	if _, err := readLine(br, 50); err == nil {
+		t.Fatal("上限を超えたヘッダを受け付けた")
+	}
+	br = bufio.NewReader(strings.NewReader(strings.Repeat("a", 10000) + "\nrest"))
+	line, err := readLine(br, 1<<20)
+	if err != nil || len(line) != 10001 {
+		t.Fatalf("len=%d err=%v", len(line), err)
 	}
 }

@@ -21,7 +21,8 @@ host ◄─ vsock (run ごとのポート、この VM の CID だけ) ◄─ gue
 host から VM の操作 (コマンド実行・端末・repo の受け渡し・PR 用の git fetch) は
 vsock で行う。網を通らないので nft にも DNS にも関わらず、ssh も使わない。VM 内では
 quagent 自身が作業ユーザーの権限で vsock を待ち受ける (run ごとに cloud-init の
-seed で持ち込むので、quagent を更新してもイメージの焼き直しは要らない)。
+seed で持ち込むので、quagent を更新してもイメージの焼き直しは要らない。接続は host
+からのものだけ受ける)。
 なお vsock では VM から host の vsock の待ち受けにも接続できる (ふつうの host
 には無いが、vsock で待ち受けるサービスを動かしているなら VM から届く)。
 sshd は既定で止める (systemd-ssh-generator が作る vsock / unix ソケットの sshd も

@@ -273,8 +273,9 @@ runcmd:
 	}
 
 	if !o.Interactive {
-		// 端末が無い (自動テスト等): tmux を使わず stdin をそのまま VM のシェルへ流す
-		_ = g.stream("cd /work && exec bash -l", os.Stdin, os.Stdout, os.Stderr)
+		// 端末が無い (自動テスト等): tmux を使わず stdin をそのまま VM のシェルへ流す。
+		// 出力先が端末のこともあるので、OSC 52 (クリップボード操作) は抜き取って捨てる
+		_ = g.stream("cd /work && exec bash -l", os.Stdin, guest.StripClipboard(os.Stdout), guest.StripClipboard(os.Stderr))
 		return nil
 	}
 

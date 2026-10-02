@@ -69,3 +69,12 @@ func TestOSCFilterBounded(t *testing.T) {
 		t.Fatalf("out=%q events=%+v", out.String(), evs)
 	}
 }
+
+func TestStripClipboardDropsOSC52(t *testing.T) {
+	var out bytes.Buffer
+	w := StripClipboard(&out)
+	_, _ = w.Write([]byte("a\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte("x")) + "\x07b"))
+	if out.String() != "ab" {
+		t.Fatalf("out = %q", out.String())
+	}
+}

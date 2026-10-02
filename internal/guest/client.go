@@ -151,11 +151,8 @@ func Interactive(cid uint32, argv []string, dir string, onClip func(ClipboardEve
 			}
 		}
 	}()
-	var out io.Writer = os.Stdout
-	if onClip != nil {
-		out = newOSCFilter(os.Stdout, onClip)
-	}
-	err = doExec(c, h, os.Stdin, out, nil, fw)
+	// onClip が無くても OSC 52 は抜き取って捨てる (host の端末に届かせない)
+	err = doExec(c, h, os.Stdin, newOSCFilter(os.Stdout, onClip), nil, fw)
 	var ee *ExitError
 	if errors.As(err, &ee) {
 		return nil // 端末の中身として終了コードは見せ終わっている

@@ -43,6 +43,9 @@ const (
 	stOSCEsc // OSC の中で ESC を見た (ST = ESC \ の途中かもしれない)
 )
 
+// StripClipboard は w へ流す出力から OSC 52 を抜き取って捨てる io.Writer を返す。
+func StripClipboard(w io.Writer) io.Writer { return newOSCFilter(w, nil) }
+
 func newOSCFilter(out io.Writer, onClip func(ClipboardEvent)) *oscFilter {
 	return &oscFilter{out: out, onClip: onClip}
 }

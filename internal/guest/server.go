@@ -36,7 +36,24 @@ func Serve(relayPort int, hostPort uint32) error {
 		log.Printf("127.0.0.1:%d -> host の窓口 (vsock :%d) を中継", relayPort, hostPort)
 		go relay(rl, func() (net.Conn, error) { return vsock.Dial(vsock.Host, hostPort, nil) })
 	}
-	return serve(l)
+	return serve(&hostOnly{l})
+}
+
+// hostOnly は host (CID 2) 以外からの接続を切る。ほかの VM や、VM の中から自分自身への
+// vsock の接続はここで落とす。
+type hostOnly struct{ net.Listener }
+
+func (l *hostOnly) Accept() (net.Conn, error) {
+	for {
+		c, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		if a, ok := c.RemoteAddr().(*vsock.Addr); ok && a.ContextID == vsock.Host {
+			return c, nil
+		}
+		c.Close()
+	}
 }
 
 // relay は l への接続を dial 先へそのまま中継する (同時 64 本まで)。
@@ -122,7 +139,7 @@ func handle(c net.Conn, env []string) {
 	defer c.Close()
 	br := bufio.NewReader(c)
 	fw := &frameWriter{w: c}
-	line, err := br.ReadBytes('\n')
+	line, err := readLine(br, maxFrame)
 	if err != nil {
 		return
 	}
@@ -146,6 +163,21 @@ func handle(c net.Conn, env []string) {
 		runTTY(cmd, h, br, fw)
 	} else {
 		runPipe(cmd, br, fw)
+	}
+}
+
+// readLine は改行までを読む。max バイトを超えたらエラー (改行の無い送りつけで膨らませない)。
+func readLine(br *bufio.Reader, max int) ([]byte, error) {
+	var line []byte
+	for {
+		chunk, err := br.ReadSlice('\n')
+		if len(line)+len(chunk) > max {
+			return nil, errors.New("ヘッダが長すぎる")
+		}
+		line = append(line, chunk...)
+		if err != bufio.ErrBufferFull {
+			return line, err
+		}
 	}
 }
 
