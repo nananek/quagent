@@ -171,7 +171,7 @@ func (p *Publisher) Publish(req Request) (Result, error) {
 	// コミットのままであることを条件にする (利用者のブランチを上書きしない)
 	lease := "--force-with-lease=" + signedRef + ":" + prevSigned
 	if _, err := p.git(p.bare, "push", "-q", lease, origin, signed+":"+signedRef); err != nil {
-		return Result{}, fmt.Errorf("push に失敗 (リモートに同名のブランチが既にある可能性): %w", err)
+		return Result{}, fmt.Errorf("push に失敗 (リモートに同名のブランチが既にあるなら上書きしない): %w", err)
 	}
 	if _, err := p.git(p.bare, "update-ref", signedRef, signed); err != nil {
 		return Result{}, err
