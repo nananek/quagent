@@ -164,8 +164,8 @@ provider ID は opencode の provider ID と揃える。秘密の取り出し方
 
 push 先は `origin` で固定。保護ブランチ (既定: main / master / develop、
 `config.json` の `pr.protected_branches` で変更可) には push しない。リモートに
-同名のブランチが既にあれば上書きしない。author はエージェント、committer は
-host の利用者になる。
+同名のブランチが既にあれば上書きしない。コミットは利用者の名前で作られる (VM には
+host の git の `user.name` / `user.email` だけを渡す。署名鍵や認証の設定は渡さない)。
 
 ## 現状
 

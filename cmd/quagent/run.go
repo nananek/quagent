@@ -448,6 +448,10 @@ func copyRepo(g vmGuest, repo, work string) error {
 			return err
 		}
 	}
+	name, email, err := gitIdentity(repo)
+	if err != nil {
+		return err
+	}
 	f, err := os.Open(bundle)
 	if err != nil {
 		return err
@@ -456,18 +460,36 @@ func copyRepo(g vmGuest, repo, work string) error {
 	if out, err := g.sh("cat > /tmp/repo.bundle", f); err != nil {
 		return fmt.Errorf("bundle の転送に失敗: %v: %s", err, out)
 	}
+	// コミットは利用者の名前で作る (host と同じ user.name / user.email)。
+	// 署名は PR 化のときに host で行うので、VM 内では署名しない。
 	script := `set -e
+git config --global user.name ` + shellQuote(name) + `
+git config --global user.email ` + shellQuote(email) + `
+git config --global commit.gpgsign false
+git config --global tag.gpgsign false
 cd /work
 git init -q -b quagent-init
 git fetch -q /tmp/repo.bundle '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*' '+refs/remotes/*:refs/remotes/*'
 git checkout -q ` + shellQuote(strings.TrimSpace(string(head))) + `
-rm /tmp/repo.bundle
-git config --global user.name quagent
-git config --global user.email quagent@localhost`
+rm /tmp/repo.bundle`
 	if out, err := g.sh(script, nil); err != nil {
 		return fmt.Errorf("VM 内での取り込みに失敗: %v: %s", err, out)
 	}
 	return nil
+}
+
+// gitIdentity は repo で使われる user.name / user.email を返す (repo ごとの設定があれば
+// そちら)。VM に渡すのはこの 2 つだけで、署名や認証の設定は渡さない。
+func gitIdentity(repo string) (name, email string, err error) {
+	get := func(key string) string {
+		out, _ := exec.Command("git", "-C", repo, "config", "--get", key).Output()
+		return strings.TrimSpace(string(out))
+	}
+	name, email = get("user.name"), get("user.email")
+	if name == "" || email == "" {
+		return "", "", fmt.Errorf("host の git に user.name / user.email が設定されていない (VM 内のコミットに使う)")
+	}
+	return name, email, nil
 }
 
 func shellQuote(s string) string {
