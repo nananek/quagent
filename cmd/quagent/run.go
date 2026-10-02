@@ -117,8 +117,9 @@ bootcmd:
 	qemu := vm.QemuArgv(vm.QemuOpts{
 		Disk: overlay, Seed: seed, CPUs: o.CPUs, MemMiB: o.MemMiB,
 		ConsoleLog: filepath.Join(work, "console.log"),
-		Netdev: fmt.Sprintf("dns=%s,hostfwd=tcp:10.0.2.100:%d-:22,%s",
-			dns, port, hostsvc.Guestfwd(filepath.Join(work, "host.sock"))),
+		// DNS は qemu 既定の 10.0.2.3 -> 子 netns の自前 DNS。子 netns は IPv4 のみ。
+		Netdev: fmt.Sprintf("ipv6=off,hostfwd=tcp:10.0.2.100:%d-:22,%s",
+			port, hostsvc.Guestfwd(filepath.Join(work, "host.sock"))),
 	})
 	logf("VM を起動 (base=%s, allow=%v)", filepath.Base(base), o.Allow)
 	l, err := netns.Start(netns.Spec{

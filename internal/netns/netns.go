@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -28,9 +29,9 @@ type Spec struct {
 	WorkDir string `json:"work_dir"`
 	// SSHPort は host 127.0.0.1 で待ち受け、子 netns の同ポートへ中継する。
 	SSHPort int `json:"ssh_port"`
-	// DNS は host の実 IPv4 リゾルバ。netns と guest の両方がこれを使う。
+	// DNS は上流のリゾルバ。子 netns 内の DNS サーバーが許可ドメインの問い合わせだけ転送する。
 	DNS string `json:"dns"`
-	// Allow は egress を許すドメイン (TCP/UDP 443)。
+	// Allow は最初から期限なしで許可するドメインのパターン。
 	Allow []string `json:"allow"`
 	// QemuArgv は子 netns 内で実行する qemu のコマンドライン。
 	QemuArgv []string `json:"qemu_argv"`
@@ -42,6 +43,13 @@ type Launcher struct {
 	cmd   *exec.Cmd
 	stdin io.WriteCloser
 	done  chan error
+
+	// Denied には許可外として名前解決を拒否したドメインが流れる (取りこぼしは捨てる)。
+	Denied chan string
+
+	mu      sync.Mutex
+	seq     int
+	waiters map[int]chan struct{}
 }
 
 func (s Spec) file(name string) string { return filepath.Join(s.WorkDir, name) }
@@ -67,8 +75,11 @@ func Start(spec Spec) (*Launcher, error) {
 	defer logf.Close()
 
 	cmd := exec.Command("unshare", "-Urm", self, ChildCommand, specPath)
-	cmd.Stdout = logf
 	cmd.Stderr = logf
+	events, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
 	// 端末の Ctrl-C で巻き添えにならないよう別プロセスグループにし、後始末は親が握る。
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := cmd.StdinPipe()
@@ -78,9 +89,67 @@ func Start(spec Spec) (*Launcher, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	l := &Launcher{spec: spec, cmd: cmd, stdin: stdin, done: make(chan error, 1)}
-	go func() { l.done <- cmd.Wait() }()
+	l := &Launcher{
+		spec: spec, cmd: cmd, stdin: stdin, done: make(chan error, 1),
+		Denied: make(chan string, 64), waiters: map[int]chan struct{}{},
+	}
+	evDone := make(chan struct{})
+	go func() {
+		defer close(evDone)
+		dec := json.NewDecoder(events)
+		for {
+			var ev Event
+			if err := dec.Decode(&ev); err != nil {
+				return
+			}
+			l.handleEvent(ev)
+		}
+	}()
+	go func() {
+		<-evDone
+		l.done <- cmd.Wait()
+	}()
 	return l, nil
+}
+
+func (l *Launcher) handleEvent(ev Event) {
+	if ev.Applied != 0 {
+		l.mu.Lock()
+		if ch, ok := l.waiters[ev.Applied]; ok {
+			close(ch)
+			delete(l.waiters, ev.Applied)
+		}
+		l.mu.Unlock()
+	}
+	if ev.Denied != "" {
+		select {
+		case l.Denied <- ev.Denied:
+		default:
+		}
+	}
+}
+
+// SetGrants は許可の一覧を丸ごと差し替え、nft に反映されるまで待つ。
+func (l *Launcher) SetGrants(gs []Grant) error {
+	l.mu.Lock()
+	l.seq++
+	seq := l.seq
+	ch := make(chan struct{})
+	l.waiters[seq] = ch
+	b, err := json.Marshal(control{Seq: seq, Grants: gs})
+	if err == nil {
+		_, err = l.stdin.Write(append(b, '\n'))
+	}
+	l.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("ランチャへの送信に失敗: %w", err)
+	}
+	select {
+	case <-ch:
+		return nil
+	case <-time.After(10 * time.Second):
+		return fmt.Errorf("ランチャが許可の反映に応答しない")
+	}
 }
 
 // Failed はランチャが既に終了していればその理由を返す。
@@ -111,7 +180,9 @@ func (l *Launcher) WaitReady(timeout time.Duration) error {
 
 // Stop はランチャに終了を伝え (stdin を閉じる)、qemu ごと止める。
 func (l *Launcher) Stop() {
+	l.mu.Lock()
 	l.stdin.Close()
+	l.mu.Unlock()
 	select {
 	case <-l.done:
 		return
