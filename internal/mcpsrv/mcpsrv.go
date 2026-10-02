@@ -34,8 +34,17 @@ Only one request can be pending at a time: wait for its result (wait_network_acc
 before sending another. After a denial or a timeout, the same domains cannot be
 requested again for 10 minutes.
 
-When you no longer need a domain, call release_network_access. Already-open
-connections keep working after release or expiry; only new connections stop.`
+Releasing is your obligation: as soon as the work that needed a domain is done,
+call release_network_access for it, even if the run continues. Session-long and
+previously trusted approvals never expire on their own, so they stay open until
+you release them. Already-open connections keep working after release or expiry;
+only new connections stop.
+
+Environment: you work as an unprivileged user in /work and there is no sudo, so
+system packages cannot be installed. Rootless Docker is normally available
+(DOCKER_HOST is set): use containers for tools or services you would otherwise
+install system-wide. Pulling images needs network access to the registry
+(e.g. registry-1.docker.io and production.cloudflare.docker.com).`
 
 type requestIn struct {
 	Domains []string `json:"domains" jsonschema:"Domain names to allow, e.g. [\"pypi.org\", \"files.pythonhosted.org\"]. Use \"*.example.com\" for all subdomains of example.com. List every domain the task needs in one request."`
@@ -74,11 +83,11 @@ func describe(r access.Result) resultOut {
 	case access.Approved:
 		switch {
 		case r.Auto:
-			out.Message = "Approved without review (previously trusted). Release when done."
+			out.Message = "Approved without review (previously trusted). This never expires: release it as soon as you are done."
 		case r.Kind == access.Once:
-			out.Message = fmt.Sprintf("Approved for new connections until %s. Release when done.", r.ExpiresAt)
+			out.Message = fmt.Sprintf("Approved for new connections until %s. Release it as soon as you are done, even before then.", r.ExpiresAt)
 		default:
-			out.Message = "Approved for the rest of this session. Release when done."
+			out.Message = "Approved for the rest of this session. This does not expire: release it as soon as you are done."
 		}
 	case access.Denied:
 		out.Message = "Denied by the reviewer. These domains cannot be requested again for 10 minutes; find another way or explain to the user."
@@ -114,7 +123,8 @@ func Handler(m *access.Manager, pub PRPublisher, logf func(string)) http.Handler
 		Name: "request_network_access",
 		Description: "Ask the human reviewer to allow outbound connections to some domains. " +
 			"Blocks for up to ~50s; if still undecided returns status=pending, then call wait_network_access. " +
-			"Statuses: approved, denied, question (reviewer asks something; answer it in a new request's reason), timeout (no response in 10 minutes; treated as denied), pending.",
+			"Statuses: approved, denied, question (reviewer asks something; answer it in a new request's reason), timeout (no response in 10 minutes; treated as denied), pending. " +
+			"Once the work that needed the domains is done, release them with release_network_access.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in requestIn) (*mcp.CallToolResult, resultOut, error) {
 		r, err := m.Submit(in.Domains, in.Reason)
 		if err != nil {
@@ -140,7 +150,7 @@ func Handler(m *access.Manager, pub PRPublisher, logf func(string)) http.Handler
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "release_network_access",
-		Description: "Give up access to domains you no longer need. Do this as soon as you are done with them.",
+		Description: "Give up access to domains you no longer need. You are expected to do this as soon as the work that needed them is done.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in releaseIn) (*mcp.CallToolResult, releaseOut, error) {
 		released, err := m.Release(in.Domains)
 		if err != nil {
@@ -151,7 +161,7 @@ func Handler(m *access.Manager, pub PRPublisher, logf func(string)) http.Handler
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "list_network_access",
-		Description: "List the domains currently allowed for new connections.",
+		Description: "List the domains currently allowed for new connections. Release any you no longer need.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, listOut, error) {
 		var out listOut
 		for d, exp := range m.Grants() {
