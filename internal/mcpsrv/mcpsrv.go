@@ -11,6 +11,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/nananek/quagent/internal/access"
+	"github.com/nananek/quagent/internal/pr"
 )
 
 // Path は窓口上の MCP エンドポイント。
@@ -87,8 +88,20 @@ func describe(r access.Result) resultOut {
 	return out
 }
 
+type prIn struct {
+	Branch string `json:"branch" jsonschema:"Branch in /work that holds your commits. Must not be a protected branch (main, master, develop by default)."`
+	Title  string `json:"title" jsonschema:"Pull request title"`
+	Body   string `json:"body,omitempty" jsonschema:"Pull request description (markdown)"`
+	Base   string `json:"base,omitempty" jsonschema:"Branch to merge into. Defaults to the repository's default branch."`
+}
+
+// PRPublisher は PR の作成・更新 (pr.Publisher)。
+type PRPublisher interface {
+	Publish(pr.Request) (pr.Result, error)
+}
+
 // Handler は MCP サーバーの HTTP ハンドラを返す。
-func Handler(m *access.Manager) http.Handler {
+func Handler(m *access.Manager, pub PRPublisher, logf func(string)) http.Handler {
 	s := mcp.NewServer(&mcp.Implementation{Name: "quagent", Version: "0.1.0"},
 		&mcp.ServerOptions{Instructions: instructions})
 
@@ -146,6 +159,25 @@ func Handler(m *access.Manager) http.Handler {
 		sort.Slice(out.Grants, func(i, j int) bool { return out.Grants[i].Domain < out.Grants[j].Domain })
 		out.Grants = nonNil(out.Grants)
 		return nil, out, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "create_pull_request",
+		Description: "Publish a branch of /work as a GitHub pull request. Commit your work on a non-protected branch first. " +
+			"The host fetches the branch, signs the commits, pushes it and opens the PR (you have no GitHub credentials and cannot push yourself). " +
+			"Call again with the same branch after adding commits to update the PR. Do not rewrite already-published commits.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in prIn) (*mcp.CallToolResult, pr.Result, error) {
+		res, err := pub.Publish(pr.Request{Branch: in.Branch, Title: in.Title, Body: in.Body, Base: in.Base})
+		if err != nil {
+			logf("PR の作成に失敗 (" + in.Branch + "): " + err.Error())
+			return nil, pr.Result{}, err
+		}
+		verb := "更新"
+		if res.Created {
+			verb = "作成"
+		}
+		logf(fmt.Sprintf("PR を%s: %s (署名 %d コミット) %s", verb, in.Branch, res.Signed, res.URL))
+		return nil, res, nil
 	})
 
 	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, nil)

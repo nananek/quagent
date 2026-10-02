@@ -21,6 +21,7 @@ import (
 	"github.com/nananek/quagent/internal/mcpsrv"
 	"github.com/nananek/quagent/internal/netns"
 	"github.com/nananek/quagent/internal/paths"
+	"github.com/nananek/quagent/internal/pr"
 	"github.com/nananek/quagent/internal/vm"
 )
 
@@ -149,7 +150,16 @@ bootcmd:
 	}
 	defer con.Close()
 	go relayDenied(l, con)
-	svc.Mux.Handle(mcpsrv.Path, mcpsrv.Handler(mgr))
+	protected := cfg.PR.ProtectedBranches
+	if len(protected) == 0 {
+		protected = pr.DefaultProtected
+	}
+	publisher := &pr.Publisher{
+		Repo: repo, Work: work, Protected: protected, GH: pr.RunGH,
+		GuestURL: fmt.Sprintf("ssh://%s@127.0.0.1:%d/work", vm.GuestUser, port),
+		SSHCmd:   shellJoin(append([]string{"ssh"}, vm.SSH{Port: port, Key: key}.Opts()...)),
+	}
+	svc.Mux.Handle(mcpsrv.Path, mcpsrv.Handler(mgr, publisher, con.Log))
 
 	// 待機中の Ctrl-C でも後始末を通す。対話中は ssh が pty で受けるので届かない。
 	sigs := make(chan os.Signal, 1)

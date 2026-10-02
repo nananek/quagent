@@ -18,6 +18,15 @@ type Config struct {
 	Providers map[string]Provider `json:"providers"`
 	// Opencode は VM 内の opencode の設定。
 	Opencode Opencode `json:"opencode"`
+	// PR は PR 作成の設定。
+	PR PR `json:"pr"`
+}
+
+// PR は PR 作成の設定。
+type PR struct {
+	// ProtectedBranches はエージェントに push させないブランチ。
+	// 未指定なら main / master / develop。
+	ProtectedBranches []string `json:"protected_branches,omitempty"`
 }
 
 // Opencode は VM 内の opencode の設定。

@@ -91,6 +91,22 @@ provider ID は opencode の provider ID と揃える。秘密の取り出し方
 秘密は run 開始時に一度だけ取り出す。`opencode.model` は VM 内 opencode の既定
 モデルで、`providers` に挙げた provider のものを指定する。
 
+## PR の作成と署名
+
+エージェントは `/work` の保護されていないブランチにコミットし、MCP の
+`create_pull_request` で PR 化を依頼する。gh のトークンも署名鍵も VM には入らない。
+
+1. host が ssh で guest の `/work` からブランチを取り込む (run 専用の bare repo、
+   hooks は無効)
+2. 新しいコミットだけを host の git 設定の鍵で署名し直す (中身は変えない。
+   既に push したコミットは書き換えないので、PR の更新でハッシュは変わらない)
+3. host の repo の `origin` へ push し、`gh` で PR を作る (既にあれば更新)
+
+push 先は `origin` で固定。保護ブランチ (既定: main / master / develop、
+`config.json` の `pr.protected_branches` で変更可) には push しない。リモートに
+同名のブランチが既にあれば上書きしない。author はエージェント、committer は
+host の利用者になる。
+
 ## 現状
 
 今後: PR の作成と署名、起動時 TUI、OS ごとのイメージ (Debian / Arch)。

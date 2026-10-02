@@ -122,6 +122,9 @@ type SSH struct {
 	Key  string
 }
 
+// Opts は ssh/scp 共通のオプション (鍵と host key の扱い)。
+func (s SSH) Opts() []string { return s.commonOpts() }
+
 func (s SSH) commonOpts() []string {
 	return []string{
 		"-o", "BatchMode=yes",
