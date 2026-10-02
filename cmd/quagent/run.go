@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nananek/quagent/internal/hostsvc"
 	"github.com/nananek/quagent/internal/image"
 	"github.com/nananek/quagent/internal/netns"
 	"github.com/nananek/quagent/internal/paths"
@@ -67,8 +68,13 @@ func run(o runOpts) error {
 	if err != nil {
 		return err
 	}
-	userData := fmt.Sprintf("#cloud-config\nusers:\n  - name: %s\n    ssh_authorized_keys: [%q]\n",
-		vm.GuestUser, strings.TrimSpace(string(pub)))
+	userData := fmt.Sprintf(`#cloud-config
+users:
+  - name: %s
+    ssh_authorized_keys: [%q]
+bootcmd:
+  - echo '%s %s' >> /etc/hosts
+`, vm.GuestUser, strings.TrimSpace(string(pub)), hostsvc.GuestAddr, hostsvc.GuestHost)
 	seed, err := vm.MakeSeed(work, "quagent-"+filepath.Base(work), "quagent", userData)
 	if err != nil {
 		return err
@@ -78,11 +84,19 @@ func run(o runOpts) error {
 		return err
 	}
 
+	// guest からの唯一の窓口 (guestfwd -> unix socket)
+	svc := hostsvc.New(filepath.Join(work, "host.sock"))
+	if err := svc.Start(); err != nil {
+		return err
+	}
+	defer svc.Stop()
+
 	// qemu の hostfwd は子 netns 側 (slirp4netns の tap0 = 10.0.2.100) で受ける。
 	qemu := vm.QemuArgv(vm.QemuOpts{
 		Disk: overlay, Seed: seed, CPUs: o.CPUs, MemMiB: o.MemMiB,
 		ConsoleLog: filepath.Join(work, "console.log"),
-		Netdev:     fmt.Sprintf("dns=%s,hostfwd=tcp:10.0.2.100:%d-:22", dns, port),
+		Netdev: fmt.Sprintf("dns=%s,hostfwd=tcp:10.0.2.100:%d-:22,%s",
+			dns, port, hostsvc.Guestfwd(filepath.Join(work, "host.sock"))),
 	})
 	logf("VM を起動 (base=%s, allow=%v)", filepath.Base(base), o.Allow)
 	l, err := netns.Start(netns.Spec{
