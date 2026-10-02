@@ -33,7 +33,7 @@ func Register(mux *http.ServeMux, providers map[string]config.Provider, logger *
 		if err != nil {
 			return nil, fmt.Errorf("provider %s: 秘密を取り出せない: %w", id, err)
 		}
-		mux.Handle(Prefix+id+"/", handler(id, up, p.HeaderName(), p.HeaderPrefix()+secret, logger))
+		mux.Handle(Prefix+id+"/", http.MaxBytesHandler(handler(id, up, p.HeaderName(), p.HeaderPrefix()+secret, logger), 32<<20))
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)

@@ -185,7 +185,11 @@ func Handler(m *access.Manager, pub PRPublisher, logf func(string)) http.Handler
 		return nil, res, nil
 	})
 
-	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, nil)
+	// セッションを覚えない (作っては捨てるを繰り返されても host のメモリが増えない)。
+	// ツールはセッションの状態を使わない。リクエストの大きさも絞る。
+	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s },
+		&mcp.StreamableHTTPOptions{Stateless: true})
+	return http.MaxBytesHandler(h, 1<<20)
 }
 
 func nonNil[T any](s []T) []T {
