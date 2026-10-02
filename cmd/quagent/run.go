@@ -143,10 +143,11 @@ bootcmd:
   - echo '127.0.0.1 %s' >> /etc/hosts
   # 外へは出られないので NTP は使えない (時計は KVM が合わせる)。拒否の記録が並ぶだけなので止める
   - [sh, -c, "systemctl mask --now systemd-timesyncd.service 2>/dev/null; true"]
+  - [sh, -c, "%s"]
 runcmd:
 %s  - [sh, -c, "mkdir -p /run/quagent-seed && mount -o ro /dev/disk/by-label/cidata /run/quagent-seed && install -m 755 /run/quagent-seed/quagent-guest /usr/local/bin/quagent-guest && umount /run/quagent-seed"]
   - [systemd-run, --unit=quagent-guest, --uid=%s, -p, Restart=always, /usr/local/bin/quagent-guest, %s, "%d"]
-`, hostsvc.GuestHost, mountCmds(shares), vm.GuestUser, guestCommand, svc.Port)
+`, hostsvc.GuestHost, maskCmd(sshUnits(o.SSH)), mountCmds(shares), vm.GuestUser, guestCommand, svc.Port)
 	var sshPort int
 	var sshKey string
 	if o.SSH {
@@ -161,9 +162,7 @@ runcmd:
 		if err != nil {
 			return err
 		}
-		userData += fmt.Sprintf("users:\n  - name: %s\n    ssh_authorized_keys: [%q]\n", vm.GuestUser, strings.TrimSpace(string(pub)))
-	} else {
-		userData += "  - [sh, -c, \"systemctl disable --now ssh.service ssh.socket sshd.service sshd.socket 2>/dev/null; true\"]\n"
+		userData += fmt.Sprintf("ssh_pwauth: false\nusers:\n  - name: %s\n    ssh_authorized_keys: [%q]\n", vm.GuestUser, strings.TrimSpace(string(pub)))
 	}
 	seed, err := vm.MakeSeed(work, "quagent-"+filepath.Base(work), "quagent", userData,
 		map[string]string{"quagent-guest": self})
@@ -257,6 +256,9 @@ runcmd:
 	if out, err := g.sh("cloud-init status --wait", nil); err != nil {
 		return fmt.Errorf("cloud-init が失敗: %v: %s", err, out)
 	}
+	if err := checkSSHOff(g, sshUnits(o.SSH), !o.SSH); err != nil {
+		return err
+	}
 
 	logf("repo を /work へコピー: %s", repo)
 	if err := copyRepo(g, repo, work, markKey); err != nil {
@@ -279,6 +281,41 @@ runcmd:
 	agent := g.interactiveArgv(ag.command)
 	session := "quagent-" + filepath.Base(work)
 	return runTmux(session, agent, []string{self, consoleCommand, filepath.Join(work, "console.sock")}, con.Quit)
+}
+
+// sshUnits は VM で止める ssh のユニット。distro で名前が違う (Debian は ssh.*、
+// Arch は sshd.*) ので両方挙げる。systemd-ssh-generator が vsock や unix ソケットを
+// 見つけて作る sshd-vsock.socket / sshd-unix-local.socket は --ssh でも要らない。
+func sshUnits(sshOn bool) []string {
+	units := []string{"sshd-vsock.socket", "sshd-unix-local.socket"}
+	if !sshOn {
+		units = append(units, "ssh.service", "ssh.socket", "sshd.service", "sshd.socket")
+	}
+	return units
+}
+
+// maskCmd は units を 1 つずつ mask して止める sh スクリプト。まとめて渡すと
+// 存在しないユニットや別名 (Debian の sshd.service) が 1 つあるだけで全体が止まらない。
+// 止まったかは host が checkSSHOff で確かめるので、ここでは失敗を問わない。
+func maskCmd(units []string) string {
+	return "for u in " + strings.Join(units, " ") + "; do systemctl mask --now $u; done 2>/dev/null; true"
+}
+
+// checkSSHOff は units が動いていないこと (noPort なら 22 番の待ち受けも無いこと) を
+// 確かめる。止められていなければ、ssh を開けたまま進めずに起動をやめる。
+func checkSSHOff(g vmGuest, units []string, noPort bool) error {
+	script := "for u in " + strings.Join(units, " ") + "; do systemctl is-active --quiet $u && echo $u; done"
+	if noPort {
+		script += "; ss -Hln -A inet,vsock | awk '$5 ~ /:22$/ {print \"listen \" $5}'"
+	}
+	out, err := g.sh(script+"; true", nil)
+	if err != nil {
+		return fmt.Errorf("ssh の停止を確かめられない: %v: %s", err, out)
+	}
+	if s := strings.TrimSpace(string(out)); s != "" {
+		return fmt.Errorf("VM の ssh を止められなかった:\n%s", s)
+	}
+	return nil
 }
 
 // lockRun は作業ディレクトリのロックを取る。プロセスが終われば (強制終了でも) 外れる。
