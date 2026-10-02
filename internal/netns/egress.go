@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/netip"
 	"sort"
 	"strings"
 	"sync"
@@ -39,7 +40,9 @@ type Event struct {
 
 // egress は許可の状態と nft の allow set を同期させる。
 //
-// 許可されたドメインの DNS 応答で見た IP だけを allow set に入れる。set は
+// 許可されたドメインの DNS 応答で見た IP だけを allow set に入れる (内部向けの IP は
+// 除く。internalIP を参照)。CNAME の先の名前は許可しない (応答に含まれる A レコードは
+// 問い合わせた名前の分として扱うので、先の名前を別に引く必要はない)。set は
 // 許可・応答・期限切れのたびに作り直す。許可は「新規接続を始めてよいか」の
 // 判断なので、set から外れても確立済みの接続は切れない (ct established)。
 type egress struct {
@@ -49,7 +52,6 @@ type egress struct {
 	mu      sync.Mutex
 	grants  []Grant
 	seen    map[string]map[string]bool // ドメイン -> 応答で見た IP
-	alias   map[string]string          // CNAME の別名 -> 元のドメイン
 	applied string
 
 	// 拒否のログ・通知の量を抑える (ランダムな名前の連打でログを膨らませない)
@@ -68,22 +70,47 @@ const (
 
 func newEgress(nft func(string) error, events *eventWriter, initial []Grant) *egress {
 	return &egress{nft: nft, events: events, grants: initial,
-		seen: map[string]map[string]bool{}, alias: map[string]string{}}
+		seen: map[string]map[string]bool{}}
 }
 
-// matchLocked は name (またはその CNAME の元をたどった名前) が有効な許可に当たるかを返す。
+// internalNets は通常の外向き接続には要らない宛先 (LAN・loopback・link-local
+// (クラウドのメタデータを含む)・CGNAT (Tailscale を含む)・予約・マルチキャスト)。
+var internalNets = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+}
+
+// internalIP は ip が internalNets に入るかを返す。許可したドメインの応答でも
+// これらは allow set に入れない (応答を操れる者が DNS だけで内側へ届かせないように)。
+func internalIP(ip net.IP) bool {
+	a, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return true
+	}
+	a = a.Unmap()
+	for _, p := range internalNets {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchLocked は name が有効な許可に当たるかを返す。
 func (e *egress) matchLocked(name string, now time.Time) bool {
-	for range 16 { // CNAME の循環に備えて上限を付ける
-		for _, g := range e.grants {
-			if g.active(now) && Matches(g.Pattern, name) {
-				return true
-			}
+	for _, g := range e.grants {
+		if g.active(now) && Matches(g.Pattern, name) {
+			return true
 		}
-		parent, ok := e.alias[name]
-		if !ok {
-			return false
-		}
-		name = parent
 	}
 	return false
 }
@@ -115,17 +142,15 @@ func (e *egress) denied(name string) {
 }
 
 // onAnswer は DNS 応答を guest に返す前に呼ばれ、IP を set に反映し終えてから戻る。
-func (e *egress) onAnswer(name string, ips []net.IP, cnames []string) {
+func (e *egress) onAnswer(name string, ips []net.IP) {
+	var blocked []string
+	defer func() {
+		for _, b := range blocked {
+			e.denied(b)
+		}
+	}()
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	// 許可された名前の応答に出た CNAME の先は、元の名前の許可に従う
-	prev := name
-	for _, c := range cnames {
-		if c != prev {
-			e.alias[c] = prev
-			prev = c
-		}
-	}
 	m := e.seen[name]
 	if m == nil {
 		if len(e.seen) >= maxSeen {
@@ -139,6 +164,11 @@ func (e *egress) onAnswer(name string, ips []net.IP, cnames []string) {
 		e.seen[name] = m
 	}
 	for _, ip := range ips {
+		if internalIP(ip) {
+			log.Printf("dns: %s の応答の内部向け IP %s は通さない", name, ip)
+			blocked = append(blocked, fmt.Sprintf("%s -> %s (内部向けの IP は通さない)", name, ip))
+			continue
+		}
 		m[ip.String()] = true
 	}
 	e.syncLocked()

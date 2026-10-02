@@ -62,7 +62,7 @@ type dnsServer struct {
 	sem      chan struct{}
 	upstream string
 	allowed  func(name string) bool
-	onAnswer func(name string, ips []net.IP, cnames []string)
+	onAnswer func(name string, ips []net.IP)
 	onDenied func(name string)
 }
 
@@ -150,8 +150,8 @@ func (s *dnsServer) handle(q []byte, proto string) []byte {
 		log.Printf("dns: 上流への転送に失敗 %s: %v", name, err)
 		return reply(hdr, qs, dnsmessage.RCodeServerFailure)
 	}
-	if ips, cnames := answers(resp); len(ips) > 0 || len(cnames) > 0 {
-		s.onAnswer(name, ips, cnames)
+	if ips := answers(resp, name); len(ips) > 0 {
+		s.onAnswer(name, ips)
 	}
 	return resp
 }
@@ -187,40 +187,48 @@ func forward(upstream string, q []byte, proto string) ([]byte, error) {
 	return resp, err
 }
 
-// answers は応答の A レコードの IP と CNAME の別名を返す。
-func answers(msg []byte) (ips []net.IP, cnames []string) {
+// answers は応答のうち、name から CNAME をたどった名前の A レコードの IP を返す。
+// 所有者がその鎖に無いレコードは、問い合わせた名前の答えではないので使わない。
+func answers(msg []byte, name string) []net.IP {
 	var p dnsmessage.Parser
 	if _, err := p.Start(msg); err != nil {
-		return nil, nil
+		return nil
 	}
 	if err := p.SkipAllQuestions(); err != nil {
-		return nil, nil
+		return nil
 	}
+	var ips []net.IP
+	chain := map[string]bool{name: true}
 	for {
 		h, err := p.AnswerHeader()
 		if err != nil {
 			break
 		}
+		owner := chain[normalize(h.Name.String())]
 		switch h.Type {
 		case dnsmessage.TypeA:
 			a, err := p.AResource()
 			if err != nil {
-				return ips, cnames
+				return ips
 			}
-			ips = append(ips, net.IP(a.A[:]))
+			if owner {
+				ips = append(ips, net.IP(a.A[:]))
+			}
 		case dnsmessage.TypeCNAME:
 			c, err := p.CNAMEResource()
 			if err != nil {
-				return ips, cnames
+				return ips
 			}
-			cnames = append(cnames, normalize(c.CNAME.String()))
+			if owner {
+				chain[normalize(c.CNAME.String())] = true
+			}
 		default:
 			if err := p.SkipAnswer(); err != nil {
-				return ips, cnames
+				return ips
 			}
 		}
 	}
-	return ips, cnames
+	return ips
 }
 
 func reply(hdr dnsmessage.Header, qs []dnsmessage.Question, rcode dnsmessage.RCode) []byte {

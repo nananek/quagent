@@ -90,7 +90,10 @@ VM からの外向き通信は既定でゼロ。エージェントは MCP (`http
 許可は DNS で判定する。子 netns 内の DNS サーバーが許可ドメイン (完全一致か
 `*.example.com`) の問い合わせだけを上流へ転送し、応答で見た IP だけを nft で
 通す。許可外の名前は解決できず、外部 DNS への直接通信も遮断するので、DNS を
-使った持ち出しもできない。
+使った持ち出しもできない。応答に含まれる CNAME の先の名前は許可に含めない (その
+応答の IP は通る)。許可したドメインでも、応答の IP が LAN・loopback・link-local
+(クラウドのメタデータ)・CGNAT (Tailscale) などの内部向けなら通さない (DNS の
+応答を操れる者に内側へ届かせないため。拒否は承認コンソールに出る)。
 
 host に必要なもの: `qemu-system-x86_64` (KVM)、`qemu-img`、`xorriso`、
 `slirp4netns`、`unshare`/`nsenter`/`prlimit` (util-linux)、`nft`、`git`、`gh`、`tmux`。

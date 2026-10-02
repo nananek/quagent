@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/net/dns/dnsmessage"
 )
 
 func TestMatches(t *testing.T) {
@@ -42,25 +44,57 @@ func lastSet(scripts []string) string {
 	return scripts[len(scripts)-1]
 }
 
-func TestEgressCNAMEFollowsParent(t *testing.T) {
-	e, _ := newTestEgress([]Grant{{Pattern: "deb.debian.org"}})
-	if e.allowed("cdn.fastly.net") {
-		t.Fatal("CNAME を見る前から許可されている")
+func TestEgressCNAMETargetNotAllowed(t *testing.T) {
+	e, scripts := newTestEgress([]Grant{{Pattern: "deb.debian.org"}})
+	// 応答の A は CNAME の先のものでも、問い合わせた名前の分として通る
+	e.onAnswer("deb.debian.org", []net.IP{net.ParseIP("192.0.2.1")})
+	if !strings.Contains(lastSet(*scripts), "192.0.2.1") {
+		t.Fatalf("許可した名前の応答の IP が set に無い: %q", lastSet(*scripts))
 	}
-	e.onAnswer("deb.debian.org", nil, []string{"cdn.fastly.net"})
-	if !e.allowed("cdn.fastly.net") {
-		t.Fatal("許可した名前の CNAME 先が許可されない")
-	}
-	e.setGrants(nil)
+	// CNAME の先の名前そのものは許可していない
 	if e.allowed("cdn.fastly.net") {
-		t.Fatal("元の許可を外しても CNAME 先が許可されたまま")
+		t.Fatal("許可していない CNAME の先が許可された")
+	}
+}
+
+func TestEgressRejectsInternalIPs(t *testing.T) {
+	for _, bad := range []string{
+		"169.254.169.254", "10.0.0.1", "172.16.0.1", "192.168.1.1", "127.0.0.1",
+		"100.100.100.100", "0.0.0.0", "224.0.0.1", "255.255.255.255",
+	} {
+		e, scripts := newTestEgress([]Grant{{Pattern: "approved.example"}})
+		e.onAnswer("approved.example", []net.IP{net.ParseIP(bad), net.ParseIP("192.0.2.1")})
+		if s := lastSet(*scripts); strings.Contains(s, bad) || !strings.Contains(s, "192.0.2.1") {
+			t.Errorf("%s: set = %q", bad, s)
+		}
+	}
+}
+
+func TestAnswersFollowsOwnerChain(t *testing.T) {
+	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{Response: true})
+	_ = b.StartQuestions()
+	_ = b.StartAnswers()
+	hdr := func(name string, typ dnsmessage.Type) dnsmessage.ResourceHeader {
+		return dnsmessage.ResourceHeader{Name: dnsmessage.MustNewName(name), Type: typ, Class: dnsmessage.ClassINET, TTL: 60}
+	}
+	_ = b.CNAMEResource(hdr("www.example.", dnsmessage.TypeCNAME), dnsmessage.CNAMEResource{CNAME: dnsmessage.MustNewName("cdn.example.")})
+	_ = b.AResource(hdr("CDN.example.", dnsmessage.TypeA), dnsmessage.AResource{A: [4]byte{192, 0, 2, 1}})
+	// 鎖に無い名前の A は混ぜられても使わない
+	_ = b.AResource(hdr("other.example.", dnsmessage.TypeA), dnsmessage.AResource{A: [4]byte{192, 0, 2, 9}})
+	msg, err := b.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ips := answers(msg, "www.example")
+	if len(ips) != 1 || ips[0].String() != "192.0.2.1" {
+		t.Fatalf("answers = %v", ips)
 	}
 }
 
 func TestEgressSetFollowsGrants(t *testing.T) {
 	e, scripts := newTestEgress([]Grant{{Pattern: "a.example"}, {Pattern: "b.example"}})
-	e.onAnswer("a.example", []net.IP{net.ParseIP("192.0.2.1"), net.ParseIP("192.0.2.9")}, nil)
-	e.onAnswer("b.example", []net.IP{net.ParseIP("192.0.2.9")}, nil)
+	e.onAnswer("a.example", []net.IP{net.ParseIP("192.0.2.1"), net.ParseIP("192.0.2.9")})
+	e.onAnswer("b.example", []net.IP{net.ParseIP("192.0.2.9")})
 	if s := lastSet(*scripts); !strings.Contains(s, "192.0.2.1") || !strings.Contains(s, "192.0.2.9") {
 		t.Fatalf("set に両方の IP が無い: %q", s)
 	}
@@ -77,7 +111,7 @@ func TestEgressExpiry(t *testing.T) {
 		t.Fatal("期限切れの許可が有効")
 	}
 	e.setGrants([]Grant{{Pattern: "a.example", Expires: time.Now().Add(time.Hour).Unix()}})
-	e.onAnswer("a.example", []net.IP{net.ParseIP("192.0.2.1")}, nil)
+	e.onAnswer("a.example", []net.IP{net.ParseIP("192.0.2.1")})
 	if !strings.Contains(lastSet(*scripts), "192.0.2.1") {
 		t.Fatal("有効な許可の IP が set に無い")
 	}
