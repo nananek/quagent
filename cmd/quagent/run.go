@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -37,7 +38,7 @@ type runOpts struct {
 	Interactive bool
 	// SSH は人が ssh で VM に入れるようにする (quagent 自身の操作は常に vsock)。
 	SSH bool
-	// MountTmp は host の repo の .tmp を VM の /work/.tmp に読み書き可能でマウントする。
+	// MountTmp は host の repo の .tmp と VM の /work/.tmp を受け渡す (tmpdisk.go)。
 	MountTmp bool
 	// NestedVirt は VM の中で KVM を使えるようにする (VM の中で VM を動かす開発用)。
 	NestedVirt bool
@@ -85,14 +86,6 @@ func run(o runOpts) error {
 		return err
 	}
 	g := vmGuest{cid: newCID(), self: self}
-	var shares []vm.Share
-	if o.MountTmp {
-		dir, err := prepareTmp(repo)
-		if err != nil {
-			return err
-		}
-		shares = append(shares, vm.Share{Tag: tmpTag, Path: dir})
-	}
 
 	if err := os.MkdirAll(paths.RunsDir(), 0o755); err != nil {
 		return err
@@ -114,6 +107,17 @@ func run(o runOpts) error {
 		os.RemoveAll(work)
 		logf("VM を破棄した (ログ: %s)", filepath.Join(paths.LogsDir(), filepath.Base(work)))
 	}()
+	var tmpDir string
+	var disks []vm.DataDisk
+	if o.MountTmp {
+		dir, img, err := prepareTmp(repo, work)
+		if err != nil {
+			return err
+		}
+		tmpDir = dir
+		disks = append(disks, vm.DataDisk{Serial: tmpSerial, Path: img})
+		logf("%s を VM の /work/.tmp (容量 %d MiB) と受け渡す (終了時に回収)", dir, tmpDiskSize>>20)
+	}
 
 	// guest からの唯一の窓口 (host の vsock。VM 内の受け口が 127.0.0.1 から中継する)
 	hostLog, err := os.Create(filepath.Join(work, "host.log"))
@@ -147,6 +151,10 @@ func run(o runOpts) error {
 
 	// VM の受け口 (quagent 自身) を seed に入れ、cloud-init で作業ユーザーとして常駐させる。
 	// ssh は既定で止める。--ssh のときだけ使い捨ての鍵で人が入れるようにする。
+	tmpCmd := ""
+	if tmpDir != "" {
+		tmpCmd = tmpRuncmd(strconv.Itoa(vm.GuestUID))
+	}
 	userData := fmt.Sprintf(`#cloud-config
 bootcmd:
   - echo '127.0.0.1 %s' >> /etc/hosts
@@ -156,7 +164,7 @@ bootcmd:
 runcmd:
 %s  - [sh, -c, "mkdir -p /run/quagent-seed && mount -o ro /dev/disk/by-label/cidata /run/quagent-seed && install -m 755 /run/quagent-seed/quagent-guest /usr/local/bin/quagent-guest && umount /run/quagent-seed"]
   - [systemd-run, --unit=quagent-guest, --uid=%s, -p, Restart=always, /usr/local/bin/quagent-guest, %s, "%d"]
-`, hostsvc.GuestHost, maskCmd(sshUnits(o.SSH)), mountCmds(shares), vm.GuestUser, guestCommand, svc.Port)
+`, hostsvc.GuestHost, maskCmd(sshUnits(o.SSH)), tmpCmd, vm.GuestUser, guestCommand, svc.Port)
 	// 時刻の表示 (承認の期限やコミットの日時) を host とそろえる
 	if tz := hostTimezone(); tz != "" {
 		userData += "timezone: " + tz + "\n"
@@ -193,11 +201,11 @@ runcmd:
 		// qemu の hostfwd は子 netns 側 (slirp4netns の tap0 = 10.0.2.100) で受ける。
 		netdev += fmt.Sprintf(",hostfwd=tcp:10.0.2.100:%d-:22", sshPort)
 	}
-	qemu := vm.AsGuestUID(vm.QemuArgv(vm.QemuOpts{
+	qemu := vm.QemuArgv(vm.QemuOpts{
 		Disk: overlay, Seed: seed, CPUs: o.CPUs, MemMiB: o.MemMiB,
 		ConsoleLog: filepath.Join(work, "console.log"),
-		Netdev:     netdev, VsockCID: g.cid, Shares: shares, NestedVirt: o.NestedVirt,
-	}))
+		Netdev:     netdev, VsockCID: g.cid, DataDisks: disks, NestedVirt: o.NestedVirt,
+	})
 	logf("VM を起動 (base=%s, allow=%v)", filepath.Base(base), o.Allow)
 	l, err := netns.Start(netns.Spec{
 		WorkDir: work, SSHPort: sshPort, DNS: dns, Allow: o.Allow, QemuArgv: qemu,
@@ -290,6 +298,12 @@ runcmd:
 	if err := copyRepo(g, repo, work, markKey); err != nil {
 		return err
 	}
+	if tmpDir != "" {
+		if err := copyInTmp(g, tmpDir); err != nil {
+			return err
+		}
+		defer finishTmp(g, tmpDir, work)
+	}
 	if err := ag.setup(g, cfg, providers, svc.Token); err != nil {
 		return err
 	}
@@ -308,6 +322,24 @@ runcmd:
 	agent := g.interactiveArgv(ag.command)
 	session := "quagent-" + filepath.Base(work)
 	return runTmux(session, agent, []string{self, consoleCommand, filepath.Join(work, "console.sock")}, con.Quit)
+}
+
+// finishTmp は VM の /work/.tmp を host の .tmp へ回収する。回収できなければ
+// ディスクのイメージをログと一緒に残す (中身を手で取り出せるように)。
+func finishTmp(g vmGuest, dir, work string) {
+	files, size, err := collectTmp(g, dir)
+	if err == nil {
+		logf("VM の /work/.tmp から %d 件 (%d KiB) を %s へ回収した", files, (size+1023)>>10, dir)
+		return
+	}
+	keep := filepath.Join(paths.LogsDir(), filepath.Base(work))
+	if merr := os.MkdirAll(keep, 0o700); merr == nil {
+		if rerr := os.Rename(filepath.Join(work, "tmp.img"), filepath.Join(keep, "tmp.img")); rerr == nil {
+			logf("VM の /work/.tmp を回収できなかった (%v)。%d 件は回収済み。ディスクを %s に残した (ext4)", err, files, filepath.Join(keep, "tmp.img"))
+			return
+		}
+	}
+	logf("VM の /work/.tmp を回収できなかった: %v (%d 件は回収済み)", err, files)
 }
 
 // hostTimezone は host のタイムゾーン名 (例: Asia/Tokyo)。分からなければ空。
@@ -418,38 +450,6 @@ func clipboardSink(c config.Clipboard) (func([]byte) error, error) {
 	default:
 		return nil, fmt.Errorf("clipboard.method は tmux / osc52 / command のどれか: %q", c.Method)
 	}
-}
-
-// tmpTag は .tmp を 9p で見せるときのタグ。
-const tmpTag = "quagent-tmp"
-
-// prepareTmp は host の repo の .tmp を用意し、マウントしてよいかを確かめる。
-func prepareTmp(repo string) (string, error) {
-	dir := filepath.Join(repo, ".tmp")
-	// git で管理しているファイルがあると、VM の checkout が host に書き込んでしまう
-	if out, _ := exec.Command("git", "-C", repo, "ls-files", "--", ".tmp").Output(); len(strings.TrimSpace(string(out))) > 0 {
-		return "", fmt.Errorf(".tmp に git で管理しているファイルがあるのでマウントしない")
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
-	if exec.Command("git", "-C", repo, "check-ignore", "-q", ".tmp/").Run() != nil {
-		logf("注意: %s は .gitignore されていない", dir)
-	}
-	logf("%s を VM の /work/.tmp にマウントする (VM から読み書きできる)", dir)
-	return dir, nil
-}
-
-// mountCmds は shares を guest の /work/<.tmp> にマウントする cloud-init の runcmd を返す。
-// repo の取り込みより前 (受け口の起動前) にマウントしておく。
-func mountCmds(shares []vm.Share) string {
-	var b strings.Builder
-	for _, sh := range shares {
-		if sh.Tag == tmpTag {
-			fmt.Fprintf(&b, "  - [sh, -c, \"mkdir -p /work/.tmp && mount -t 9p -o trans=virtio,version=9p2000.L,msize=262144 %s /work/.tmp\"]\n", sh.Tag)
-		}
-	}
-	return b.String()
 }
 
 // newCID は vsock の guest CID を選ぶ (3 以上。host 上で他の VM と被らないよう乱数)。
@@ -586,7 +586,7 @@ func repoRoot(dir string) (string, error) {
 
 // copyRepo は履歴ごと (git bundle) VM の /work に取り込み、host と同じブランチを
 // checkout する。未コミットの変更は渡らない。/work が空でなくても取り込めるよう
-// clone ではなく init + fetch にする (.tmp のマウント先などがあってもよい)。
+// clone ではなく init + fetch にする (.tmp のマウント先があってもよい)。
 func copyRepo(g vmGuest, repo, work, markKey string) error {
 	bundle := filepath.Join(work, "repo.bundle")
 	if out, err := exec.Command("git", "-C", repo, "bundle", "create", "-q", bundle, "--all").CombinedOutput(); err != nil {

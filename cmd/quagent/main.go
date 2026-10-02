@@ -161,7 +161,7 @@ func cmdRun(args []string) error {
 	mem := fs.Int("mem", 8192, "VM のメモリ (MiB)")
 	recipe := fs.String("image", image.DefaultRecipe, "使うベースイメージのレシピ (quagent image recipes)")
 	agent := fs.String("agent", DefaultAgent, "VM 内で動かすエージェント ("+strings.Join(agentNames(), " / ")+")")
-	mountTmp := fs.Bool("mount-tmp", false, "repo の .tmp を VM の /work/.tmp に読み書き可能でマウントする")
+	mountTmp := fs.Bool("mount-tmp", false, "repo の .tmp と VM の /work/.tmp (64 MiB) を受け渡す (起動時にコピー、終了時に回収)")
 	nested := fs.Bool("nested-virt", false, "VM の中で KVM を使えるようにする (VM の中で VM を動かすとき)")
 	useSSH := fs.Bool("ssh", false, "人が ssh で VM に入れるようにする (quagent 自身の操作は vsock)")
 	allow := fs.String("allow", "", "egress を許すドメイン (空白区切り)。LLM API は認証プロキシ経由なので不要")

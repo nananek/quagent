@@ -39,12 +39,14 @@ sshd は既定で止める (systemd-ssh-generator が作る vsock / unix ソケ�
   残った作業ディレクトリは、次に起動したときに掃除する。
 - VM には CPU の仮想化支援 (svm / vmx) を見せないので、VM の中では KVM を使えない。
   VM の中で VM を動かすとき (quagent 自体の開発など) は `--nested-virt` (TUI のオプション)。
-- `--mount-tmp` (TUI のオプション) で、host の `<repo>/.tmp` を VM の
-  `/work/.tmp` に 9p で読み書き可能にマウントする。ここだけは VM から host に
-  書き込めるので、中身を host で実行するときは気をつける。`.tmp` に git で管理して
-  いるファイルがあればマウントしない (VM の checkout が host に書き込むため)。
-  qemu は入れ子の userns で動かし、host の利用者を VM の作業ユーザー (uid 1000) に
-  読み替えるので、ファイルの持ち主は双方で揃う。
+- `--mount-tmp` (TUI のオプション) で、host の `<repo>/.tmp` と VM の `/work/.tmp`
+  を受け渡す (レポートなどのテキストを置く想定)。VM の `/work/.tmp` は専用の小さな
+  ディスク (64 MiB、noexec) で、host のディレクトリは直接見せない。起動時に host の
+  `.tmp` の通常ファイル (合計 32 MiB まで) を VM へコピーし、終了時に VM の中身を
+  host の `.tmp` へ回収する。回収するのは通常ファイル (0644) とディレクトリだけで、
+  リンク・特殊ファイル・実行権限は host に作らない。VM で消したファイルは host
+  では消さない。回収できなければディスクのイメージをログに残す。`.tmp` に git で
+  管理しているファイルがあれば受け渡さない。
 
 ## 使い方
 
@@ -60,7 +62,7 @@ TUI を使わずに直接操作することもできる:
 quagent image recipes          # 使えるレシピ (OS) の一覧
 quagent image build [--refresh] arch   # ベースイメージを焼く (--refresh でクラウドイメージも取り直す)
 quagent image ls / rm IMAGE    # 焼いたイメージの一覧・削除
-quagent run --image arch       # VM を起動 (--ssh: 人が ssh で入れる、--mount-tmp: .tmp をマウント)
+quagent run --image arch       # VM を起動 (--ssh: 人が ssh で入れる、--mount-tmp: .tmp を受け渡す)
 ```
 
 `quagent run` は tmux セッションを作り、上のペインで VM 内のエージェントを、
@@ -139,8 +141,8 @@ VM の中のエージェントが host の資源や承認者を使い潰せな�
   この run の VM 以外からの接続は切る。同時接続は 64 本まで。接続ごとに host で
   プロセスを起こさない
 
-残っているもの: `--mount-tmp` の `.tmp` と VM のディスク (overlay、最大 40G) には VM が
-書き込めるので、host のディスクを使える。LLM API の利用量 (課金) は制限していない。
+残っているもの: VM のディスク (overlay、最大 40G) には VM が書き込めるので、host の
+ディスクを使える。LLM API の利用量 (課金) は制限していない。
 
 ## ベースイメージのレシピ
 

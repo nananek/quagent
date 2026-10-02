@@ -19,10 +19,10 @@ const GuestUser = "agent"
 // GuestUID は GuestUser の uid (レシピは最初の一般ユーザーとして作るので 1000)。
 const GuestUID = 1000
 
-// Share は host のディレクトリを guest に 9p で見せる設定。
-type Share struct {
-	Tag  string // guest で mount するときのタグ
-	Path string // host のディレクトリ
+// DataDisk は guest に追加で見せる raw のディスク。
+type DataDisk struct {
+	Serial string // guest での識別名 (/dev/disk/by-id/virtio-<Serial>)
+	Path   string // host のイメージ
 }
 
 // MakeSeed は NoCloud の seed ISO を dir に作り、そのパスを返す。
@@ -74,8 +74,9 @@ type QemuOpts struct {
 	Netdev string
 	// VsockCID が 0 でなければ vsock デバイスを付ける (host との操作経路)。
 	VsockCID uint32
-	// Shares は 9p で guest に見せる host のディレクトリ。
-	Shares []Share
+	// DataDisks は追加で見せる raw のディスク。guest では
+	// /dev/disk/by-id/virtio-<Serial> に現れる。
+	DataDisks []DataDisk
 	// NestedVirt は guest に CPU の仮想化支援 (svm / vmx) を見せ、VM の中で KVM を
 	// 使えるようにする。既定では隠す (入れ子の KVM を攻撃面として出さない)。
 	NestedVirt bool
@@ -98,7 +99,9 @@ func QemuArgv(o QemuOpts) []string {
 		"-machine", "q35,accel=kvm", "-cpu", cpu,
 		"-smp", strconv.Itoa(o.CPUs), "-m", strconv.Itoa(o.MemMiB),
 		"-nographic", "-serial", "file:" + o.ConsoleLog, "-monitor", "none",
-		"-drive", "file=" + o.Disk + ",if=virtio,format=qcow2",
+		// 追加のディスクがあっても起動はこのディスクから
+		"-drive", "file=" + o.Disk + ",if=none,id=root,format=qcow2",
+		"-device", "virtio-blk-pci,drive=root,bootindex=0",
 		"-drive", "file=" + o.Seed + ",if=virtio,format=raw,readonly=on",
 		"-netdev", netdev,
 		"-device", "virtio-net-pci,netdev=n0",
@@ -107,22 +110,14 @@ func QemuArgv(o QemuOpts) []string {
 	if o.VsockCID != 0 {
 		argv = append(argv, "-device", fmt.Sprintf("vhost-vsock-pci,guest-cid=%d", o.VsockCID))
 	}
-	for _, sh := range o.Shares {
+	for _, d := range o.DataDisks {
 		// オプション値の中のカンマは二重にしてエスケープする
-		path := strings.ReplaceAll(sh.Path, ",", ",,")
-		argv = append(argv, "-virtfs", fmt.Sprintf("local,path=%s,mount_tag=%s,security_model=none,id=%s", path, sh.Tag, sh.Tag))
+		path := strings.ReplaceAll(d.Path, ",", ",,")
+		argv = append(argv,
+			"-drive", fmt.Sprintf("file=%s,if=none,id=%s,format=raw", path, d.Serial),
+			"-device", fmt.Sprintf("virtio-blk-pci,drive=%s,serial=%s", d.Serial, d.Serial))
 	}
 	return append(argv, o.Extra...)
-}
-
-// AsGuestUID は argv を、userns の root (= host の利用者) を GuestUID に読み替えた
-// 入れ子の userns で実行するコマンドにする。9p で見せた host のファイルが guest で
-// 作業ユーザーの持ち物に見え、guest が作ったファイルは host で利用者の持ち物になる。
-// unshare が死んだら qemu も道連れにする (userns に入ると Pdeathsig が外れるため)。
-func AsGuestUID(argv []string) []string {
-	id := strconv.Itoa(GuestUID)
-	return append([]string{"unshare", "--fork", "--kill-child=SIGKILL", "--user",
-		"--map-user=" + id, "--map-group=" + id, "--"}, argv...)
 }
 
 // HostDNS は netns と guest に渡す host の実 IPv4 リゾルバを返す。
