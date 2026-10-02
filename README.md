@@ -102,6 +102,7 @@ host に必要なもの: `qemu-system-x86_64` (KVM)、`qemu-img`、`xorriso`、
 `slirp4netns`、`unshare`/`nsenter`/`prlimit` (util-linux)、`nft`、`git`、`gh`、`tmux`。
 unprivileged user namespace が有効で、vsock (`/dev/vhost-vsock`、カーネル
 モジュール `vhost_vsock`) が使えること。`--ssh` を使うなら `ssh` / `ssh-keygen` も。
+署名付きのレシピ (arch) でイメージを焼くなら `gpg` / `gpgv` も。
 
 ## クリップボード (OSC 52)
 
@@ -147,6 +148,13 @@ OS ごとの作り方は `internal/image/recipes/<名前>/` に独立して置�
 (`recipe.json` にクラウドイメージの URL、`user-data.yaml` に焼き込みの
 cloud-init)。今は `debian` と `arch`。`~/.config/quagent/images/<名前>/` に同じ
 形で置けば、組み込みを差し替えたり別の OS を足したりできる。
+
+取得したクラウドイメージは配布元のチェックサム (`checksum_url`、必須) と照合し、
+署名があれば (`signature_url` と、レシピのディレクトリに置いた公開鍵 `signing_key`)
+gpgv でその鍵だけを使って検証する。arch は arch-boxes の署名鍵 (arch-boxes の
+README に載っている鍵) で検証する。debian は配布元が署名を出していないので、
+cloud.debian.org から TLS で取ったチェックサムとの照合だけ。同梱の鍵の期限は
+GitHub Actions (`signing-keys`) が毎週確かめ、60 日以内に切れるなら issue を立てる。
 
 レシピの約束: ユーザー `{{.User}}` を uid 1000 で作り、rootless docker と opencode を入れ、
 `/work` をそのユーザーの所有で作り、成功したら `{{.Marker}}` を `/dev/ttyS0` に

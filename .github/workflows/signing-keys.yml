@@ -1,0 +1,38 @@
+# レシピに同梱したクラウドイメージの署名鍵の期限を毎週確かめ、60 日以内に切れる
+# ものがあれば issue を立てる (同じ鍵の issue が開いていれば立てない)。
+name: signing-keys
+
+on:
+  schedule:
+    - cron: "0 0 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 期限の近い署名鍵を探して issue を立てる
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DAYS: "60"
+        run: |
+          .github/scripts/check-signing-keys.sh | while read -r key expires; do
+            title="レシピの署名鍵の期限が近い: $key"
+            if [ -n "$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[].number')" ]; then
+              echo "issue は開いている: $title"
+              continue
+            fi
+            gh issue create --title "$title" --body "$(cat <<BODY
+          \`$key\` の署名に使える鍵が ${DAYS} 日以内 ($expires) に切れる。
+
+          配布元が鍵を延長・更新していれば、新しい公開鍵に差し替える
+          (arch は https://gitlab.archlinux.org/archlinux/arch-boxes の README の鍵)。
+          差し替えたら \`quagent image build --refresh\` で署名の検証が通ることを確かめる。
+          BODY
+          )"
+          done

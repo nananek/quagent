@@ -8,7 +8,10 @@ package image
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"crypto/sha512"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,9 +46,17 @@ type Recipe struct {
 	Name          string `json:"-"`
 	Description   string `json:"description"`
 	CloudImageURL string `json:"cloud_image_url"`
+	// ChecksumURL は配布元のチェックサムの一覧 ("<16進> <ファイル名>" の行。sha256 か
+	// sha512)。取得したイメージをこれと照合する (必須)。
+	ChecksumURL string `json:"checksum_url"`
+	// SignatureURL はイメージそのものへの OpenPGP の分離署名。あれば SigningKey
+	// (レシピのディレクトリにある公開鍵のファイル名) で gpgv により検証する。
+	SignatureURL string `json:"signature_url,omitempty"`
+	SigningKey   string `json:"signing_key,omitempty"`
 	// Source は "builtin" か、利用者のレシピのディレクトリ。
-	Source   string `json:"-"`
-	userData string
+	Source     string `json:"-"`
+	userData   string
+	signingKey []byte
 }
 
 // RecipesDir は利用者のレシピの置き場。
@@ -66,6 +77,17 @@ func readRecipe(fsys fs.FS, name, source string) (Recipe, error) {
 	}
 	if r.CloudImageURL == "" {
 		return Recipe{}, fmt.Errorf("%s: cloud_image_url が空", source)
+	}
+	if r.ChecksumURL == "" {
+		return Recipe{}, fmt.Errorf("%s: checksum_url が空 (取得したイメージを検証できない)", source)
+	}
+	if (r.SignatureURL == "") != (r.SigningKey == "") {
+		return Recipe{}, fmt.Errorf("%s: signature_url と signing_key は両方指定する", source)
+	}
+	if r.SigningKey != "" {
+		if r.signingKey, err = fs.ReadFile(fsys, r.SigningKey); err != nil {
+			return Recipe{}, err
+		}
 	}
 	r.Name, r.Source, r.userData = name, source, string(ud)
 	return r, nil
@@ -273,18 +295,114 @@ func fetchCloudImage(r Recipe, refresh bool, progress io.Writer) (string, error)
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("取得に失敗: %s", resp.Status)
 	}
-	f, err := os.Create(dst + ".part")
+	part := dst + ".part"
+	f, err := os.Create(part)
 	if err != nil {
 		return "", err
 	}
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	defer os.Remove(part) // 検証に通れば rename 済みで消えない
+	h256, h512 := sha256.New(), sha512.New()
+	if _, err := io.Copy(io.MultiWriter(f, h256, h512), resp.Body); err != nil {
 		f.Close()
 		return "", err
 	}
 	if err := f.Close(); err != nil {
 		return "", err
 	}
-	return dst, os.Rename(dst+".part", dst)
+	if err := verifyChecksum(r, hex.EncodeToString(h256.Sum(nil)), hex.EncodeToString(h512.Sum(nil))); err != nil {
+		return "", err
+	}
+	if r.SignatureURL != "" {
+		if err := verifySignature(r, part); err != nil {
+			return "", err
+		}
+		fmt.Fprintf(progress, "署名を検証した (%s)\n", r.SigningKey)
+	}
+	return dst, os.Rename(part, dst)
+}
+
+// fetchSmall は url の中身を max バイトまで取得する (チェックサムや署名の小さなファイル)。
+func fetchSmall(url string, max int64) ([]byte, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s の取得に失敗: %s", url, resp.Status)
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > max {
+		return nil, fmt.Errorf("%s が大きすぎる", url)
+	}
+	return b, nil
+}
+
+// verifyChecksum は配布元のチェックサムの一覧から、イメージのファイル名の行を探して照合する。
+func verifyChecksum(r Recipe, sum256, sum512 string) error {
+	list, err := fetchSmall(r.ChecksumURL, 1<<20)
+	if err != nil {
+		return err
+	}
+	want, err := findChecksum(string(list), filepath.Base(r.CloudImageURL))
+	if err != nil {
+		return fmt.Errorf("%s: %w", r.ChecksumURL, err)
+	}
+	got := sum256
+	if len(want) == len(sum512) {
+		got = sum512
+	}
+	if want != got {
+		return fmt.Errorf("イメージのチェックサムが一致しない (期待 %s、実際 %s)", want, got)
+	}
+	return nil
+}
+
+func findChecksum(list, name string) (string, error) {
+	for _, line := range strings.Split(list, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && strings.TrimPrefix(fields[1], "*") == name {
+			sum := strings.ToLower(fields[0])
+			if _, err := hex.DecodeString(sum); err != nil || (len(sum) != 64 && len(sum) != 128) {
+				return "", fmt.Errorf("%s のチェックサムが sha256 / sha512 の形でない", name)
+			}
+			return sum, nil
+		}
+	}
+	return "", fmt.Errorf("%s の行が無い", name)
+}
+
+// verifySignature はイメージの分離署名をレシピの公開鍵だけで検証する (利用者の鍵束は使わない)。
+func verifySignature(r Recipe, image string) error {
+	sig, err := fetchSmall(r.SignatureURL, 64<<10)
+	if err != nil {
+		return err
+	}
+	return verifySignatureWith(r, sig, image)
+}
+
+func verifySignatureWith(r Recipe, sig []byte, image string) error {
+	dir, err := os.MkdirTemp("", "quagent-gpg-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	keyring, sigFile := filepath.Join(dir, "key.gpg"), filepath.Join(dir, "image.sig")
+	if err := os.WriteFile(sigFile, sig, 0o600); err != nil {
+		return err
+	}
+	dearmor := exec.Command("gpg", "--homedir", dir, "--batch", "--dearmor", "-o", keyring)
+	dearmor.Stdin = bytes.NewReader(r.signingKey)
+	if out, err := dearmor.CombinedOutput(); err != nil {
+		return fmt.Errorf("署名の公開鍵 %s を読めない (gpg が要る): %v: %s", r.SigningKey, err, out)
+	}
+	if out, err := exec.Command("gpgv", "--homedir", dir, "--keyring", keyring, sigFile, image).CombinedOutput(); err != nil {
+		return fmt.Errorf("イメージの署名を検証できない: %v: %s", err, out)
+	}
+	return nil
 }
 
 func runWithTimeout(cmd *exec.Cmd, d time.Duration) ([]byte, error) {

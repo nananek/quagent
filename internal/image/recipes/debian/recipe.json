@@ -1,4 +1,5 @@
 {
   "description": "Debian 13 (trixie) + rootless docker (公式 apt リポジトリ) + opencode + Claude Code",
-  "cloud_image_url": "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2"
+  "cloud_image_url": "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2",
+  "checksum_url": "https://cloud.debian.org/images/cloud/trixie/latest/SHA512SUMS"
 }

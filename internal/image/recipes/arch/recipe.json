@@ -1,4 +1,7 @@
 {
   "description": "Arch Linux + rootless docker (公式 rootless インストーラー) + opencode + Claude Code",
-  "cloud_image_url": "https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2"
+  "cloud_image_url": "https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2",
+  "checksum_url": "https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2.SHA256",
+  "signature_url": "https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2.sig",
+  "signing_key": "arch-boxes.asc"
 }
