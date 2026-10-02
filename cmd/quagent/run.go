@@ -39,6 +39,8 @@ type runOpts struct {
 	SSH bool
 	// MountTmp は host の repo の .tmp を VM の /work/.tmp に読み書き可能でマウントする。
 	MountTmp bool
+	// NestedVirt は VM の中で KVM を使えるようにする (VM の中で VM を動かす開発用)。
+	NestedVirt bool
 	// Agent は VM 内で動かすエージェント (agents のキー)。
 	Agent string
 }
@@ -194,7 +196,7 @@ runcmd:
 	qemu := vm.AsGuestUID(vm.QemuArgv(vm.QemuOpts{
 		Disk: overlay, Seed: seed, CPUs: o.CPUs, MemMiB: o.MemMiB,
 		ConsoleLog: filepath.Join(work, "console.log"),
-		Netdev:     netdev, VsockCID: g.cid, Shares: shares,
+		Netdev:     netdev, VsockCID: g.cid, Shares: shares, NestedVirt: o.NestedVirt,
 	}))
 	logf("VM を起動 (base=%s, allow=%v)", filepath.Base(base), o.Allow)
 	l, err := netns.Start(netns.Spec{

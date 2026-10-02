@@ -28,9 +28,11 @@ type Launch struct {
 	CPUs   int    `json:"cpus"`
 	MemMiB int    `json:"mem_mib"`
 	// MountTmp は repo の .tmp を VM にマウントする。SSH は人が ssh で入れるようにする。
-	MountTmp bool   `json:"mount_tmp"`
-	SSH      bool   `json:"ssh"`
-	Agent    string `json:"agent"`
+	MountTmp bool `json:"mount_tmp"`
+	SSH      bool `json:"ssh"`
+	// NestedVirt は VM の中で KVM を使えるようにする。
+	NestedVirt bool   `json:"nested_virt"`
+	Agent      string `json:"agent"`
 }
 
 // ErrQuit は TUI で終了を選んだ (または中断した)。
@@ -149,6 +151,9 @@ func startForm(agents []string) (Launch, error) {
 	if l.SSH {
 		extras = append(extras, "ssh")
 	}
+	if l.NestedVirt {
+		extras = append(extras, "nested")
+	}
 	ok := true
 	err = newForm(huh.NewGroup(
 		huh.NewInput().Title("対象 repo").Description("VM の /work にコピーする git repo").
@@ -165,6 +170,7 @@ func startForm(agents []string) (Launch, error) {
 		huh.NewMultiSelect[string]().Title("オプション").Options(
 			huh.NewOption("repo の .tmp を VM の /work/.tmp にマウント (読み書き可)", "tmp"),
 			huh.NewOption("ssh で入れるようにする", "ssh"),
+			huh.NewOption("VM の中で KVM を使えるようにする (入れ子の仮想化)", "nested"),
 		).Value(&extras),
 		huh.NewConfirm().Title("この設定で起動する?").Affirmative("起動").Negative("戻る").Value(&ok),
 	)).Run()
@@ -176,6 +182,7 @@ func startForm(agents []string) (Launch, error) {
 	}
 	l.Repo = gitTop(l.Repo)
 	l.MountTmp, l.SSH = slices.Contains(extras, "tmp"), slices.Contains(extras, "ssh")
+	l.NestedVirt = slices.Contains(extras, "nested")
 	l.CPUs, _ = strconv.Atoi(cpus)
 	l.MemMiB, _ = strconv.Atoi(mem)
 	saveLast(l)

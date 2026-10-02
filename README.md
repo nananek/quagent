@@ -37,6 +37,8 @@ sshd は既定で止める (systemd-ssh-generator が作る vsock / unix ソケ�
   履歴ごと取り込み、host と同じブランチを checkout する (未コミットの変更は渡らない)。
 - VM は毎回ベースイメージの overlay から起動し、終了時に破棄する。強制終了で
   残った作業ディレクトリは、次に起動したときに掃除する。
+- VM には CPU の仮想化支援 (svm / vmx) を見せないので、VM の中では KVM を使えない。
+  VM の中で VM を動かすとき (quagent 自体の開発など) は `--nested-virt` (TUI のオプション)。
 - `--mount-tmp` (TUI のオプション) で、host の `<repo>/.tmp` を VM の
   `/work/.tmp` に 9p で読み書き可能にマウントする。ここだけは VM から host に
   書き込めるので、中身を host で実行するときは気をつける。`.tmp` に git で管理して

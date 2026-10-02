@@ -76,6 +76,9 @@ type QemuOpts struct {
 	VsockCID uint32
 	// Shares は 9p で guest に見せる host のディレクトリ。
 	Shares []Share
+	// NestedVirt は guest に CPU の仮想化支援 (svm / vmx) を見せ、VM の中で KVM を
+	// 使えるようにする。既定では隠す (入れ子の KVM を攻撃面として出さない)。
+	NestedVirt bool
 	// Extra は追加の qemu 引数。
 	Extra []string
 }
@@ -86,9 +89,13 @@ func QemuArgv(o QemuOpts) []string {
 	if o.Netdev != "" {
 		netdev += "," + o.Netdev
 	}
+	cpu := "host,-svm,-vmx"
+	if o.NestedVirt {
+		cpu = "host"
+	}
 	argv := []string{
 		"qemu-system-x86_64",
-		"-machine", "q35,accel=kvm", "-cpu", "host",
+		"-machine", "q35,accel=kvm", "-cpu", cpu,
 		"-smp", strconv.Itoa(o.CPUs), "-m", strconv.Itoa(o.MemMiB),
 		"-nographic", "-serial", "file:" + o.ConsoleLog, "-monitor", "none",
 		"-drive", "file=" + o.Disk + ",if=virtio,format=qcow2",

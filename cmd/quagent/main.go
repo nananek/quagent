@@ -27,7 +27,7 @@ const usage = `usage:
   quagent image ls                             焼いたベースイメージの一覧
   quagent image rm IMAGE                       ベースイメージを消す
   quagent always ls | rm DOMAIN...              「以後確認しない」ドメインの一覧・取り消し
-  quagent run [--repo DIR] [--image RECIPE] [--cpus N] [--mem MiB] [--agent opencode|claude] [--allow "d1 d2"] [--ssh] [--mount-tmp]
+  quagent run [--repo DIR] [--image RECIPE] [--cpus N] [--mem MiB] [--agent opencode|claude] [--allow "d1 d2"] [--ssh] [--mount-tmp] [--nested-virt]
                                                VM を起動し、tmux でエージェントと承認コンソールを開く
 `
 
@@ -52,7 +52,7 @@ func dispatch(args []string) error {
 			return err
 		}
 		return run(runOpts{Repo: l.Repo, Recipe: l.Recipe, CPUs: l.CPUs, MemMiB: l.MemMiB,
-			MountTmp: l.MountTmp, SSH: l.SSH, Agent: l.Agent, Interactive: true})
+			MountTmp: l.MountTmp, SSH: l.SSH, NestedVirt: l.NestedVirt, Agent: l.Agent, Interactive: true})
 	}
 	switch args[0] {
 	case netns.ChildCommand:
@@ -162,6 +162,7 @@ func cmdRun(args []string) error {
 	recipe := fs.String("image", image.DefaultRecipe, "使うベースイメージのレシピ (quagent image recipes)")
 	agent := fs.String("agent", DefaultAgent, "VM 内で動かすエージェント ("+strings.Join(agentNames(), " / ")+")")
 	mountTmp := fs.Bool("mount-tmp", false, "repo の .tmp を VM の /work/.tmp に読み書き可能でマウントする")
+	nested := fs.Bool("nested-virt", false, "VM の中で KVM を使えるようにする (VM の中で VM を動かすとき)")
 	useSSH := fs.Bool("ssh", false, "人が ssh で VM に入れるようにする (quagent 自身の操作は vsock)")
 	allow := fs.String("allow", "", "egress を許すドメイン (空白区切り)。LLM API は認証プロキシ経由なので不要")
 	_ = fs.Parse(args)
@@ -174,6 +175,7 @@ func cmdRun(args []string) error {
 		Interactive: isTerminal(os.Stdin),
 		SSH:         *useSSH,
 		MountTmp:    *mountTmp,
+		NestedVirt:  *nested,
 		Agent:       *agent,
 	})
 }
