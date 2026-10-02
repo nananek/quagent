@@ -489,6 +489,30 @@ func relayDenied(l *netns.Launcher, con *console.Server) {
 	}
 }
 
+// holdWindowName は pane のある窓の automatic-rename をいったん止め、元に戻す関数を返す。
+func holdWindowName(pane string) func() {
+	if pane == "" {
+		return nil
+	}
+	out, err := exec.Command("tmux", "display-message", "-p", "-t", pane, "#{window_id}").Output()
+	win := strings.TrimSpace(string(out))
+	if err != nil || win == "" {
+		return nil
+	}
+	// 窓ごとの設定 (-w、-g なし) があれば値を覚えておき、無ければ戻すときに外す
+	local, _ := exec.Command("tmux", "show-options", "-wqv", "-t", win, "automatic-rename").Output()
+	if exec.Command("tmux", "set-option", "-w", "-t", win, "automatic-rename", "off").Run() != nil {
+		return nil
+	}
+	return func() {
+		if v := strings.TrimSpace(string(local)); v != "" {
+			_ = exec.Command("tmux", "set-option", "-w", "-t", win, "automatic-rename", v).Run()
+		} else {
+			_ = exec.Command("tmux", "set-option", "-wu", "-t", win, "automatic-rename").Run()
+		}
+	}
+}
+
 // runTmux は上にエージェント、下に承認コンソールを置いた tmux セッションを作り、
 // 終わるまで待つ。エージェントのペインが終わるとセッションごと閉じる。
 func runTmux(session string, agent, consoleArgv []string, quit <-chan struct{}) error {
@@ -503,11 +527,11 @@ func runTmux(session string, agent, consoleArgv []string, quit <-chan struct{}) 
 		return err
 	}
 	defer func() { _ = exec.Command("tmux", "kill-session", "-t", session).Run() }()
-	// VM の出力で窓の名前や端末のタイトルを書き換えたり、tmux を素通りして外の端末へ
-	// 送ったりさせない。$TMUX の中から使うと利用者の tmux にこのセッションが出るので、
-	// どれもこのセッション・窓だけに設定する。
+	// 窓の名前や外の端末のタイトルを書き換えたり、tmux を素通りして外の端末へ送ったり
+	// させない (ペインのタイトルはエージェントが変えてよい)。$TMUX の中から使うと利用者の
+	// tmux にこのセッションが出るので、どれもこのセッション・窓だけに設定する。
 	for _, opt := range [][]string{
-		{"-w", "allow-rename"}, {"-w", "automatic-rename"}, {"-w", "allow-set-title"},
+		{"-w", "allow-rename"}, {"-w", "automatic-rename"},
 		{"-w", "allow-passthrough"}, {"", "set-titles"},
 	} {
 		target := session
@@ -520,6 +544,12 @@ func runTmux(session string, agent, consoleArgv []string, quit <-chan struct{}) 
 			logf("%v", err)
 		}
 	}
+	// セッションが終わったら、利用者の tmux クライアントは元のセッションへ戻す
+	// (既定の detach-on-destroy on だと、$TMUX の中から使ったときに利用者の tmux が閉じる)
+	if err := tmux("set-option", "-t", session, "detach-on-destroy", "previous"); err != nil {
+		logf("%v", err)
+		_ = tmux("set-option", "-t", session, "detach-on-destroy", "off")
+	}
 	if err := tmux(append([]string{"split-window", "-v", "-l", "30%", "-t", session + ":"}, consoleArgv...)...); err != nil {
 		return err
 	}
@@ -529,6 +559,11 @@ func runTmux(session string, agent, consoleArgv []string, quit <-chan struct{}) 
 	attached := make(chan struct{})
 	if os.Getenv("TMUX") != "" {
 		close(attached)
+		// 起動した窓では quagent が前面のコマンドになるので、automatic-rename で窓の
+		// 名前が quagent に変わらないよう、終わるまでその窓だけ止める
+		if restore := holdWindowName(os.Getenv("TMUX_PANE")); restore != nil {
+			defer restore()
+		}
 		if err := tmux("switch-client", "-t", session); err != nil {
 			return err
 		}

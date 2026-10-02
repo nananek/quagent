@@ -91,7 +91,6 @@ func setupClaude(g vmGuest, cfg *config.Config, providers []string, token string
 			"ANTHROPIC_BASE_URL":                       authproxy.GuestBaseURL(hostsvc.GuestOrigin(), claudeProvider),
 			"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
 			"DISABLE_AUTOUPDATER":                      "1",
-			"CLAUDE_CODE_DISABLE_TERMINAL_TITLE":       "1",
 		},
 	}
 	if cfg.Claude.Model != "" {
