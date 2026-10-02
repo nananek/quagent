@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/huh"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/nananek/quagent/internal/access"
 	"github.com/nananek/quagent/internal/image"
@@ -58,7 +59,7 @@ func saveLast(l Launch) {
 func Run(agents []string) (Launch, error) {
 	for {
 		var choice string
-		err := huh.NewForm(huh.NewGroup(
+		err := newForm(huh.NewGroup(
 			huh.NewSelect[string]().Title("quagent").Options(
 				huh.NewOption("VM を起動", "start"),
 				huh.NewOption("ベースイメージの管理", "images"),
@@ -149,7 +150,7 @@ func startForm(agents []string) (Launch, error) {
 		extras = append(extras, "ssh")
 	}
 	ok := true
-	err = huh.NewForm(huh.NewGroup(
+	err = newForm(huh.NewGroup(
 		huh.NewInput().Title("対象 repo").Description("VM の /work にコピーする git repo").
 			Value(&l.Repo).Validate(func(s string) error {
 			if gitTop(s) == "" {
@@ -181,7 +182,7 @@ func startForm(agents []string) (Launch, error) {
 
 	if _, err := image.Latest(l.Recipe); err != nil {
 		build := true
-		if err := huh.NewForm(huh.NewGroup(huh.NewConfirm().
+		if err := newForm(huh.NewGroup(huh.NewConfirm().
 			Title(l.Recipe + " のベースイメージがまだ無い。今から焼く? (数分かかる)").
 			Affirmative("焼く").Negative("戻る").Value(&build))).Run(); err != nil || !build {
 			return Launch{}, errBack
@@ -228,7 +229,7 @@ func imagesMenu() error {
 			huh.NewOption("古いイメージを消す (各 OS の最新だけ残す)", "prune"),
 			huh.NewOption("戻る", "back"))
 		var choice string
-		if err := huh.NewForm(huh.NewGroup(
+		if err := newForm(huh.NewGroup(
 			huh.NewNote().Title("ベースイメージ").Description(escapeMarkdown(sb.String())),
 			huh.NewSelect[string]().Options(opts...).Value(&choice),
 		)).Run(); err != nil || choice == "back" {
@@ -297,7 +298,7 @@ func alwaysMenu() error {
 		opts = append(opts, huh.NewOption(d, d))
 	}
 	var picked []string
-	if err := huh.NewForm(huh.NewGroup(
+	if err := newForm(huh.NewGroup(
 		huh.NewMultiSelect[string]().Title("取り消すドメイン (space で選択、enter で確定)").
 			Description("全プロジェクト共通。取り消すと次の起動から再び確認される").
 			Options(opts...).Value(&picked),
@@ -311,4 +312,28 @@ func alwaysMenu() error {
 	fmt.Println("取り消した:", strings.Join(removed, " "))
 	pause()
 	return errBack
+}
+
+// newForm は端末の 16 色パレットに従う配色のフォームを作る。実際の色は利用者の
+// 端末の配色で決まるので、明るい背景でも暗い背景でも読める。
+func newForm(groups ...*huh.Group) *huh.Form {
+	return huh.NewForm(groups...).WithTheme(theme())
+}
+
+// theme は ThemeBase16 から、明るい背景で読めない色を外したもの。
+// 白 (7) の文字は端末の既定の文字色に、黄 (3) の印は青 (4) にする。
+func theme() *huh.Theme {
+	t := huh.ThemeBase16()
+	blue := lipgloss.Color("4")
+	for _, f := range []*huh.FieldStyles{&t.Focused, &t.Blurred} {
+		f.Option = f.Option.UnsetForeground()
+		f.UnselectedOption = f.UnselectedOption.UnsetForeground()
+		f.TextInput.Text = f.TextInput.Text.UnsetForeground()
+		f.SelectSelector = f.SelectSelector.Foreground(blue)
+		f.MultiSelectSelector = f.MultiSelectSelector.Foreground(blue)
+		f.NextIndicator = f.NextIndicator.Foreground(blue)
+		f.PrevIndicator = f.PrevIndicator.Foreground(blue)
+		f.TextInput.Prompt = f.TextInput.Prompt.Foreground(blue)
+	}
+	return t
 }
