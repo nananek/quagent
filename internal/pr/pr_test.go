@@ -8,25 +8,6 @@ import (
 	"testing"
 )
 
-// テスト用の git 環境: 署名はテスト用の ssh 鍵で行い、利用者の設定は読まない。
-func setupEnv(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	key := filepath.Join(dir, "signkey")
-	if out, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", key).CombinedOutput(); err != nil {
-		t.Fatalf("ssh-keygen: %v: %s", err, out)
-	}
-	cfg := filepath.Join(dir, "gitconfig")
-	content := "[user]\n\tname = Host User\n\temail = host@example.com\n\tsigningkey = " + key + ".pub\n" +
-		"[gpg]\n\tformat = ssh\n[init]\n\tdefaultBranch = main\n"
-	if err := os.WriteFile(cfg, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("GIT_CONFIG_GLOBAL", cfg)
-	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
-	return dir
-}
-
 func run(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command(args[0], args[1:]...)
@@ -38,32 +19,70 @@ func run(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func commit(t *testing.T, dir, file, content string) {
+func keygen(t *testing.T, path string) {
+	t.Helper()
+	if out, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", path).CombinedOutput(); err != nil {
+		t.Fatalf("ssh-keygen: %v: %s", err, out)
+	}
+}
+
+func commit(t *testing.T, dir, file, content string, extra ...string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, file), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	run(t, dir, "git", "add", file)
-	run(t, dir, "git", "-c", "user.name=quagent", "-c", "user.email=quagent@localhost",
-		"-c", "commit.gpgsign=false", "commit", "-q", "-m", "edit "+file)
+	run(t, dir, append(append([]string{"git"}, extra...), "commit", "-q", "-m", "edit "+file)...)
 }
 
-func isSigned(t *testing.T, repo, rev string) bool {
-	return strings.Contains(run(t, repo, "git", "cat-file", "commit", rev), "\ngpgsig ")
+// sigFP はコミットの署名鍵の指紋 (無ければ空) を返す。
+func sigFP(t *testing.T, repo, rev, signers string) string {
+	t.Helper()
+	return run(t, repo, "git", "-c", "gpg.ssh.allowedSignersFile="+signers, "log", "-1", "--format=%GF", rev)
+}
+
+func fingerprint(t *testing.T, pub string) string {
+	return strings.Fields(run(t, ".", "ssh-keygen", "-lf", pub))[1]
 }
 
 type fixture struct {
 	origin, host, guest string
+	hostKey, markKey    string // 利用者の鍵、VM の捨て鍵 (どちらも ssh)
+	signers             string // 両方の鍵を許可した allowed signers
 	p                   *Publisher
 }
 
+// newFixture は origin / host / guest の 3 つの repo を作る。host の利用者は
+// hostKey で署名し、guest (VM) は markKey で署名する。利用者の設定は読まない。
 func newFixture(t *testing.T) fixture {
-	dir := setupEnv(t)
+	dir := t.TempDir()
 	f := fixture{
-		origin: filepath.Join(dir, "origin.git"),
-		host:   filepath.Join(dir, "host"),
-		guest:  filepath.Join(dir, "guest"),
+		origin:  filepath.Join(dir, "origin.git"),
+		host:    filepath.Join(dir, "host"),
+		guest:   filepath.Join(dir, "guest"),
+		hostKey: filepath.Join(dir, "hostkey"),
+		markKey: filepath.Join(dir, "markkey"),
+		signers: filepath.Join(dir, "signers"),
 	}
+	keygen(t, f.hostKey)
+	keygen(t, f.markKey)
+	cfg := filepath.Join(dir, "gitconfig")
+	content := "[user]\n\tname = Host User\n\temail = host@example.com\n\tsigningkey = " + f.hostKey + ".pub\n" +
+		"[gpg]\n\tformat = ssh\n[commit]\n\tgpgsign = true\n[init]\n\tdefaultBranch = main\n"
+	if err := os.WriteFile(cfg, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", cfg)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	var sig strings.Builder
+	for _, k := range []string{f.hostKey, f.markKey} {
+		b, _ := os.ReadFile(k + ".pub")
+		sig.WriteString("* " + strings.TrimSpace(string(b)) + "\n")
+	}
+	if err := os.WriteFile(f.signers, []byte(sig.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	run(t, dir, "git", "init", "-q", "--bare", f.origin)
 	run(t, dir, "git", "init", "-q", f.host)
 	commit(t, f.host, "README", "hello\n")
@@ -71,15 +90,20 @@ func newFixture(t *testing.T) fixture {
 	run(t, f.host, "git", "push", "-q", "origin", "main")
 	run(t, f.host, "git", "remote", "set-head", "origin", "main")
 	run(t, dir, "git", "clone", "-q", f.host, f.guest)
+	// VM と同じく、guest のコミットは捨て鍵で署名する
+	run(t, f.guest, "git", "config", "user.signingkey", f.markKey+".pub")
+
 	work := filepath.Join(dir, "work")
 	if err := os.MkdirAll(work, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	f.p = &Publisher{Repo: f.host, Work: work, GuestURL: f.guest, Protected: DefaultProtected}
+	mark, _ := os.ReadFile(f.markKey + ".pub")
+	f.p = &Publisher{Repo: f.host, Work: work, GuestURL: f.guest, Protected: DefaultProtected,
+		MarkPub: strings.TrimSpace(string(mark))}
 	return f
 }
 
-func TestPublishSignsAndUpdatesIncrementally(t *testing.T) {
+func TestPublishResignsVMCommitsIncrementally(t *testing.T) {
 	f := newFixture(t)
 	run(t, f.guest, "git", "switch", "-q", "-c", "feature")
 	commit(t, f.guest, "a.txt", "a\n")
@@ -92,20 +116,23 @@ func TestPublishSignsAndUpdatesIncrementally(t *testing.T) {
 	if res.Signed != 2 || res.Base != "main" {
 		t.Fatalf("unexpected %+v", res)
 	}
-	remote := run(t, f.origin, "git", "rev-parse", "refs/heads/feature")
-	if remote != res.Head {
+	if run(t, f.origin, "git", "rev-parse", "refs/heads/feature") != res.Head {
 		t.Fatal("push された先端が結果と違う")
 	}
+	hostFP := fingerprint(t, f.hostKey+".pub")
 	for _, rev := range []string{"feature", "feature~1"} {
-		if !isSigned(t, f.origin, rev) {
-			t.Fatalf("%s が署名されていない", rev)
+		if got := sigFP(t, f.origin, rev, f.signers); got != hostFP {
+			t.Fatalf("%s が利用者の鍵で署名されていない: %q", rev, got)
 		}
 	}
-	if isSigned(t, f.origin, "feature~2") {
-		t.Fatal("base のコミットまで署名し直している")
+	if run(t, f.origin, "git", "rev-parse", "feature~2") != run(t, f.host, "git", "rev-parse", "main") {
+		t.Fatal("base のコミットが書き換わった")
 	}
 	if run(t, f.origin, "git", "rev-parse", "feature^{tree}") != run(t, f.guest, "git", "rev-parse", "feature^{tree}") {
 		t.Fatal("中身が変わった")
+	}
+	if got := run(t, f.origin, "git", "log", "-1", "--format=%s|%an|%cn", "feature"); got != "edit b.txt|Host User|Host User" {
+		t.Fatalf("メッセージ・author・committer が違う: %q", got)
 	}
 
 	// 追加のコミットだけが署名され、既に push したコミットは書き換わらない
@@ -114,17 +141,66 @@ func TestPublishSignsAndUpdatesIncrementally(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res2.Signed != 1 {
-		t.Fatalf("追加分だけ署名されていない: %+v", res2)
-	}
-	if run(t, f.origin, "git", "rev-parse", "feature~1") != res.Head {
-		t.Fatal("既に push したコミットが書き換わった")
+	if res2.Signed != 1 || run(t, f.origin, "git", "rev-parse", "feature~1") != res.Head {
+		t.Fatalf("追加分だけの署名になっていない: %+v", res2)
 	}
 
 	// 変化がなければ何もしない
 	res3, err := f.p.Publish(Request{Branch: "feature", Title: "t"})
 	if err != nil || res3.Signed != 0 || res3.Head != res2.Head {
 		t.Fatalf("変化なしで何かした: %+v %v", res3, err)
+	}
+}
+
+func TestPublishKeepsOthersCommits(t *testing.T) {
+	f := newFixture(t)
+	// 同僚のブランチ: 別の鍵で署名されたコミットと、署名の無いコミット (host にある)
+	colleague := filepath.Join(t.TempDir(), "colleague")
+	keygen(t, colleague)
+	run(t, f.host, "git", "switch", "-q", "-c", "colleague")
+	commit(t, f.host, "c1.txt", "1\n", "-c", "user.name=Colleague", "-c", "user.signingkey="+colleague+".pub")
+	commit(t, f.host, "c2.txt", "2\n", "-c", "user.name=Colleague", "-c", "commit.gpgsign=false")
+	colleagueTip := run(t, f.host, "git", "rev-parse", "colleague")
+	colleagueSig := run(t, f.host, "git", "cat-file", "commit", "colleague~1")
+
+	// VM は同僚のブランチの上に積む
+	run(t, f.guest, "git", "fetch", "-q", "origin", "colleague:colleague")
+	run(t, f.guest, "git", "switch", "-q", "-c", "on-colleague", "colleague")
+	commit(t, f.guest, "mine.txt", "m\n")
+
+	res, err := f.p.Publish(Request{Branch: "on-colleague", Title: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Signed != 1 {
+		t.Fatalf("VM のコミットだけを署名し直すはず: %+v", res)
+	}
+	if run(t, f.origin, "git", "rev-parse", "on-colleague~1") != colleagueTip {
+		t.Fatal("同僚のコミットのハッシュが変わった")
+	}
+	if run(t, f.origin, "git", "cat-file", "commit", "on-colleague~2") != colleagueSig {
+		t.Fatal("同僚のコミットの署名が書き換わった")
+	}
+}
+
+func TestPublishRejectsUnmarkedVMCommit(t *testing.T) {
+	f := newFixture(t)
+	run(t, f.guest, "git", "switch", "-q", "-c", "feature")
+	commit(t, f.guest, "a.txt", "a\n", "-c", "commit.gpgsign=false") // VM で署名を切った
+	if _, err := f.p.Publish(Request{Branch: "feature", Title: "t"}); err == nil {
+		t.Fatal("印の無い VM のコミットが通った")
+	}
+	if out, _ := exec.Command("git", "-C", f.origin, "rev-parse", "--verify", "-q", "feature").Output(); len(out) > 0 {
+		t.Fatal("push されてしまった")
+	}
+
+	// 別の鍵 (捨て鍵でも利用者の鍵でもない) で署名されたものも VM の印とはみなさない
+	other := filepath.Join(t.TempDir(), "other")
+	keygen(t, other)
+	run(t, f.guest, "git", "switch", "-q", "-c", "feature2", "main")
+	commit(t, f.guest, "b.txt", "b\n", "-c", "user.signingkey="+other+".pub")
+	if _, err := f.p.Publish(Request{Branch: "feature2", Title: "t"}); err == nil {
+		t.Fatal("別の鍵の署名を VM の印とみなした")
 	}
 }
 

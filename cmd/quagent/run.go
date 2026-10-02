@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"math/rand/v2"
@@ -212,9 +213,20 @@ runcmd:
 	if len(protected) == 0 {
 		protected = pr.DefaultProtected
 	}
+	// VM 内のコミットに付けさせる印 (run ごとの捨て鍵)。PR 化のとき、この鍵で
+	// 署名されたコミットだけを利用者の鍵で署名し直す (他人のコミットには触らない)。
+	markKey := filepath.Join(work, "mark_ed25519")
+	if out, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "quagent-mark", "-f", markKey).CombinedOutput(); err != nil {
+		return fmt.Errorf("捨て鍵の生成に失敗: %v: %s", err, out)
+	}
+	markPub, err := os.ReadFile(markKey + ".pub")
+	if err != nil {
+		return err
+	}
 	publisher := &pr.Publisher{
 		Repo: repo, Work: work, Protected: protected, GH: pr.RunGH,
 		GuestURL: g.gitURL(), GitConfig: []string{"protocol.ext.allow=always"},
+		MarkPub: strings.TrimSpace(string(markPub)),
 	}
 	svc.Mux.Handle(mcpsrv.Path, mcpsrv.Handler(mgr, publisher, con.Log))
 
@@ -242,7 +254,7 @@ runcmd:
 	}
 
 	logf("repo を /work へコピー: %s", repo)
-	if err := copyRepo(g, repo, work); err != nil {
+	if err := copyRepo(g, repo, work, markKey); err != nil {
 		return err
 	}
 	if err := ag.setup(g, cfg, providers, svc.Token); err != nil {
@@ -435,7 +447,7 @@ func repoRoot(dir string) (string, error) {
 // copyRepo は履歴ごと (git bundle) VM の /work に取り込み、host と同じブランチを
 // checkout する。未コミットの変更は渡らない。/work が空でなくても取り込めるよう
 // clone ではなく init + fetch にする (.tmp のマウント先などがあってもよい)。
-func copyRepo(g vmGuest, repo, work string) error {
+func copyRepo(g vmGuest, repo, work, markKey string) error {
 	bundle := filepath.Join(work, "repo.bundle")
 	if out, err := exec.Command("git", "-C", repo, "bundle", "create", "-q", bundle, "--all").CombinedOutput(); err != nil {
 		return fmt.Errorf("git bundle に失敗: %v: %s", err, out)
@@ -460,12 +472,30 @@ func copyRepo(g vmGuest, repo, work string) error {
 	if out, err := g.sh("cat > /tmp/repo.bundle", f); err != nil {
 		return fmt.Errorf("bundle の転送に失敗: %v: %s", err, out)
 	}
-	// コミットは利用者の名前で作る (host と同じ user.name / user.email)。
-	// 署名は PR 化のときに host で行うので、VM 内では署名しない。
+	key, err := os.ReadFile(markKey)
+	if err != nil {
+		return err
+	}
+	if out, err := g.sh("mkdir -p ~/.ssh && umask 077 && cat > ~/.ssh/quagent-mark", bytes.NewReader(key)); err != nil {
+		return fmt.Errorf("捨て鍵の転送に失敗: %v: %s", err, out)
+	}
+	pub, err := os.ReadFile(markKey + ".pub")
+	if err != nil {
+		return err
+	}
+	// VM 内の git log でも署名を確かめられるようにする (無いとエラーが出て紛らわしい)
+	if out, err := g.sh("cat > ~/.ssh/quagent-allowed-signers", strings.NewReader("* "+string(pub))); err != nil {
+		return fmt.Errorf("捨て鍵の公開鍵の転送に失敗: %v: %s", err, out)
+	}
+	// コミットは利用者の名前で作り (host と同じ user.name / user.email)、run ごとの
+	// 捨て鍵で署名して「VM で作った」印にする。利用者の鍵での署名は PR 化のときに host で行う。
 	script := `set -e
 git config --global user.name ` + shellQuote(name) + `
 git config --global user.email ` + shellQuote(email) + `
-git config --global commit.gpgsign false
+git config --global gpg.format ssh
+git config --global user.signingkey ~/.ssh/quagent-mark
+git config --global gpg.ssh.allowedSignersFile ~/.ssh/quagent-allowed-signers
+git config --global commit.gpgsign true
 git config --global tag.gpgsign false
 cd /work
 git init -q -b quagent-init
