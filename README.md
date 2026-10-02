@@ -21,6 +21,8 @@ host から VM の操作 (コマンド実行・端末・repo の受け渡し・P
 vsock で行う。網を通らないので nft にも DNS にも関わらず、ssh も使わない。VM 内では
 quagent 自身が作業ユーザーの権限で vsock を待ち受ける (run ごとに cloud-init の
 seed で持ち込むので、quagent を更新してもイメージの焼き直しは要らない)。
+なお vsock では VM から host の vsock の待ち受けにも接続できる (ふつうの host
+には無いが、vsock で待ち受けるサービスを動かしているなら VM から届く)。
 sshd は既定で止める。`quagent run --ssh` のときだけ、使い捨ての鍵で
 `127.0.0.1` から人が入れるようにする (接続コマンドは承認コンソールに出る)。
 
@@ -55,8 +57,10 @@ quagent image ls / rm IMAGE    # 焼いたイメージの一覧・削除
 quagent run --image arch       # VM を起動 (--ssh: 人が ssh で入れる、--mount-tmp: .tmp をマウント)
 ```
 
-`quagent run` は tmux セッションを作り、上のペインで VM 内の opencode
-(`--auto`、作業ディレクトリ `/work`) を、下のペインで承認コンソールを開く。
+`quagent run` は tmux セッションを作り、上のペインで VM 内のエージェントを、
+下のペインで承認コンソールを開く。エージェントは `--agent` (TUI でも選べる) で
+`opencode` (既定、`--auto`) か `claude` (Claude Code、
+`--dangerously-skip-permissions`) を選ぶ。VM という檻の中では確認なしで動かす。
 エージェントのペインを終了するか、承認コンソールで `quit` すると VM を破棄する。
 デタッチしてもセッションが続くあいだ VM は動き続ける。
 
@@ -77,7 +81,8 @@ VM からの外向き通信は既定でゼロ。エージェントは MCP (`http
 10 分応答がなければ時間切れとして拒否し、時間切れであることをエージェントに伝える。
 エージェントは `release_network_access` で用済みの許可を自分で放棄できる。
 許可は「新規接続を始めてよいか」の判断なので、期限切れや放棄で確立済みの接続は
-切れない。「以後確認しない」は `~/.local/share/quagent/always-allow.json` に保存される。
+切れない。「以後確認しない」は `~/.local/share/quagent/always-allow.json` に保存され、
+`quagent always ls` / `quagent always rm DOMAIN...` (TUI でも可) で確認・取り消しできる。
 
 許可は DNS で判定する。子 netns 内の DNS サーバーが許可ドメイン (完全一致か
 `*.example.com`) の問い合わせだけを上流へ転送し、応答で見た IP だけを nft で
@@ -122,6 +127,19 @@ VM からは API のドメインにも直接出られない (既定の外向き�
 }
 ```
 
+Claude Code を使うときは `providers` に `anthropic` を入れる (VM 内の Claude Code は
+`ANTHROPIC_BASE_URL` をプロキシに向け、ダミーの鍵を `apiKeyHelper` で渡す):
+
+```json
+"anthropic": {
+  "upstream": "https://api.anthropic.com",
+  "header": "x-api-key", "prefix": "",
+  "secret_command": ["pass", "show", "anthropic/api-key"]
+}
+```
+
+`claude.model` で VM 内の Claude Code の既定モデルを指定できる。
+
 provider ID は opencode の provider ID と揃える。秘密の取り出し方は
 `secret_env` (環境変数名)・`secret_file` (パス)・`secret_command` (コマンド) の
 いずれか。ヘッダは既定で `Authorization: Bearer <秘密>` (`header` / `prefix` で変更可)。
@@ -146,7 +164,8 @@ host の利用者になる。
 
 ## 現状
 
-今後: Claude Code 対応、PR 作成の承認制 (任意)。
+今後: PR 作成の承認制 (任意)。Claude Code はサブスクリプションのログインには
+未対応 (API キーのみ)。
 
 ## ライセンス
 

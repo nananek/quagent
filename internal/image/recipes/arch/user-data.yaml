@@ -56,6 +56,11 @@ write_files:
       test -x "/home/$U/.opencode/bin/opencode"
       echo 'export PATH="$HOME/.opencode/bin:$PATH"' >> "/home/$U/.bash_profile"
 
+      # Claude Code (公式のネイティブインストーラー)
+      runuser -l "$U" -c 'curl -fsSL https://claude.ai/install.sh | bash'
+      test -x "/home/$U/.local/bin/claude"
+      echo 'export PATH="$HOME/.local/bin:$PATH"' >> "/home/$U/.bash_profile"
+
       # 作業ディレクトリ
       install -d -o "$U" -g "$U" /work
 

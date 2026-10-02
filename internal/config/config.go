@@ -20,8 +20,16 @@ type Config struct {
 	Providers map[string]Provider `json:"providers"`
 	// Opencode は VM 内の opencode の設定。
 	Opencode Opencode `json:"opencode"`
+	// Claude は VM 内の Claude Code の設定。
+	Claude Claude `json:"claude"`
 	// PR は PR 作成の設定。
 	PR PR `json:"pr"`
+}
+
+// Claude は VM 内の Claude Code の設定。
+type Claude struct {
+	// Model は既定のモデル (Claude Code の model 設定。空なら Claude Code の既定)。
+	Model string `json:"model,omitempty"`
 }
 
 // PR は PR 作成の設定。

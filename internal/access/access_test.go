@@ -170,3 +170,26 @@ func TestTimeout(t *testing.T) {
 		t.Fatal("時間切れ後の承認で許可が入った")
 	}
 }
+
+func TestRemoveAlways(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "always.json")
+	m, _ := NewManager(&fakeApplier{}, path)
+	r, _ := m.Submit([]string{"pypi.org", "registry.npmjs.org"}, "x")
+	if err := m.Decide(r.ID, Decision{Status: Approved, Kind: Always}); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := RemoveAlways(path, []string{"pypi.org", "nothere.example"})
+	if err != nil || len(removed) != 1 || removed[0] != "pypi.org" {
+		t.Fatalf("removed=%v err=%v", removed, err)
+	}
+	list, _ := LoadAlways(path)
+	if len(list) != 1 || list[0] != "registry.npmjs.org" {
+		t.Fatalf("残りが違う: %v", list)
+	}
+	// 取り消したものは次の Manager で再び確認に回る
+	m2, _ := NewManager(&fakeApplier{}, path)
+	_, _ = m2.Submit([]string{"pypi.org"}, "y")
+	if len(m2.Pending()) != 1 {
+		t.Fatal("取り消したドメインが確認なしで通った")
+	}
+}

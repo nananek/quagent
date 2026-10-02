@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/nananek/quagent/internal/access"
 	"github.com/nananek/quagent/internal/console"
 	"github.com/nananek/quagent/internal/guest"
 	"github.com/nananek/quagent/internal/image"
@@ -23,7 +24,8 @@ const usage = `usage:
   quagent image build [--refresh] [RECIPE]     ベースイメージを焼く (既定: debian)
   quagent image ls                             焼いたベースイメージの一覧
   quagent image rm IMAGE                       ベースイメージを消す
-  quagent run [--repo DIR] [--image RECIPE] [--cpus N] [--mem MiB] [--allow "d1 d2"] [--ssh] [--mount-tmp]
+  quagent always ls | rm DOMAIN...              「以後確認しない」ドメインの一覧・取り消し
+  quagent run [--repo DIR] [--image RECIPE] [--cpus N] [--mem MiB] [--agent opencode|claude] [--allow "d1 d2"] [--ssh] [--mount-tmp]
                                                VM を起動し、tmux でエージェントと承認コンソールを開く
 `
 
@@ -40,7 +42,7 @@ func dispatch(args []string) error {
 			fmt.Fprint(os.Stderr, usage)
 			os.Exit(2)
 		}
-		l, err := tui.Run()
+		l, err := tui.Run(agentNames())
 		if errors.Is(err, tui.ErrQuit) {
 			return nil
 		}
@@ -48,7 +50,7 @@ func dispatch(args []string) error {
 			return err
 		}
 		return run(runOpts{Repo: l.Repo, Recipe: l.Recipe, CPUs: l.CPUs, MemMiB: l.MemMiB,
-			MountTmp: l.MountTmp, SSH: l.SSH, Interactive: true})
+			MountTmp: l.MountTmp, SSH: l.SSH, Agent: l.Agent, Interactive: true})
 	}
 	switch args[0] {
 	case netns.ChildCommand:
@@ -71,6 +73,8 @@ func dispatch(args []string) error {
 		return cmdImage(args[1:])
 	case "run":
 		return cmdRun(args[1:])
+	case "always":
+		return cmdAlways(args[1:])
 	default:
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
@@ -147,6 +151,7 @@ func cmdRun(args []string) error {
 	cpus := fs.Int("cpus", 4, "VM の CPU 数")
 	mem := fs.Int("mem", 8192, "VM のメモリ (MiB)")
 	recipe := fs.String("image", image.DefaultRecipe, "使うベースイメージのレシピ (quagent image recipes)")
+	agent := fs.String("agent", DefaultAgent, "VM 内で動かすエージェント ("+strings.Join(agentNames(), " / ")+")")
 	mountTmp := fs.Bool("mount-tmp", false, "repo の .tmp を VM の /work/.tmp に読み書き可能でマウントする")
 	useSSH := fs.Bool("ssh", false, "人が ssh で VM に入れるようにする (quagent 自身の操作は vsock)")
 	allow := fs.String("allow", "", "egress を許すドメイン (空白区切り)。LLM API は認証プロキシ経由なので不要")
@@ -160,7 +165,33 @@ func cmdRun(args []string) error {
 		Interactive: isTerminal(os.Stdin),
 		SSH:         *useSSH,
 		MountTmp:    *mountTmp,
+		Agent:       *agent,
 	})
+}
+
+func cmdAlways(args []string) error {
+	if len(args) == 0 || args[0] == "ls" {
+		list, err := access.LoadAlways(access.AlwaysPath())
+		if err != nil {
+			return err
+		}
+		for _, d := range list {
+			fmt.Println(d)
+		}
+		return nil
+	}
+	if args[0] == "rm" && len(args) > 1 {
+		removed, err := access.RemoveAlways(access.AlwaysPath(), args[1:])
+		if err != nil {
+			return err
+		}
+		if len(removed) == 0 {
+			return fmt.Errorf("一覧に無い: %s", strings.Join(args[1:], " "))
+		}
+		fmt.Println("取り消した:", strings.Join(removed, " "), "(動いている VM には次の起動から効く)")
+		return nil
+	}
+	return fmt.Errorf("always: ls か rm DOMAIN... を指定する")
 }
 
 // consoleCommand は承認コンソール UI を動かす隠しサブコマンド名。

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand/v2"
@@ -39,6 +38,8 @@ type runOpts struct {
 	SSH bool
 	// MountTmp は host の repo の .tmp を VM の /work/.tmp に読み書き可能でマウントする。
 	MountTmp bool
+	// Agent は VM 内で動かすエージェント (agents のキー)。
+	Agent string
 }
 
 func logf(format string, a ...any) {
@@ -49,6 +50,13 @@ func run(o runOpts) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
+	}
+	if o.Agent == "" {
+		o.Agent = DefaultAgent
+	}
+	ag, ok := agents[o.Agent]
+	if !ok {
+		return fmt.Errorf("不明なエージェント %q (使えるもの: %s)", o.Agent, strings.Join(agentNames(), ", "))
 	}
 	repo, err := repoRoot(o.Repo)
 	if err != nil {
@@ -109,6 +117,8 @@ func run(o runOpts) error {
 	userData := fmt.Sprintf(`#cloud-config
 bootcmd:
   - echo '%s %s' >> /etc/hosts
+  # 外へは出られないので NTP は使えない (時計は KVM が合わせる)。拒否の記録が並ぶだけなので止める
+  - [sh, -c, "systemctl mask --now systemd-timesyncd.service 2>/dev/null; true"]
 runcmd:
 %s  - [sh, -c, "mkdir -p /run/quagent-seed && mount -o ro /dev/disk/by-label/cidata /run/quagent-seed && install -m 755 /run/quagent-seed/quagent-guest /usr/local/bin/quagent-guest && umount /run/quagent-seed"]
   - [systemd-run, --unit=quagent-guest, --uid=%s, -p, Restart=always, /usr/local/bin/quagent-guest, %s]
@@ -182,7 +192,7 @@ runcmd:
 	defer l.Stop()
 
 	// 接続先の申請と承認 (MCP -> Manager -> launcher の nft)
-	mgr, err := access.NewManager(l, filepath.Join(paths.DataDir(), "always-allow.json"))
+	mgr, err := access.NewManager(l, access.AlwaysPath())
 	if err != nil {
 		return err
 	}
@@ -205,7 +215,7 @@ runcmd:
 	}
 	svc.Mux.Handle(mcpsrv.Path, mcpsrv.Handler(mgr, publisher, con.Log))
 
-	// 待機中の Ctrl-C でも後始末を通す。対話中は ssh が pty で受けるので届かない。
+	// 待機中の Ctrl-C でも後始末を通す。対話中の入力は tmux の端末が受けるので届かない。
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sigs)
@@ -232,7 +242,7 @@ runcmd:
 	if err := copyRepo(g, repo, work); err != nil {
 		return err
 	}
-	if err := writeOpencodeConfig(g, providers, cfg.Opencode.Model); err != nil {
+	if err := ag.setup(g, cfg, providers); err != nil {
 		return err
 	}
 	if o.SSH {
@@ -246,7 +256,7 @@ runcmd:
 		return nil
 	}
 
-	agent := g.interactiveArgv("cd /work && opencode --auto /work; exec bash -l")
+	agent := g.interactiveArgv(ag.command)
 	session := "quagent-" + filepath.Base(work)
 	return runTmux(session, agent, []string{self, consoleCommand, filepath.Join(work, "console.sock")}, con.Quit)
 }
@@ -459,38 +469,6 @@ git config --global user.email quagent@localhost`
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-// writeOpencodeConfig は guest の opencode が provider を認証プロキシ経由で使うよう設定する。
-// apiKey はダミー (本物はプロキシが host 側で付ける)。
-func writeOpencodeConfig(g vmGuest, providers []string, model string) error {
-	prov := map[string]any{}
-	for _, id := range providers {
-		prov[id] = map[string]any{"options": map[string]any{
-			"baseURL": authproxy.GuestBaseURL(hostsvc.GuestHost, id),
-			"apiKey":  "quagent-proxy",
-		}}
-	}
-	conf := map[string]any{
-		"$schema":  "https://opencode.ai/config.json",
-		"provider": prov,
-		"mcp": map[string]any{
-			"quagent": map[string]any{
-				"type":    "remote",
-				"url":     "http://" + hostsvc.GuestHost + mcpsrv.Path,
-				"enabled": true,
-				"oauth":   false,
-			},
-		},
-	}
-	if model != "" {
-		conf["model"] = model
-	}
-	b, err := json.MarshalIndent(conf, "", "  ")
-	if err != nil {
-		return err
-	}
-	return g.writeFile("~/.config/opencode/opencode.json", b)
 }
 
 // saveLogs は host 側のログだけを残す (VM のディスクや鍵は残さない)。

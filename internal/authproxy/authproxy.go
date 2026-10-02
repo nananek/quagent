@@ -57,11 +57,12 @@ func handler(id string, up *url.URL, header, value string, logger *log.Logger) h
 		// ストリーミング応答 (SSE) をそのまま流す
 		FlushInterval: -1,
 		ErrorLog:      logger,
+		ModifyResponse: func(resp *http.Response) error {
+			logger.Printf("llm %s %s %s -> %d", id, resp.Request.Method, resp.Request.URL.Path, resp.StatusCode)
+			return nil
+		},
 	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		logger.Printf("llm %s %s %s", id, r.Method, strings.TrimPrefix(r.URL.Path, Prefix+id))
-		rp.ServeHTTP(w, r)
-	})
+	return rp
 }
 
 // GuestBaseURL は guest に設定する provider の baseURL を返す。

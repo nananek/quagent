@@ -15,6 +15,7 @@ import (
 
 	"github.com/charmbracelet/huh"
 
+	"github.com/nananek/quagent/internal/access"
 	"github.com/nananek/quagent/internal/image"
 	"github.com/nananek/quagent/internal/paths"
 )
@@ -26,8 +27,9 @@ type Launch struct {
 	CPUs   int    `json:"cpus"`
 	MemMiB int    `json:"mem_mib"`
 	// MountTmp は repo の .tmp を VM にマウントする。SSH は人が ssh で入れるようにする。
-	MountTmp bool `json:"mount_tmp"`
-	SSH      bool `json:"ssh"`
+	MountTmp bool   `json:"mount_tmp"`
+	SSH      bool   `json:"ssh"`
+	Agent    string `json:"agent"`
 }
 
 // ErrQuit は TUI で終了を選んだ (または中断した)。
@@ -52,14 +54,15 @@ func saveLast(l Launch) {
 	}
 }
 
-// Run はメインメニューを出し、起動が選ばれたらその設定を返す。
-func Run() (Launch, error) {
+// Run はメインメニューを出し、起動が選ばれたらその設定を返す。agents は選べるエージェント。
+func Run(agents []string) (Launch, error) {
 	for {
 		var choice string
 		err := huh.NewForm(huh.NewGroup(
 			huh.NewSelect[string]().Title("quagent").Options(
 				huh.NewOption("VM を起動", "start"),
 				huh.NewOption("ベースイメージの管理", "images"),
+				huh.NewOption("「以後確認しない」ドメインの管理", "always"),
 				huh.NewOption("終了", "quit"),
 			).Value(&choice),
 		)).Run()
@@ -68,13 +71,17 @@ func Run() (Launch, error) {
 		}
 		switch choice {
 		case "start":
-			l, err := startForm()
+			l, err := startForm(agents)
 			if errors.Is(err, errBack) {
 				continue
 			}
 			return l, err
 		case "images":
 			if err := imagesMenu(); err != nil && !errors.Is(err, errBack) {
+				return Launch{}, err
+			}
+		case "always":
+			if err := alwaysMenu(); err != nil && !errors.Is(err, errBack) {
 				return Launch{}, err
 			}
 		}
@@ -109,8 +116,15 @@ func recipeOptions() ([]huh.Option[string], error) {
 	return opts, nil
 }
 
-func startForm() (Launch, error) {
+func startForm(agents []string) (Launch, error) {
 	l := loadLast()
+	if l.Agent == "" {
+		l.Agent = "opencode"
+	}
+	var agentOpts []huh.Option[string]
+	for _, a := range agents {
+		agentOpts = append(agentOpts, huh.NewOption(a, a))
+	}
 	if cwd, err := os.Getwd(); err == nil {
 		if top := gitTop(cwd); top != "" {
 			l.Repo = top
@@ -144,6 +158,7 @@ func startForm() (Launch, error) {
 			return nil
 		}),
 		huh.NewSelect[string]().Title("ベースイメージ").Options(opts...).Value(&l.Recipe),
+		huh.NewSelect[string]().Title("エージェント").Options(agentOpts...).Value(&l.Agent),
 		huh.NewInput().Title("CPU").Value(&cpus).Validate(positive),
 		huh.NewInput().Title("メモリ (MiB)").Value(&mem).Validate(positive),
 		huh.NewMultiSelect[string]().Title("オプション").Options(
@@ -264,4 +279,36 @@ func pause() {
 // escapeMarkdown は Note の説明文 (markdown として描画される) の特殊文字を無効にする。
 func escapeMarkdown(s string) string {
 	return strings.NewReplacer(`\`, `\\`, "*", `\*`, "_", `\_`, "`", "\\`", "<", `\<`).Replace(s)
+}
+
+// alwaysMenu は「以後確認しない」ドメインを一覧し、選んだものを取り消す。
+func alwaysMenu() error {
+	list, err := access.LoadAlways(access.AlwaysPath())
+	if err != nil {
+		return err
+	}
+	if len(list) == 0 {
+		fmt.Println("「以後確認しない」ドメインは無い")
+		pause()
+		return errBack
+	}
+	var opts []huh.Option[string]
+	for _, d := range list {
+		opts = append(opts, huh.NewOption(d, d))
+	}
+	var picked []string
+	if err := huh.NewForm(huh.NewGroup(
+		huh.NewMultiSelect[string]().Title("取り消すドメイン (space で選択、enter で確定)").
+			Description("全プロジェクト共通。取り消すと次の起動から再び確認される").
+			Options(opts...).Value(&picked),
+	)).Run(); err != nil || len(picked) == 0 {
+		return errBack
+	}
+	removed, err := access.RemoveAlways(access.AlwaysPath(), picked)
+	if err != nil {
+		return err
+	}
+	fmt.Println("取り消した:", strings.Join(removed, " "))
+	pause()
+	return errBack
 }

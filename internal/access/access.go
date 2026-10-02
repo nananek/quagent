@@ -17,12 +17,14 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/nananek/quagent/internal/netns"
+	"github.com/nananek/quagent/internal/paths"
 )
 
 const (
@@ -456,4 +458,59 @@ func (m *Manager) finish(r *Request, res Result) {
 			break
 		}
 	}
+}
+
+// AlwaysPath は「以後確認しない」の保存先。
+func AlwaysPath() string { return filepath.Join(paths.DataDir(), "always-allow.json") }
+
+// LoadAlways は「以後確認しない」ドメインの一覧を読む。
+func LoadAlways(path string) ([]string, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var list []string
+	if err := json.Unmarshal(b, &list); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	sort.Strings(list)
+	return list, nil
+}
+
+// RemoveAlways は「以後確認しない」からドメインを外す。動いている run には効かない。
+func RemoveAlways(path string, domains []string) ([]string, error) {
+	list, err := LoadAlways(path)
+	if err != nil {
+		return nil, err
+	}
+	var kept, removed []string
+	for _, d := range list {
+		if slices.Contains(domains, d) {
+			removed = append(removed, d)
+		} else {
+			kept = append(kept, d)
+		}
+	}
+	if len(removed) == 0 {
+		return nil, nil
+	}
+	b, err := json.MarshalIndent(nonNilStrings(kept), "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+		return nil, err
+	}
+	return removed, os.Rename(tmp, path)
+}
+
+func nonNilStrings(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
