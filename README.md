@@ -41,3 +41,7 @@ unprivileged user namespace が有効であること。
 最小構成のみ。暫定で opencode の API ドメインへの 443 だけを固定で許可している。
 今後: MCP による接続先申請と承認 UI (tmux)、host 側での認証付与プロキシ、
 PR の作成と署名、起動時 TUI。
+
+## ライセンス
+
+MIT
