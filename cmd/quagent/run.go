@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -16,6 +17,7 @@ import (
 	"github.com/nananek/quagent/internal/authproxy"
 	"github.com/nananek/quagent/internal/config"
 	"github.com/nananek/quagent/internal/console"
+	"github.com/nananek/quagent/internal/guest"
 	"github.com/nananek/quagent/internal/hostsvc"
 	"github.com/nananek/quagent/internal/image"
 	"github.com/nananek/quagent/internal/mcpsrv"
@@ -27,11 +29,16 @@ import (
 
 type runOpts struct {
 	Repo   string
+	Recipe string
 	CPUs   int
 	MemMiB int
 	Allow  []string
 	// Interactive は端末から使うとき true。tmux でエージェントと承認コンソールを開く。
 	Interactive bool
+	// SSH は人が ssh で VM に入れるようにする (quagent 自身の操作は常に vsock)。
+	SSH bool
+	// MountTmp は host の repo の .tmp を VM の /work/.tmp に読み書き可能でマウントする。
+	MountTmp bool
 }
 
 func logf(format string, a ...any) {
@@ -47,50 +54,85 @@ func run(o runOpts) error {
 	if err != nil {
 		return err
 	}
-	base, err := image.Latest()
+	img, err := image.Latest(o.Recipe)
 	if err != nil {
 		return err
 	}
+	base := img.Path
 	dns, err := vm.HostDNS()
 	if err != nil {
 		return err
 	}
-	port, err := vm.FreePort()
+	self, err := os.Executable()
 	if err != nil {
 		return err
+	}
+	if err := checkStatic(self); err != nil {
+		return err
+	}
+	if err := guest.Available(); err != nil {
+		return err
+	}
+	g := vmGuest{cid: newCID(), self: self}
+	var shares []vm.Share
+	if o.MountTmp {
+		dir, err := prepareTmp(repo)
+		if err != nil {
+			return err
+		}
+		shares = append(shares, vm.Share{Tag: tmpTag, Path: dir})
 	}
 
 	if err := os.MkdirAll(paths.RunsDir(), 0o755); err != nil {
 		return err
 	}
+	sweepRuns()
 	id := time.Now().Format("20060102-150405")
 	work, err := os.MkdirTemp(paths.RunsDir(), id+"-")
 	if err != nil {
 		return err
 	}
+	// run のあいだ作業ディレクトリをロックしておく (強制終了で残ったものを次回掃除するため)
+	lock, err := lockRun(work)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 	defer func() {
 		saveLogs(work)
 		os.RemoveAll(work)
 		logf("VM を破棄した (ログ: %s)", filepath.Join(paths.LogsDir(), filepath.Base(work)))
 	}()
 
-	// run ごとに使い捨ての ssh 鍵
-	key := filepath.Join(work, "id_ed25519")
-	if out, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "quagent", "-f", key).CombinedOutput(); err != nil {
-		return fmt.Errorf("ssh 鍵の生成に失敗: %v: %s", err, out)
-	}
-	pub, err := os.ReadFile(key + ".pub")
-	if err != nil {
-		return err
-	}
+	// VM の受け口 (quagent 自身) を seed に入れ、cloud-init で作業ユーザーとして常駐させる。
+	// ssh は既定で止める。--ssh のときだけ使い捨ての鍵で人が入れるようにする。
 	userData := fmt.Sprintf(`#cloud-config
-users:
-  - name: %s
-    ssh_authorized_keys: [%q]
 bootcmd:
   - echo '%s %s' >> /etc/hosts
-`, vm.GuestUser, strings.TrimSpace(string(pub)), hostsvc.GuestAddr, hostsvc.GuestHost)
-	seed, err := vm.MakeSeed(work, "quagent-"+filepath.Base(work), "quagent", userData)
+runcmd:
+%s  - [sh, -c, "mkdir -p /run/quagent-seed && mount -o ro /dev/disk/by-label/cidata /run/quagent-seed && install -m 755 /run/quagent-seed/quagent-guest /usr/local/bin/quagent-guest && umount /run/quagent-seed"]
+  - [systemd-run, --unit=quagent-guest, --uid=%s, -p, Restart=always, /usr/local/bin/quagent-guest, %s]
+`, hostsvc.GuestAddr, hostsvc.GuestHost, mountCmds(shares), vm.GuestUser, guestCommand)
+	var sshPort int
+	var sshKey string
+	if o.SSH {
+		if sshPort, err = vm.FreePort(); err != nil {
+			return err
+		}
+		sshKey = filepath.Join(work, "id_ed25519")
+		if out, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "quagent", "-f", sshKey).CombinedOutput(); err != nil {
+			return fmt.Errorf("ssh 鍵の生成に失敗: %v: %s", err, out)
+		}
+		pub, err := os.ReadFile(sshKey + ".pub")
+		if err != nil {
+			return err
+		}
+		userData += fmt.Sprintf("users:\n  - name: %s\n    ssh_authorized_keys: [%q]\n", vm.GuestUser, strings.TrimSpace(string(pub)))
+	} else {
+		userData += "  - [sh, -c, \"systemctl disable --now ssh.service ssh.socket sshd.service sshd.socket 2>/dev/null; true\"]\n"
+	}
+	seed, err := vm.MakeSeed(work, "quagent-"+filepath.Base(work), "quagent", userData,
+		map[string]string{"quagent-guest": self})
 	if err != nil {
 		return err
 	}
@@ -119,17 +161,20 @@ bootcmd:
 	}
 	defer svc.Stop()
 
-	// qemu の hostfwd は子 netns 側 (slirp4netns の tap0 = 10.0.2.100) で受ける。
-	qemu := vm.QemuArgv(vm.QemuOpts{
+	// DNS は qemu 既定の 10.0.2.3 -> 子 netns の自前 DNS。子 netns は IPv4 のみ。
+	netdev := "ipv6=off," + hostsvc.Guestfwd(filepath.Join(work, "host.sock"))
+	if o.SSH {
+		// qemu の hostfwd は子 netns 側 (slirp4netns の tap0 = 10.0.2.100) で受ける。
+		netdev += fmt.Sprintf(",hostfwd=tcp:10.0.2.100:%d-:22", sshPort)
+	}
+	qemu := vm.AsGuestUID(vm.QemuArgv(vm.QemuOpts{
 		Disk: overlay, Seed: seed, CPUs: o.CPUs, MemMiB: o.MemMiB,
 		ConsoleLog: filepath.Join(work, "console.log"),
-		// DNS は qemu 既定の 10.0.2.3 -> 子 netns の自前 DNS。子 netns は IPv4 のみ。
-		Netdev: fmt.Sprintf("ipv6=off,hostfwd=tcp:10.0.2.100:%d-:22,%s",
-			port, hostsvc.Guestfwd(filepath.Join(work, "host.sock"))),
-	})
+		Netdev:     netdev, VsockCID: g.cid, Shares: shares,
+	}))
 	logf("VM を起動 (base=%s, allow=%v)", filepath.Base(base), o.Allow)
 	l, err := netns.Start(netns.Spec{
-		WorkDir: work, SSHPort: port, DNS: dns, Allow: o.Allow, QemuArgv: qemu,
+		WorkDir: work, SSHPort: sshPort, DNS: dns, Allow: o.Allow, QemuArgv: qemu,
 	})
 	if err != nil {
 		return err
@@ -156,8 +201,7 @@ bootcmd:
 	}
 	publisher := &pr.Publisher{
 		Repo: repo, Work: work, Protected: protected, GH: pr.RunGH,
-		GuestURL: fmt.Sprintf("ssh://%s@127.0.0.1:%d/work", vm.GuestUser, port),
-		SSHCmd:   shellJoin(append([]string{"ssh"}, vm.SSH{Port: port, Key: key}.Opts()...)),
+		GuestURL: g.gitURL(), GitConfig: []string{"protocol.ext.allow=always"},
 	}
 	svc.Mux.Handle(mcpsrv.Path, mcpsrv.Handler(mgr, publisher, con.Log))
 
@@ -177,41 +221,109 @@ bootcmd:
 	if err := l.WaitReady(30 * time.Second); err != nil {
 		return err
 	}
-	ssh := vm.SSH{Port: port, Key: key}
-	if err := ssh.WaitReady(3*time.Minute, interrupted); err != nil {
+	if err := guest.WaitReady(g.cid, 3*time.Minute, interrupted); err != nil {
 		return err
 	}
-	if out, err := ssh.Run("cloud-init", "status", "--wait"); err != nil {
+	if out, err := g.sh("cloud-init status --wait", nil); err != nil {
 		return fmt.Errorf("cloud-init が失敗: %v: %s", err, out)
 	}
 
 	logf("repo を /work へコピー: %s", repo)
-	if err := copyRepo(ssh, repo, work); err != nil {
+	if err := copyRepo(g, repo, work); err != nil {
 		return err
 	}
-
-	if err := writeOpencodeConfig(ssh, providers, cfg.Opencode.Model); err != nil {
+	if err := writeOpencodeConfig(g, providers, cfg.Opencode.Model); err != nil {
 		return err
+	}
+	if o.SSH {
+		con.Log(fmt.Sprintf("ssh: ssh -i %s -p %d -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null %s@127.0.0.1",
+			sshKey, sshPort, vm.GuestUser))
 	}
 
 	if !o.Interactive {
 		// 端末が無い (自動テスト等): tmux を使わず stdin をそのまま VM のシェルへ流す
-		sh := ssh.Command(nil, "cd /work && exec bash -l")
-		sh.Stdin, sh.Stdout, sh.Stderr = os.Stdin, os.Stdout, os.Stderr
-		_ = sh.Run()
+		_ = g.stream("cd /work && exec bash -l", os.Stdin, os.Stdout, os.Stderr)
 		return nil
 	}
 
-	self, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	agent := ssh.Command([]string{"-t"}, "cd /work && ~/.opencode/bin/opencode --auto /work; exec bash -l").Args
+	agent := g.interactiveArgv("cd /work && opencode --auto /work; exec bash -l")
 	session := "quagent-" + filepath.Base(work)
-	if err := runTmux(session, agent, []string{self, consoleCommand, filepath.Join(work, "console.sock")}, con.Quit); err != nil {
-		return err
+	return runTmux(session, agent, []string{self, consoleCommand, filepath.Join(work, "console.sock")}, con.Quit)
+}
+
+// lockRun は作業ディレクトリのロックを取る。プロセスが終われば (強制終了でも) 外れる。
+func lockRun(work string) (*os.File, error) {
+	f, err := os.OpenFile(filepath.Join(work, "lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// sweepRuns は強制終了などで残った作業ディレクトリ (ロックが外れているもの) を、
+// host 側のログだけ残して消す。
+func sweepRuns() {
+	entries, err := os.ReadDir(paths.RunsDir())
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		dir := filepath.Join(paths.RunsDir(), e.Name())
+		// 作られた直後 (まだロックを取っていない) の run を消さない
+		if info, err := e.Info(); err != nil || time.Since(info.ModTime()) < time.Minute {
+			continue
+		}
+		f, err := lockRun(dir)
+		if err != nil {
+			continue // 動いている run
+		}
+		f.Close()
+		saveLogs(dir)
+		if os.RemoveAll(dir) == nil {
+			logf("前回の残骸を掃除した: %s", e.Name())
+		}
+	}
+}
+
+// tmpTag は .tmp を 9p で見せるときのタグ。
+const tmpTag = "quagent-tmp"
+
+// prepareTmp は host の repo の .tmp を用意し、マウントしてよいかを確かめる。
+func prepareTmp(repo string) (string, error) {
+	dir := filepath.Join(repo, ".tmp")
+	// git で管理しているファイルがあると、VM の checkout が host に書き込んでしまう
+	if out, _ := exec.Command("git", "-C", repo, "ls-files", "--", ".tmp").Output(); len(strings.TrimSpace(string(out))) > 0 {
+		return "", fmt.Errorf(".tmp に git で管理しているファイルがあるのでマウントしない")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	if exec.Command("git", "-C", repo, "check-ignore", "-q", ".tmp/").Run() != nil {
+		logf("注意: %s は .gitignore されていない", dir)
+	}
+	logf("%s を VM の /work/.tmp にマウントする (VM から読み書きできる)", dir)
+	return dir, nil
+}
+
+// mountCmds は shares を guest の /work/<.tmp> にマウントする cloud-init の runcmd を返す。
+// repo の取り込みより前 (受け口の起動前) にマウントしておく。
+func mountCmds(shares []vm.Share) string {
+	var b strings.Builder
+	for _, sh := range shares {
+		if sh.Tag == tmpTag {
+			fmt.Fprintf(&b, "  - [sh, -c, \"mkdir -p /work/.tmp && mount -t 9p -o trans=virtio,version=9p2000.L,msize=262144 %s /work/.tmp\"]\n", sh.Tag)
+		}
+	}
+	return b.String()
+}
+
+// newCID は vsock の guest CID を選ぶ (3 以上。host 上で他の VM と被らないよう乱数)。
+func newCID() uint32 {
+	return 3 + uint32(rand.Int64N(1<<31-3))
 }
 
 // relayDenied は DNS で拒否したドメインを承認コンソールに流す (同じ名前は 1 分に 1 回)。
@@ -307,24 +419,40 @@ func repoRoot(dir string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// copyRepo は履歴ごと (git bundle) VM の /work に clone する。
-// 未コミットの変更は渡らない。
-func copyRepo(ssh vm.SSH, repo, work string) error {
+// copyRepo は履歴ごと (git bundle) VM の /work に取り込み、host と同じブランチを
+// checkout する。未コミットの変更は渡らない。/work が空でなくても取り込めるよう
+// clone ではなく init + fetch にする (.tmp のマウント先などがあってもよい)。
+func copyRepo(g vmGuest, repo, work string) error {
 	bundle := filepath.Join(work, "repo.bundle")
 	if out, err := exec.Command("git", "-C", repo, "bundle", "create", "-q", bundle, "--all").CombinedOutput(); err != nil {
 		return fmt.Errorf("git bundle に失敗: %v: %s", err, out)
 	}
-	if err := ssh.CopyTo(bundle, "/tmp/repo.bundle"); err != nil {
+	head, err := exec.Command("git", "-C", repo, "symbolic-ref", "-q", "--short", "HEAD").Output()
+	if err != nil {
+		// detached HEAD ならコミットを直接 checkout する
+		head, err = exec.Command("git", "-C", repo, "rev-parse", "HEAD").Output()
+		if err != nil {
+			return err
+		}
+	}
+	f, err := os.Open(bundle)
+	if err != nil {
 		return err
 	}
+	defer f.Close()
+	if out, err := g.sh("cat > /tmp/repo.bundle", f); err != nil {
+		return fmt.Errorf("bundle の転送に失敗: %v: %s", err, out)
+	}
 	script := `set -e
-git clone -q /tmp/repo.bundle /work
-git -C /work remote remove origin
+cd /work
+git init -q -b quagent-init
+git fetch -q /tmp/repo.bundle '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*' '+refs/remotes/*:refs/remotes/*'
+git checkout -q ` + shellQuote(strings.TrimSpace(string(head))) + `
 rm /tmp/repo.bundle
 git config --global user.name quagent
 git config --global user.email quagent@localhost`
-	if out, err := ssh.Run("bash", "-c", shellQuote(script)); err != nil {
-		return fmt.Errorf("VM 内の clone に失敗: %v: %s", err, out)
+	if out, err := g.sh(script, nil); err != nil {
+		return fmt.Errorf("VM 内での取り込みに失敗: %v: %s", err, out)
 	}
 	return nil
 }
@@ -335,7 +463,7 @@ func shellQuote(s string) string {
 
 // writeOpencodeConfig は guest の opencode が provider を認証プロキシ経由で使うよう設定する。
 // apiKey はダミー (本物はプロキシが host 側で付ける)。
-func writeOpencodeConfig(ssh vm.SSH, providers []string, model string) error {
+func writeOpencodeConfig(g vmGuest, providers []string, model string) error {
 	prov := map[string]any{}
 	for _, id := range providers {
 		prov[id] = map[string]any{"options": map[string]any{
@@ -362,7 +490,7 @@ func writeOpencodeConfig(ssh vm.SSH, providers []string, model string) error {
 	if err != nil {
 		return err
 	}
-	return ssh.WriteFile("~/.config/opencode/opencode.json", b)
+	return g.writeFile("~/.config/opencode/opencode.json", b)
 }
 
 // saveLogs は host 側のログだけを残す (VM のディスクや鍵は残さない)。

@@ -3,21 +3,28 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/nananek/quagent/internal/console"
+	"github.com/nananek/quagent/internal/guest"
 	"github.com/nananek/quagent/internal/image"
 	"github.com/nananek/quagent/internal/netns"
+	"github.com/nananek/quagent/internal/tui"
 )
 
 const usage = `usage:
-  quagent image build [--cpus N] [--mem MiB]   ベースイメージを焼く
+  quagent                                      TUI (VM の起動設定とベースイメージの管理)
+  quagent image recipes                        使えるレシピ (OS) の一覧
+  quagent image build [--refresh] [RECIPE]     ベースイメージを焼く (既定: debian)
   quagent image ls                             焼いたベースイメージの一覧
-  quagent run [--repo DIR] [--cpus N] [--mem MiB] [--allow "d1 d2"]
-                                               VM を起動して /work に repo を置き ssh する
+  quagent image rm IMAGE                       ベースイメージを消す
+  quagent run [--repo DIR] [--image RECIPE] [--cpus N] [--mem MiB] [--allow "d1 d2"] [--ssh] [--mount-tmp]
+                                               VM を起動し、tmux でエージェントと承認コンソールを開く
 `
 
 func main() {
@@ -29,8 +36,19 @@ func main() {
 
 func dispatch(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, usage)
-		os.Exit(2)
+		if !isTerminal(os.Stdin) {
+			fmt.Fprint(os.Stderr, usage)
+			os.Exit(2)
+		}
+		l, err := tui.Run()
+		if errors.Is(err, tui.ErrQuit) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return run(runOpts{Repo: l.Repo, Recipe: l.Recipe, CPUs: l.CPUs, MemMiB: l.MemMiB,
+			MountTmp: l.MountTmp, SSH: l.SSH, Interactive: true})
 	}
 	switch args[0] {
 	case netns.ChildCommand:
@@ -38,6 +56,12 @@ func dispatch(args []string) error {
 			return fmt.Errorf("%s: spec のパスが必要", netns.ChildCommand)
 		}
 		return netns.RunChild(args[1])
+	case guestCommand:
+		return guest.Serve()
+	case execCommand:
+		return cmdExec(args[1:])
+	case attachCommand:
+		return cmdAttach(args[1:])
 	case consoleCommand:
 		if len(args) != 2 {
 			return fmt.Errorf("%s: socket のパスが必要", consoleCommand)
@@ -56,27 +80,62 @@ func dispatch(args []string) error {
 
 func cmdImage(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("image: build か ls を指定する")
+		return fmt.Errorf("image: recipes / build / ls / rm を指定する")
 	}
 	switch args[0] {
+	case "recipes":
+		rs, err := image.Recipes()
+		if err != nil {
+			return err
+		}
+		for _, r := range rs {
+			fmt.Printf("%-10s %s (%s)\n", r.Name, r.Description, r.Source)
+		}
+		return nil
 	case "build":
 		fs := flag.NewFlagSet("image build", flag.ExitOnError)
 		cpus := fs.Int("cpus", 4, "焼き込み VM の CPU 数")
 		mem := fs.Int("mem", 4096, "焼き込み VM のメモリ (MiB)")
+		refresh := fs.Bool("refresh", false, "クラウドイメージを取り直す")
 		_ = fs.Parse(args[1:])
-		path, err := image.Build(*cpus, *mem, os.Stderr)
+		name := image.DefaultRecipe
+		if fs.NArg() > 0 {
+			name = fs.Arg(0)
+		}
+		r, err := image.FindRecipe(name)
 		if err != nil {
 			return err
 		}
-		fmt.Println(path)
+		img, err := image.Build(r, image.BuildOpts{CPUs: *cpus, MemMiB: *mem, Refresh: *refresh}, os.Stderr)
+		if err != nil {
+			return err
+		}
+		fmt.Println(img.Path)
 		return nil
 	case "ls":
-		latest, err := image.Latest()
+		imgs, err := image.List("")
 		if err != nil {
 			return err
 		}
-		fmt.Println(latest)
+		for _, img := range imgs {
+			fmt.Printf("%-10s %s  %5.1f GiB  %s\n", img.Recipe, img.Built.Format("2006-01-02 15:04"),
+				float64(img.Size)/(1<<30), img.Path)
+		}
 		return nil
+	case "rm":
+		if len(args) != 2 {
+			return fmt.Errorf("image rm: イメージのパスを 1 つ指定する")
+		}
+		imgs, err := image.List("")
+		if err != nil {
+			return err
+		}
+		for _, img := range imgs {
+			if img.Path == args[1] || filepath.Base(img.Path) == args[1] {
+				return image.Remove(img)
+			}
+		}
+		return fmt.Errorf("そのイメージは無い: %s", args[1])
 	default:
 		return fmt.Errorf("image: 不明なサブコマンド %q", args[0])
 	}
@@ -87,14 +146,20 @@ func cmdRun(args []string) error {
 	repo := fs.String("repo", "", "VM に渡す git repo (既定: cwd の git toplevel)")
 	cpus := fs.Int("cpus", 4, "VM の CPU 数")
 	mem := fs.Int("mem", 8192, "VM のメモリ (MiB)")
+	recipe := fs.String("image", image.DefaultRecipe, "使うベースイメージのレシピ (quagent image recipes)")
+	mountTmp := fs.Bool("mount-tmp", false, "repo の .tmp を VM の /work/.tmp に読み書き可能でマウントする")
+	useSSH := fs.Bool("ssh", false, "人が ssh で VM に入れるようにする (quagent 自身の操作は vsock)")
 	allow := fs.String("allow", "", "egress を許すドメイン (空白区切り)。LLM API は認証プロキシ経由なので不要")
 	_ = fs.Parse(args)
 	return run(runOpts{
 		Repo:        *repo,
+		Recipe:      *recipe,
 		CPUs:        *cpus,
 		MemMiB:      *mem,
 		Allow:       strings.Fields(*allow),
 		Interactive: isTerminal(os.Stdin),
+		SSH:         *useSSH,
+		MountTmp:    *mountTmp,
 	})
 }
 

@@ -11,25 +11,48 @@ socket はその netns の nftables を通り、許可リスト以外への新�
 すべて非 root で動く。
 
 ```
-host ── slirp4netns add_hostfwd ──► 子 netns (qemu hostfwd) ──► guest:22
+host ── vsock ──────────────────────────────────────► guest (quagent __guest)
+host ◄─ unix socket ◄─ qemu guestfwd ◄──────────────── guest (quagent.host: LLM / MCP)
         qemu ── tap0 ──► slirp4netns ──► host (uplink)
-        └ nftables (子 netns): DNS と許可リスト以外を reject
+        └ 子 netns: nftables (許可した名前の IP 以外を reject) + 自前 DNS
 ```
+
+host から VM の操作 (コマンド実行・端末・repo の受け渡し・PR 用の git fetch) は
+vsock で行う。網を通らないので nft にも DNS にも関わらず、ssh も使わない。VM 内では
+quagent 自身が作業ユーザーの権限で vsock を待ち受ける (run ごとに cloud-init の
+seed で持ち込むので、quagent を更新してもイメージの焼き直しは要らない)。
+sshd は既定で止める。`quagent run --ssh` のときだけ、使い捨ての鍵で
+`127.0.0.1` から人が入れるようにする (接続コマンドは承認コンソールに出る)。
 
 ## VM の中
 
-- ベースイメージ: Debian 13 + rootless docker + opencode。docker の rootful
-  デーモンはマスクしてある。
+- ベースイメージ: OS ごとのレシピから焼く (下記)。どれも rootless docker と
+  opencode 入りで、rootful の docker デーモンは動かさない。
 - ユーザー `agent` (sudo なし)。作業ディレクトリは `/work` で、ここに対象 repo を
-  履歴ごと clone する (未コミットの変更は渡らない)。
-- VM は毎回ベースイメージの overlay から起動し、終了時に破棄する。
+  履歴ごと取り込み、host と同じブランチを checkout する (未コミットの変更は渡らない)。
+- VM は毎回ベースイメージの overlay から起動し、終了時に破棄する。強制終了で
+  残った作業ディレクトリは、次に起動したときに掃除する。
+- `--mount-tmp` (TUI のオプション) で、host の `<repo>/.tmp` を VM の
+  `/work/.tmp` に 9p で読み書き可能にマウントする。ここだけは VM から host に
+  書き込めるので、中身を host で実行するときは気をつける。`.tmp` に git で管理して
+  いるファイルがあればマウントしない (VM の checkout が host に書き込むため)。
+  qemu は入れ子の userns で動かし、host の利用者を VM の作業ユーザー (uid 1000) に
+  読み替えるので、ファイルの持ち主は双方で揃う。
 
 ## 使い方
 
 ```sh
-go build -o bin/quagent ./cmd/quagent
-bin/quagent image build        # ベースイメージを焼く (時々やり直して更新する)
-cd <repo> && quagent run       # VM を起動し、tmux でエージェントと承認コンソールを開く
+CGO_ENABLED=0 go build -o bin/quagent ./cmd/quagent   # VM に持ち込むので静的リンクにする
+cd <repo> && quagent           # TUI: 起動設定 (repo・OS・CPU・メモリ) とベースイメージの管理
+```
+
+TUI を使わずに直接操作することもできる:
+
+```sh
+quagent image recipes          # 使えるレシピ (OS) の一覧
+quagent image build [--refresh] arch   # ベースイメージを焼く (--refresh でクラウドイメージも取り直す)
+quagent image ls / rm IMAGE    # 焼いたイメージの一覧・削除
+quagent run --image arch       # VM を起動 (--ssh: 人が ssh で入れる、--mount-tmp: .tmp をマウント)
 ```
 
 `quagent run` は tmux セッションを作り、上のペインで VM 内の opencode
@@ -62,8 +85,22 @@ VM からの外向き通信は既定でゼロ。エージェントは MCP (`http
 使った持ち出しもできない。
 
 host に必要なもの: `qemu-system-x86_64` (KVM)、`qemu-img`、`xorriso`、
-`slirp4netns`、`unshare`/`nsenter` (util-linux)、`nft`、`ssh`、`git`。
-unprivileged user namespace が有効であること。
+`slirp4netns`、`unshare`/`nsenter` (util-linux)、`nft`、`socat`、`git`、`gh`、`tmux`。
+unprivileged user namespace が有効で、vsock (`/dev/vhost-vsock`、カーネル
+モジュール `vhost_vsock`) が使えること。`--ssh` を使うなら `ssh` / `ssh-keygen` も。
+
+## ベースイメージのレシピ
+
+OS ごとの作り方は `internal/image/recipes/<名前>/` に独立して置いてある
+(`recipe.json` にクラウドイメージの URL、`user-data.yaml` に焼き込みの
+cloud-init)。今は `debian` と `arch`。`~/.config/quagent/images/<名前>/` に同じ
+形で置けば、組み込みを差し替えたり別の OS を足したりできる。
+
+レシピの約束: ユーザー `{{.User}}` を uid 1000 で作り、rootless docker と opencode を入れ、
+`/work` をそのユーザーの所有で作り、成功したら `{{.Marker}}` を `/dev/ttyS0` に
+出して電源を切る。マーカーが出なければ焼き込みは失敗扱いになる。実行時の VM は
+外向き通信がほぼ無いので、起動時にネットワーク (NTP など) を待つサービスは
+止めておくこと (Arch では `systemd-time-wait-sync` が起動を止めていた)。
 
 ## LLM API の認証プロキシ
 
@@ -96,8 +133,8 @@ provider ID は opencode の provider ID と揃える。秘密の取り出し方
 エージェントは `/work` の保護されていないブランチにコミットし、MCP の
 `create_pull_request` で PR 化を依頼する。gh のトークンも署名鍵も VM には入らない。
 
-1. host が ssh で guest の `/work` からブランチを取り込む (run 専用の bare repo、
-   hooks は無効)
+1. host が vsock 経由 (git の `ext::` 転送) で guest の `/work` からブランチを
+   取り込む (run 専用の bare repo、hooks は無効)
 2. 新しいコミットだけを host の git 設定の鍵で署名し直す (中身は変えない。
    既に push したコミットは書き換えないので、PR の更新でハッシュは変わらない)
 3. host の repo の `origin` へ push し、`gh` で PR を作る (既にあれば更新)
@@ -109,7 +146,7 @@ host の利用者になる。
 
 ## 現状
 
-今後: PR の作成と署名、起動時 TUI、OS ごとのイメージ (Debian / Arch)。
+今後: Claude Code 対応、PR 作成の承認制 (任意)。
 
 ## ライセンス
 

@@ -43,8 +43,8 @@ type Result struct {
 type Publisher struct {
 	Repo      string   // host の repo (origin と gh の対象)
 	Work      string   // run の作業ディレクトリ
-	GuestURL  string   // guest の repo の ssh URL (ssh://agent@127.0.0.1:PORT/work)
-	SSHCmd    string   // GIT_SSH_COMMAND
+	GuestURL  string   // guest の repo を取り込む URL
+	GitConfig []string // git に足す設定 (-c の値。ext:: 転送の許可など)
 	Protected []string // 保護ブランチ
 	// GH は PR を作る (nil なら作らずに push まで)。テストで差し替える。
 	GH func(dir string, args ...string) ([]byte, error)
@@ -55,9 +55,13 @@ type Publisher struct {
 
 func (p *Publisher) git(dir string, args ...string) (string, error) {
 	// 取り込んだ内容に由来する hooks は実行しない (bare repo にも念のため無効化)
-	cmd := exec.Command("git", append([]string{"-c", "core.hooksPath=/dev/null"}, args...)...)
+	pre := []string{"-c", "core.hooksPath=/dev/null"}
+	for _, c := range p.GitConfig {
+		pre = append(pre, "-c", c)
+	}
+	cmd := exec.Command("git", append(pre, args...)...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_SSH_COMMAND="+p.SSHCmd, "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {

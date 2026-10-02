@@ -75,7 +75,7 @@ func newFixture(t *testing.T) fixture {
 	if err := os.MkdirAll(work, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	f.p = &Publisher{Repo: f.host, Work: work, GuestURL: f.guest, SSHCmd: "ssh", Protected: DefaultProtected}
+	f.p = &Publisher{Repo: f.host, Work: work, GuestURL: f.guest, Protected: DefaultProtected}
 	return f
 }
 

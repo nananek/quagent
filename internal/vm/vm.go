@@ -11,14 +11,23 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // GuestUser はベースイメージに焼き込むユーザー。
 const GuestUser = "agent"
 
+// GuestUID は GuestUser の uid (レシピは最初の一般ユーザーとして作るので 1000)。
+const GuestUID = 1000
+
+// Share は host のディレクトリを guest に 9p で見せる設定。
+type Share struct {
+	Tag  string // guest で mount するときのタグ
+	Path string // host のディレクトリ
+}
+
 // MakeSeed は NoCloud の seed ISO を dir に作り、そのパスを返す。
-func MakeSeed(dir, instanceID, hostname, userData string) (string, error) {
+// extra (ISO 上の名前 -> host のパス) も同梱する (guest の受け口のバイナリなど)。
+func MakeSeed(dir, instanceID, hostname, userData string, extra map[string]string) (string, error) {
 	seedDir := filepath.Join(dir, "seed")
 	if err := os.MkdirAll(seedDir, 0o755); err != nil {
 		return "", err
@@ -31,9 +40,13 @@ func MakeSeed(dir, instanceID, hostname, userData string) (string, error) {
 		return "", err
 	}
 	iso := filepath.Join(dir, "seed.iso")
-	cmd := exec.Command("xorriso", "-as", "mkisofs", "-quiet", "-output", iso,
-		"-volid", "cidata", "-joliet", "-rock",
-		filepath.Join(seedDir, "user-data"), filepath.Join(seedDir, "meta-data"))
+	args := []string{"-as", "mkisofs", "-quiet", "-output", iso, "-volid", "cidata", "-joliet", "-rock",
+		"-graft-points",
+		"user-data=" + filepath.Join(seedDir, "user-data"), "meta-data=" + filepath.Join(seedDir, "meta-data")}
+	for name, src := range extra {
+		args = append(args, name+"="+src)
+	}
+	cmd := exec.Command("xorriso", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("seed ISO 作成に失敗: %v: %s", err, out)
 	}
@@ -59,6 +72,12 @@ type QemuOpts struct {
 	ConsoleLog string
 	// Netdev は -netdev user, に続けるオプション (dns= や hostfwd=)。
 	Netdev string
+	// VsockCID が 0 でなければ vsock デバイスを付ける (host との操作経路)。
+	VsockCID uint32
+	// Shares は 9p で guest に見せる host のディレクトリ。
+	Shares []Share
+	// Extra は追加の qemu 引数。
+	Extra []string
 }
 
 // QemuArgv は qemu-system-x86_64 のコマンドラインを返す。
@@ -67,7 +86,7 @@ func QemuArgv(o QemuOpts) []string {
 	if o.Netdev != "" {
 		netdev += "," + o.Netdev
 	}
-	return []string{
+	argv := []string{
 		"qemu-system-x86_64",
 		"-machine", "q35,accel=kvm", "-cpu", "host",
 		"-smp", strconv.Itoa(o.CPUs), "-m", strconv.Itoa(o.MemMiB),
@@ -78,6 +97,25 @@ func QemuArgv(o QemuOpts) []string {
 		"-device", "virtio-net-pci,netdev=n0",
 		"-device", "virtio-rng-pci",
 	}
+	if o.VsockCID != 0 {
+		argv = append(argv, "-device", fmt.Sprintf("vhost-vsock-pci,guest-cid=%d", o.VsockCID))
+	}
+	for _, sh := range o.Shares {
+		// オプション値の中のカンマは二重にしてエスケープする
+		path := strings.ReplaceAll(sh.Path, ",", ",,")
+		argv = append(argv, "-virtfs", fmt.Sprintf("local,path=%s,mount_tag=%s,security_model=none,id=%s", path, sh.Tag, sh.Tag))
+	}
+	return append(argv, o.Extra...)
+}
+
+// AsGuestUID は argv を、userns の root (= host の利用者) を GuestUID に読み替えた
+// 入れ子の userns で実行するコマンドにする。9p で見せた host のファイルが guest で
+// 作業ユーザーの持ち物に見え、guest が作ったファイルは host で利用者の持ち物になる。
+// unshare が死んだら qemu も道連れにする (userns に入ると Pdeathsig が外れるため)。
+func AsGuestUID(argv []string) []string {
+	id := strconv.Itoa(GuestUID)
+	return append([]string{"unshare", "--fork", "--kill-child=SIGKILL", "--user",
+		"--map-user=" + id, "--map-group=" + id, "--"}, argv...)
 }
 
 // HostDNS は netns と guest に渡す host の実 IPv4 リゾルバを返す。
@@ -114,75 +152,4 @@ func FreePort() (int, error) {
 	}
 	defer l.Close()
 	return l.Addr().(*net.TCPAddr).Port, nil
-}
-
-// SSH は host から guest への ssh/scp 接続情報。
-type SSH struct {
-	Port int
-	Key  string
-}
-
-// Opts は ssh/scp 共通のオプション (鍵と host key の扱い)。
-func (s SSH) Opts() []string { return s.commonOpts() }
-
-func (s SSH) commonOpts() []string {
-	return []string{
-		"-o", "BatchMode=yes",
-		"-o", "StrictHostKeyChecking=no",
-		"-o", "UserKnownHostsFile=/dev/null",
-		"-o", "LogLevel=ERROR",
-		"-o", "ConnectTimeout=5",
-		"-i", s.Key,
-	}
-}
-
-// Command は guest で args を実行する ssh コマンドを返す。tty が要るなら -t を args より前に渡す。
-func (s SSH) Command(sshFlags []string, args ...string) *exec.Cmd {
-	argv := append(s.commonOpts(), "-p", strconv.Itoa(s.Port))
-	argv = append(argv, sshFlags...)
-	argv = append(argv, GuestUser+"@127.0.0.1")
-	argv = append(argv, args...)
-	return exec.Command("ssh", argv...)
-}
-
-// Run は guest でコマンドを実行し、出力を返す。
-func (s SSH) Run(args ...string) ([]byte, error) {
-	return s.Command(nil, args...).CombinedOutput()
-}
-
-// CopyTo は host のファイルを guest の dst へ送る。
-func (s SSH) CopyTo(src, dst string) error {
-	argv := append(s.commonOpts(), "-q", "-P", strconv.Itoa(s.Port), src, GuestUser+"@127.0.0.1:"+dst)
-	if out, err := exec.Command("scp", argv...).CombinedOutput(); err != nil {
-		return fmt.Errorf("scp に失敗: %v: %s", err, out)
-	}
-	return nil
-}
-
-// WriteFile は guest の path (~ 始まり可) に data を書く。
-func (s SSH) WriteFile(path string, data []byte) error {
-	dir := path[:strings.LastIndex(path, "/")]
-	cmd := s.Command(nil, fmt.Sprintf("mkdir -p %s && cat > %s", dir, path))
-	cmd.Stdin = strings.NewReader(string(data))
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("guest への書き込みに失敗 (%s): %v: %s", path, err, out)
-	}
-	return nil
-}
-
-// WaitReady は ssh が通るまで待つ。fail が non-nil を返したら中断する。
-func (s SSH) WaitReady(timeout time.Duration, fail func() error) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if fail != nil {
-			if err := fail(); err != nil {
-				return err
-			}
-		}
-		if _, err := s.Run("true"); err == nil {
-			return nil
-		}
-		time.Sleep(2 * time.Second)
-	}
-	return fmt.Errorf("%s 以内に VM へ ssh できなかった", timeout)
 }

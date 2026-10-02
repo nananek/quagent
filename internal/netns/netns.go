@@ -27,8 +27,9 @@ const ChildCommand = "__netns"
 // Spec はランチャに渡す設定。
 type Spec struct {
 	WorkDir string `json:"work_dir"`
-	// SSHPort は host 127.0.0.1 で待ち受け、子 netns の同ポートへ中継する。
-	SSHPort int `json:"ssh_port"`
+	// SSHPort が 0 でなければ host 127.0.0.1 で待ち受け、子 netns の同ポートへ中継する
+	// (ssh を使うときだけ)。
+	SSHPort int `json:"ssh_port,omitempty"`
 	// DNS は上流のリゾルバ。子 netns 内の DNS サーバーが許可ドメインの問い合わせだけ転送する。
 	DNS string `json:"dns"`
 	// Allow は最初から期限なしで許可するドメインのパターン。

@@ -1,0 +1,68 @@
+#cloud-config
+# quagent ベースイメージ (Debian)。{{.User}} と {{.Marker}} は quagent が埋める。
+# 成功したら {{.Marker}} をシリアルコンソールに出し、最後に電源を切ること。
+users:
+  - name: {{.User}}
+    shell: /bin/bash
+    lock_passwd: true
+package_update: true
+package_upgrade: true
+packages:
+  - ca-certificates
+  - curl
+  - git
+  - jq
+  - unzip
+  - sqlite3
+  - tmux
+  - uidmap
+  - dbus-user-session
+  - slirp4netns
+  - fuse-overlayfs
+  - iptables
+write_files:
+  - path: /usr/local/sbin/quagent-build.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euxo pipefail
+      U={{.User}}
+      UID_=$(id -u "$U")
+
+      # docker 公式 apt リポジトリから導入。rootful デーモンは止めてマスクする。
+      install -m 0755 -d /etc/apt/keyrings
+      curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+      echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+        > /etc/apt/sources.list.d/docker.list
+      apt-get update
+      DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        docker-ce docker-ce-cli containerd.io docker-ce-rootless-extras \
+        docker-buildx-plugin docker-compose-plugin
+      systemctl disable --now docker.service docker.socket containerd.service
+      systemctl mask docker.service docker.socket containerd.service
+
+      # rootless docker を利用者のユーザー systemd で常駐させる。
+      loginctl enable-linger "$U"
+      for _ in $(seq 1 60); do [ -S "/run/user/$UID_/bus" ] && break; sleep 1; done
+      runuser -u "$U" -- env XDG_RUNTIME_DIR="/run/user/$UID_" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$UID_/bus" \
+        dockerd-rootless-setuptool.sh install
+      echo "DOCKER_HOST=unix:///run/user/$UID_/docker.sock" >> /etc/environment
+      runuser -u "$U" -- env XDG_RUNTIME_DIR="/run/user/$UID_" \
+        DOCKER_HOST="unix:///run/user/$UID_/docker.sock" \
+        docker info --format '{{"{{"}}.SecurityOptions{{"}}"}}' | grep -q rootless
+
+      # opencode (v2)
+      runuser -l "$U" -c 'curl -fsSL https://opencode.ai/v2/install | bash'
+      test -x "/home/$U/.opencode/bin/opencode"
+      echo 'export PATH="$HOME/.opencode/bin:$PATH"' >> "/home/$U/.profile"
+
+      # 作業ディレクトリ
+      install -d -o "$U" -g "$U" /work
+
+      echo {{.Marker}} > /dev/ttyS0
+runcmd:
+  - [/usr/local/sbin/quagent-build.sh]
+power_state:
+  mode: poweroff
+  timeout: 30

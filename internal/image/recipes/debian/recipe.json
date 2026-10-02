@@ -1,0 +1,4 @@
+{
+  "description": "Debian 13 (trixie) + rootless docker (公式 apt リポジトリ) + opencode",
+  "cloud_image_url": "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2"
+}

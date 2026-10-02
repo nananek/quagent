@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/nananek/quagent/internal/paths"
 )
 
 // Config はユーザー設定全体。
@@ -51,14 +53,7 @@ type Provider struct {
 }
 
 // Path は設定ファイルのパス。
-func Path() string {
-	dir := os.Getenv("XDG_CONFIG_HOME")
-	if dir == "" {
-		home, _ := os.UserHomeDir()
-		dir = filepath.Join(home, ".config")
-	}
-	return filepath.Join(dir, "quagent", "config.json")
-}
+func Path() string { return paths.ConfigFile() }
 
 // Load は設定を読む。ファイルが無ければ空の設定を返す。
 func Load() (*Config, error) {

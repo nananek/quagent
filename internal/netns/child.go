@@ -164,11 +164,13 @@ func (c *child) run() error {
 	}
 	log.Printf("子 netns up: tap0=%s", tapIP)
 
-	// 5. host 127.0.0.1:SSHPort -> 子 netns tapIP:SSHPort (qemu hostfwd が受ける)
-	if err := addHostfwd(sock, c.spec.SSHPort, tapIP); err != nil {
-		return err
+	// 5. ssh を使うときだけ host 127.0.0.1:SSHPort -> 子 netns tapIP:SSHPort (qemu hostfwd が受ける)
+	if c.spec.SSHPort != 0 {
+		if err := addHostfwd(sock, c.spec.SSHPort, tapIP); err != nil {
+			return err
+		}
+		log.Printf("ssh 中継: 127.0.0.1:%d -> %s:%d", c.spec.SSHPort, tapIP, c.spec.SSHPort)
 	}
-	log.Printf("ssh 中継: 127.0.0.1:%d -> %s:%d", c.spec.SSHPort, tapIP, c.spec.SSHPort)
 
 	// 6. qemu を子 netns で起動
 	pid := strconv.Itoa(c.holder.Process.Pid)

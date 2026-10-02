@@ -1,175 +1,271 @@
-// Package image はベースイメージ (Debian + rootless docker + opencode) を焼く。
+// Package image はベースイメージを焼き、管理する。
 //
-// 焼くときだけ host の網をそのまま使う (信頼できる工程)。実行時の VM は
-// このイメージの overlay で起動し、cloud-init では ssh 鍵を入れるだけにする。
-// OS 固有の部分はこのパッケージに閉じ込める (Debian/Arch の比較は未決)。
+// OS ごとの手順はレシピ (recipe.json + user-data.yaml) として独立させてあり、
+// 組み込みのもの (recipes/<名前>/) と利用者のもの (~/.config/quagent/images/<名前>/、
+// 同名なら組み込みより優先) を使える。焼くときだけ host の網をそのまま使う
+// (信頼できる工程)。実行時の VM はイメージの overlay で起動する。
 package image
 
 import (
+	"bytes"
+	"embed"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/nananek/quagent/internal/paths"
 	"github.com/nananek/quagent/internal/vm"
 )
 
+//go:embed recipes
+var builtin embed.FS
+
 const (
-	cloudImageURL = "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2"
 	diskSize      = "40G"
 	buildOKMarker = "QUAGENT_BUILD_OK"
+	// DefaultRecipe は特に指定がないときのレシピ。
+	DefaultRecipe = "debian"
 )
 
-// buildUserData は焼き込み用の cloud-config。最後に成功マーカーを
-// シリアルコンソールへ出して電源を切る。
-var buildUserData = `#cloud-config
-users:
-  - name: ` + vm.GuestUser + `
-    shell: /bin/bash
-    lock_passwd: true
-package_update: true
-package_upgrade: true
-packages:
-  - ca-certificates
-  - curl
-  - git
-  - jq
-  - unzip
-  - sqlite3
-  - tmux
-  - uidmap
-  - dbus-user-session
-  - slirp4netns
-  - fuse-overlayfs
-  - iptables
-write_files:
-  - path: /usr/local/sbin/quagent-build.sh
-    permissions: '0755'
-    content: |
-      #!/bin/bash
-      set -euxo pipefail
-      U=` + vm.GuestUser + `
-      UID_=$(id -u "$U")
-
-      # docker 公式 apt リポジトリから導入。rootful デーモンは止めてマスクする。
-      install -m 0755 -d /etc/apt/keyrings
-      curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-      echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
-        > /etc/apt/sources.list.d/docker.list
-      apt-get update
-      DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        docker-ce docker-ce-cli containerd.io docker-ce-rootless-extras \
-        docker-buildx-plugin docker-compose-plugin
-      systemctl disable --now docker.service docker.socket containerd.service
-      systemctl mask docker.service docker.socket containerd.service
-
-      # rootless docker を agent のユーザー systemd で常駐させる。
-      loginctl enable-linger "$U"
-      for _ in $(seq 1 60); do [ -S "/run/user/$UID_/bus" ] && break; sleep 1; done
-      runuser -u "$U" -- env XDG_RUNTIME_DIR="/run/user/$UID_" \
-        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$UID_/bus" \
-        dockerd-rootless-setuptool.sh install
-      echo "DOCKER_HOST=unix:///run/user/$UID_/docker.sock" >> /etc/environment
-      runuser -u "$U" -- env XDG_RUNTIME_DIR="/run/user/$UID_" \
-        DOCKER_HOST="unix:///run/user/$UID_/docker.sock" \
-        docker info --format '{{.SecurityOptions}}' | grep -q rootless
-
-      # opencode (v2)
-      runuser -l "$U" -c 'curl -fsSL https://opencode.ai/v2/install | bash'
-      test -x "/home/$U/.opencode/bin/opencode"
-      echo 'export PATH="$HOME/.opencode/bin:$PATH"' >> "/home/$U/.profile"
-
-      # 作業ディレクトリ
-      install -d -o "$U" -g "$U" /work
-
-      echo ` + buildOKMarker + ` > /dev/ttyS0
-runcmd:
-  - [/usr/local/sbin/quagent-build.sh]
-power_state:
-  mode: poweroff
-  timeout: 30
-`
-
-// Latest は最新のベースイメージのパスを返す。
-func Latest() (string, error) {
-	matches, _ := filepath.Glob(filepath.Join(paths.ImagesDir(), "base-*.qcow2"))
-	if len(matches) == 0 {
-		return "", fmt.Errorf("ベースイメージが無い。先に `quagent image build` を実行する")
-	}
-	sort.Strings(matches)
-	return matches[len(matches)-1], nil
+// Recipe は 1 つの OS のベースイメージの作り方。
+type Recipe struct {
+	Name          string `json:"-"`
+	Description   string `json:"description"`
+	CloudImageURL string `json:"cloud_image_url"`
+	// Source は "builtin" か、利用者のレシピのディレクトリ。
+	Source   string `json:"-"`
+	userData string
 }
 
-// Build はベースイメージを新しく焼き、そのパスを返す。
-func Build(cpus, memMiB int, progress io.Writer) (string, error) {
-	cloud, err := fetchCloudImage(progress)
+// RecipesDir は利用者のレシピの置き場。
+func RecipesDir() string { return filepath.Join(filepath.Dir(paths.ConfigFile()), "images") }
+
+func readRecipe(fsys fs.FS, name, source string) (Recipe, error) {
+	b, err := fs.ReadFile(fsys, "recipe.json")
 	if err != nil {
-		return "", err
+		return Recipe{}, err
+	}
+	var r Recipe
+	if err := json.Unmarshal(b, &r); err != nil {
+		return Recipe{}, fmt.Errorf("%s/recipe.json: %w", source, err)
+	}
+	ud, err := fs.ReadFile(fsys, "user-data.yaml")
+	if err != nil {
+		return Recipe{}, err
+	}
+	if r.CloudImageURL == "" {
+		return Recipe{}, fmt.Errorf("%s: cloud_image_url が空", source)
+	}
+	r.Name, r.Source, r.userData = name, source, string(ud)
+	return r, nil
+}
+
+// Recipes は使えるレシピを名前順に返す。
+func Recipes() ([]Recipe, error) {
+	byName := map[string]Recipe{}
+	entries, err := fs.ReadDir(builtin, "recipes")
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range entries {
+		sub, _ := fs.Sub(builtin, "recipes/"+e.Name())
+		r, err := readRecipe(sub, e.Name(), "builtin")
+		if err != nil {
+			return nil, err
+		}
+		byName[r.Name] = r
+	}
+	user, err := os.ReadDir(RecipesDir())
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	for _, e := range user {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(RecipesDir(), e.Name())
+		r, err := readRecipe(os.DirFS(dir), e.Name(), dir)
+		if err != nil {
+			return nil, err
+		}
+		byName[r.Name] = r
+	}
+	out := make([]Recipe, 0, len(byName))
+	for _, r := range byName {
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// FindRecipe は名前でレシピを探す。
+func FindRecipe(name string) (Recipe, error) {
+	rs, err := Recipes()
+	if err != nil {
+		return Recipe{}, err
+	}
+	var names []string
+	for _, r := range rs {
+		if r.Name == name {
+			return r, nil
+		}
+		names = append(names, r.Name)
+	}
+	return Recipe{}, fmt.Errorf("レシピ %q が無い (使えるもの: %s)", name, strings.Join(names, ", "))
+}
+
+// Image は焼いたベースイメージ。
+type Image struct {
+	Recipe string
+	Path   string
+	Built  time.Time
+	Size   int64
+}
+
+var imageName = regexp.MustCompile(`^base-([a-z0-9][a-z0-9_-]*)-(\d{8}-\d{6})\.qcow2$`)
+
+// List は焼いたイメージを新しい順に返す。recipe が空なら全部。
+func List(recipe string) ([]Image, error) {
+	entries, err := os.ReadDir(paths.ImagesDir())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []Image
+	for _, e := range entries {
+		m := imageName.FindStringSubmatch(e.Name())
+		if m == nil || (recipe != "" && m[1] != recipe) {
+			continue
+		}
+		built, _ := time.ParseInLocation("20060102-150405", m[2], time.Local)
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		out = append(out, Image{Recipe: m[1], Path: filepath.Join(paths.ImagesDir(), e.Name()), Built: built, Size: info.Size()})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Built.After(out[j].Built) })
+	return out, nil
+}
+
+// Latest はレシピの最新イメージを返す。
+func Latest(recipe string) (Image, error) {
+	imgs, err := List(recipe)
+	if err != nil {
+		return Image{}, err
+	}
+	if len(imgs) == 0 {
+		return Image{}, fmt.Errorf("%s のベースイメージが無い。先に `quagent image build %s` を実行する", recipe, recipe)
+	}
+	return imgs[0], nil
+}
+
+// Remove は焼いたイメージを消す。
+func Remove(img Image) error {
+	if filepath.Dir(img.Path) != paths.ImagesDir() || !imageName.MatchString(filepath.Base(img.Path)) {
+		return fmt.Errorf("quagent のイメージではない: %s", img.Path)
+	}
+	return os.Remove(img.Path)
+}
+
+// BuildOpts は焼き込みの設定。
+type BuildOpts struct {
+	CPUs   int
+	MemMiB int
+	// Refresh はクラウドイメージを取り直す (OS の更新を取り込む)。
+	Refresh bool
+}
+
+// Build はレシピからベースイメージを新しく焼き、そのイメージを返す。
+func Build(r Recipe, o BuildOpts, progress io.Writer) (Image, error) {
+	var ud bytes.Buffer
+	tmpl, err := template.New("user-data").Parse(r.userData)
+	if err != nil {
+		return Image{}, fmt.Errorf("%s の user-data.yaml: %w", r.Name, err)
+	}
+	if err := tmpl.Execute(&ud, map[string]string{"User": vm.GuestUser, "Marker": buildOKMarker}); err != nil {
+		return Image{}, err
+	}
+	cloud, err := fetchCloudImage(r, o.Refresh, progress)
+	if err != nil {
+		return Image{}, err
 	}
 	if err := os.MkdirAll(paths.ImagesDir(), 0o755); err != nil {
-		return "", err
+		return Image{}, err
 	}
 	work, err := os.MkdirTemp(paths.ImagesDir(), "build-")
 	if err != nil {
-		return "", err
+		return Image{}, err
 	}
 	defer os.RemoveAll(work)
 
 	disk := filepath.Join(work, "disk.qcow2")
 	if out, err := exec.Command("qemu-img", "convert", "-O", "qcow2", cloud, disk).CombinedOutput(); err != nil {
-		return "", fmt.Errorf("イメージの複製に失敗: %v: %s", err, out)
+		return Image{}, fmt.Errorf("イメージの複製に失敗: %v: %s", err, out)
 	}
 	if out, err := exec.Command("qemu-img", "resize", "-q", disk, diskSize).CombinedOutput(); err != nil {
-		return "", fmt.Errorf("リサイズに失敗: %v: %s", err, out)
+		return Image{}, fmt.Errorf("リサイズに失敗: %v: %s", err, out)
 	}
 	stamp := time.Now().Format("20060102-150405")
-	seed, err := vm.MakeSeed(work, "quagent-build-"+stamp, "quagent-build", buildUserData)
+	seed, err := vm.MakeSeed(work, "quagent-build-"+stamp, "quagent-build", ud.String(), nil)
 	if err != nil {
-		return "", err
+		return Image{}, err
 	}
 
 	console := filepath.Join(work, "console.log")
 	argv := vm.QemuArgv(vm.QemuOpts{
-		Disk: disk, Seed: seed, CPUs: cpus, MemMiB: memMiB,
-		ConsoleLog: console,
+		Disk: disk, Seed: seed, CPUs: o.CPUs, MemMiB: o.MemMiB, ConsoleLog: console,
 	})
-	fmt.Fprintf(progress, "VM で焼き込み中 (数分かかる)。コンソール: %s\n", console)
+	fmt.Fprintf(progress, "%s を VM で焼き込み中 (数分かかる)。コンソール: %s\n", r.Name, console)
 	cmd := exec.Command(argv[0], argv[1:]...)
 	if out, err := runWithTimeout(cmd, 45*time.Minute); err != nil {
-		return "", fmt.Errorf("焼き込み VM が異常終了: %v: %s", err, out)
+		return Image{}, fmt.Errorf("焼き込み VM が異常終了: %v: %s", err, out)
 	}
 
 	log, _ := os.ReadFile(console)
 	if !strings.Contains(string(log), buildOKMarker) {
-		keep := filepath.Join(paths.ImagesDir(), "failed-"+stamp+"-console.log")
+		keep := filepath.Join(paths.ImagesDir(), "failed-"+r.Name+"-"+stamp+"-console.log")
 		_ = os.WriteFile(keep, log, 0o644)
-		return "", fmt.Errorf("焼き込みに失敗した。コンソールログ: %s", keep)
+		return Image{}, fmt.Errorf("焼き込みに失敗した。コンソールログ: %s", keep)
 	}
 
 	// 履歴を潰して単独で使える形にする
-	out := filepath.Join(paths.ImagesDir(), "base-"+stamp+".qcow2")
+	out := filepath.Join(paths.ImagesDir(), "base-"+r.Name+"-"+stamp+".qcow2")
 	if b, err := exec.Command("qemu-img", "convert", "-O", "qcow2", disk, out).CombinedOutput(); err != nil {
-		return "", fmt.Errorf("イメージの書き出しに失敗: %v: %s", err, b)
+		return Image{}, fmt.Errorf("イメージの書き出しに失敗: %v: %s", err, b)
 	}
-	return out, nil
+	built, _ := time.ParseInLocation("20060102-150405", stamp, time.Local)
+	info, _ := os.Stat(out)
+	img := Image{Recipe: r.Name, Path: out, Built: built}
+	if info != nil {
+		img.Size = info.Size()
+	}
+	return img, nil
 }
 
-func fetchCloudImage(progress io.Writer) (string, error) {
-	dst := filepath.Join(paths.CacheDir(), filepath.Base(cloudImageURL))
-	if _, err := os.Stat(dst); err == nil {
+func fetchCloudImage(r Recipe, refresh bool, progress io.Writer) (string, error) {
+	dst := filepath.Join(paths.CacheDir(), r.Name+"-"+filepath.Base(r.CloudImageURL))
+	if _, err := os.Stat(dst); err == nil && !refresh {
 		return dst, nil
 	}
 	if err := os.MkdirAll(paths.CacheDir(), 0o755); err != nil {
 		return "", err
 	}
-	fmt.Fprintf(progress, "クラウドイメージを取得: %s\n", cloudImageURL)
-	resp, err := http.Get(cloudImageURL)
+	fmt.Fprintf(progress, "クラウドイメージを取得: %s\n", r.CloudImageURL)
+	resp, err := http.Get(r.CloudImageURL)
 	if err != nil {
 		return "", err
 	}

@@ -1,0 +1,4 @@
+{
+  "description": "Arch Linux + rootless docker (公式 rootless インストーラー) + opencode",
+  "cloud_image_url": "https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2"
+}
