@@ -3,13 +3,17 @@ package main
 import (
 	"bytes"
 	"debug/elf"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/nananek/quagent/internal/console"
 	"github.com/nananek/quagent/internal/guest"
 )
 
@@ -24,6 +28,8 @@ const (
 type vmGuest struct {
 	cid  uint32
 	self string // quagent 自身 (__exec / __attach を呼ぶ)
+	// consoleSock は承認コンソールの socket (__attach が OSC 52 を渡す先)。
+	consoleSock string
 }
 
 // stream は VM でログインシェル経由で script を実行する (レシピが通した PATH が効く)。
@@ -31,11 +37,31 @@ func (g vmGuest) stream(script string, stdin io.Reader, stdout, stderr io.Writer
 	return guest.Exec(g.cid, guest.Header{Argv: []string{"bash", "-lc", script}}, stdin, stdout, stderr)
 }
 
-// sh は script を実行し、標準出力と標準エラーをまとめて返す。
+// 準備のためのコマンド (sh) の上限。VM が無限に出力したり応答しなかったりしても
+// host のメモリや処理を使い潰されないように。
+const (
+	shTimeout   = 10 * time.Minute
+	maxShOutput = 1 << 20
+)
+
+// sh は script を実行し、標準出力と標準エラーをまとめて返す (上限を超えた分は捨てる)。
 func (g vmGuest) sh(script string, stdin io.Reader) ([]byte, error) {
-	var out bytes.Buffer
-	err := g.stream(script, stdin, &out, &out)
+	out := &cappedBuffer{max: maxShOutput}
+	err := guest.ExecTimeout(g.cid, guest.Header{Argv: []string{"bash", "-lc", script}}, shTimeout, stdin, out, out)
 	return out.Bytes(), err
+}
+
+// cappedBuffer は max バイトまでだけ溜める io.Writer (超えた分は読み捨てる)。
+type cappedBuffer struct {
+	bytes.Buffer
+	max int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if room := b.max - b.Len(); room > 0 {
+		b.Buffer.Write(p[:min(len(p), room)])
+	}
+	return len(p), nil
 }
 
 // writeFile は VM の path (~ 始まり可) に data を書く。
@@ -49,7 +75,8 @@ func (g vmGuest) writeFile(path string, data []byte) error {
 
 // interactiveArgv は VM の script に端末つきでつなぐ host 側のコマンドを返す。
 func (g vmGuest) interactiveArgv(script string) []string {
-	return []string{g.self, attachCommand, strconv.FormatUint(uint64(g.cid), 10), "--", "bash", "-lc", script}
+	return []string{g.self, attachCommand, strconv.FormatUint(uint64(g.cid), 10),
+		"--console", g.consoleSock, "--", "bash", "-lc", script}
 }
 
 // gitURL は VM の /work を git で取り込むための URL (ext:: 転送で vsock を通す)。
@@ -59,20 +86,27 @@ func (g vmGuest) gitURL() string {
 	return fmt.Sprintf("ext::%s %s %d -- %%S /work", esc(g.self), execCommand, g.cid)
 }
 
-// cmdExec / cmdAttach は `quagent __exec|__attach CID -- argv...`。
-func parseGuestArgs(args []string) (uint32, []string, error) {
-	if len(args) < 3 || args[1] != "--" {
-		return 0, nil, fmt.Errorf("usage: CID -- argv...")
+// cmdExec / cmdAttach は `quagent __exec|__attach CID [--console SOCK] -- argv...`。
+func parseGuestArgs(args []string) (cid uint32, console string, argv []string, err error) {
+	if len(args) < 1 {
+		return 0, "", nil, fmt.Errorf("usage: CID [--console SOCK] -- argv...")
 	}
-	cid, err := strconv.ParseUint(args[0], 10, 32)
+	n, err := strconv.ParseUint(args[0], 10, 32)
 	if err != nil {
-		return 0, nil, fmt.Errorf("CID が不正: %q", args[0])
+		return 0, "", nil, fmt.Errorf("CID が不正: %q", args[0])
 	}
-	return uint32(cid), args[2:], nil
+	rest := args[1:]
+	if len(rest) >= 2 && rest[0] == "--console" {
+		console, rest = rest[1], rest[2:]
+	}
+	if len(rest) < 2 || rest[0] != "--" {
+		return 0, "", nil, fmt.Errorf("usage: CID [--console SOCK] -- argv...")
+	}
+	return uint32(n), console, rest[1:], nil
 }
 
 func cmdExec(args []string) error {
-	cid, argv, err := parseGuestArgs(args)
+	cid, _, argv, err := parseGuestArgs(args)
 	if err != nil {
 		return err
 	}
@@ -85,11 +119,53 @@ func cmdExec(args []string) error {
 }
 
 func cmdAttach(args []string) error {
-	cid, argv, err := parseGuestArgs(args)
+	cid, sock, argv, err := parseGuestArgs(args)
 	if err != nil {
 		return err
 	}
-	return guest.Interactive(cid, argv, "/work")
+	var onClip func(guest.ClipboardEvent)
+	if sock != "" {
+		onClip = clipboardRelay(sock)
+	}
+	return guest.Interactive(cid, argv, "/work", onClip)
+}
+
+// clipboardRelay は VM が出した OSC 52 を承認コンソールに渡す。出力を止めないよう
+// 送るのは別 goroutine で、送り待ちが溜まっていれば捨てる (本体側でも数を絞る)。
+func clipboardRelay(sock string) func(guest.ClipboardEvent) {
+	ch := make(chan console.Msg, 1)
+	go func() {
+		var enc *json.Encoder
+		for m := range ch {
+			if enc == nil {
+				c, err := net.Dial("unix", sock)
+				if err != nil {
+					continue
+				}
+				enc = json.NewEncoder(c)
+			}
+			if enc.Encode(m) != nil {
+				enc = nil
+			}
+		}
+	}()
+	return func(e guest.ClipboardEvent) {
+		m := console.Msg{Type: "clipboard"}
+		switch {
+		case e.Query:
+			m.Text = "VM がクリップボードの読み出しを要求した (常に拒否)"
+		case e.TooLarge:
+			m.Text = fmt.Sprintf("書き込み要求が大きすぎるので拒否 (上限 %d KiB)", guest.MaxClipboard>>10)
+		case e.Invalid:
+			m.Text = "壊れた OSC 52 を捨てた"
+		default:
+			m.Data = e.Data
+		}
+		select {
+		case ch <- m:
+		default:
+		}
+	}
 }
 
 // checkStatic は VM に持ち込めるよう quagent が静的リンクかを確かめる。

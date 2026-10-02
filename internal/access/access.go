@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/nananek/quagent/internal/netns"
 	"github.com/nananek/quagent/internal/paths"
@@ -30,6 +31,13 @@ import (
 const (
 	OnceTTL         = 5 * time.Minute
 	DecisionTimeout = 10 * time.Minute
+	// DenyCooldown のあいだ、拒否 (時間切れを含む) されたドメインは再申請できない。
+	DenyCooldown = 10 * time.Minute
+	// 1 回の申請で扱う上限 (承認コンソールを埋め尽くされないように)。
+	MaxDomains     = 20
+	MaxReasonRunes = 1000
+	// 決着済みの申請を覚えておく件数。
+	keepSettled = 200
 )
 
 // Kind は承認の種類。
@@ -103,6 +111,8 @@ type Manager struct {
 	always  map[string]bool  // 以後確認しない
 	pending []*Request
 	byID    map[int]*Request
+	settled []int                // 決着した順の申請 ID (古いものから忘れる)
+	denied  map[string]time.Time // 拒否されたドメイン -> 再申請できるようになる時刻
 
 	// Notify には新しい申請が来るたびに通知が入る (UI 用)。
 	Notify chan struct{}
@@ -137,7 +147,7 @@ func NewManager(apply Applier, alwaysPath string) (*Manager, error) {
 	m := &Manager{
 		apply: apply, alwaysPath: alwaysPath, now: time.Now,
 		grants: map[string]int64{}, session: map[string]bool{}, always: map[string]bool{},
-		byID: map[int]*Request{}, Notify: make(chan struct{}, 1),
+		byID: map[int]*Request{}, denied: map[string]time.Time{}, Notify: make(chan struct{}, 1),
 	}
 	b, err := os.ReadFile(alwaysPath)
 	switch {
@@ -202,10 +212,30 @@ func (m *Manager) Submit(domains []string, reason string) (*Request, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(domains) > MaxDomains {
+		return nil, fmt.Errorf("1 回に申請できるドメインは %d 個まで", MaxDomains)
+	}
 	if strings.TrimSpace(reason) == "" {
 		return nil, fmt.Errorf("理由 (reason) が必要")
 	}
+	if utf8.RuneCountInString(reason) > MaxReasonRunes {
+		return nil, fmt.Errorf("理由は %d 文字まで", MaxReasonRunes)
+	}
 	m.mu.Lock()
+	// 承認待ちは 1 件まで。答えが出る前に次を投げて承認者を埋め尽くせないようにする
+	if len(m.pending) > 0 {
+		id := m.pending[0].ID
+		m.mu.Unlock()
+		return nil, fmt.Errorf("前の申請 #%d がまだ決まっていない。wait_network_access で結果を待ってから申請する", id)
+	}
+	now := m.now()
+	for _, d := range domains {
+		if until, ok := m.denied[d]; ok && now.Before(until) {
+			m.mu.Unlock()
+			return nil, fmt.Errorf("%s は拒否された (または承認者が応答しなかった) ので %s まで再申請できない",
+				d, until.Format("15:04:05"))
+		}
+	}
 	m.nextID++
 	r := &Request{ID: m.nextID, Domains: domains, Reason: reason, Created: m.now(), done: make(chan struct{})}
 	m.byID[r.ID] = r
@@ -452,6 +482,17 @@ func (m *Manager) finish(r *Request, res Result) {
 	res.Domains = r.Domains
 	r.result = res
 	close(r.done)
+	if res.Status == Denied || res.Status == TimedOut {
+		until := m.now().Add(DenyCooldown)
+		for _, d := range r.Domains {
+			m.denied[d] = until
+		}
+	}
+	m.settled = append(m.settled, r.ID)
+	if len(m.settled) > keepSettled {
+		delete(m.byID, m.settled[0])
+		m.settled = m.settled[1:]
+	}
 	for i, p := range m.pending {
 		if p == r {
 			m.pending = append(m.pending[:i], m.pending[i+1:]...)

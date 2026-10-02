@@ -58,6 +58,8 @@ func listenInNetns(holderPid int, addr string) (net.PacketConn, net.Listener, er
 // dnsServer は許可されたドメインの問い合わせだけを上流へ転送する。
 // 応答の A レコードの IP を onAnswer で通知し、許可外は REFUSED を返す。
 type dnsServer struct {
+	// sem は同時に処理する問い合わせの上限 (UDP と TCP の合計)。溢れた分は捨てる。
+	sem      chan struct{}
 	upstream string
 	allowed  func(name string) bool
 	onAnswer func(name string, ips []net.IP, cnames []string)
@@ -72,7 +74,13 @@ func (s *dnsServer) serveUDP(pc net.PacketConn) {
 			return
 		}
 		q := append([]byte(nil), buf[:n]...)
+		select {
+		case s.sem <- struct{}{}:
+		default:
+			continue // 溢れた問い合わせは捨てる (guest は再送する)
+		}
 		go func() {
+			defer func() { <-s.sem }()
 			if resp := s.handle(q, "udp"); resp != nil {
 				_, _ = pc.WriteTo(resp, from)
 			}
@@ -86,7 +94,14 @@ func (s *dnsServer) serveTCP(l net.Listener) {
 		if err != nil {
 			return
 		}
+		select {
+		case s.sem <- struct{}{}:
+		default:
+			c.Close()
+			continue
+		}
 		go func() {
+			defer func() { <-s.sem }()
 			defer c.Close()
 			for {
 				_ = c.SetDeadline(time.Now().Add(30 * time.Second))

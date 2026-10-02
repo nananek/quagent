@@ -39,11 +39,20 @@ func Available() error {
 
 // Exec は VM でコマンドを実行し、標準入出力をつなぐ。stdin が nil なら空。
 func Exec(cid uint32, h Header, stdin io.Reader, stdout, stderr io.Writer) error {
+	return ExecTimeout(cid, h, 0, stdin, stdout, stderr)
+}
+
+// ExecTimeout は Exec に時間制限 (0 なら無し) を付けたもの。VM が応答しなくても
+// host の処理が止まり続けないようにする。
+func ExecTimeout(cid uint32, h Header, timeout time.Duration, stdin io.Reader, stdout, stderr io.Writer) error {
 	c, err := Dial(cid)
 	if err != nil {
 		return err
 	}
 	defer c.Close()
+	if timeout > 0 {
+		_ = c.SetDeadline(time.Now().Add(timeout))
+	}
 	return doExec(c, h, stdin, stdout, stderr, nil)
 }
 
@@ -108,7 +117,9 @@ func doExec(c net.Conn, h Header, stdin io.Reader, stdout, stderr io.Writer, fw 
 }
 
 // Interactive は端末を raw にして VM の端末つきコマンドにつなぐ (tmux のペイン用)。
-func Interactive(cid uint32, argv []string, dir string) error {
+// onClip が nil でなければ、VM の出力から OSC 52 (クリップボード操作) を抜き取って渡す
+// (tmux や端末には届かない)。
+func Interactive(cid uint32, argv []string, dir string, onClip func(ClipboardEvent)) error {
 	c, err := Dial(cid)
 	if err != nil {
 		return err
@@ -140,7 +151,11 @@ func Interactive(cid uint32, argv []string, dir string) error {
 			}
 		}
 	}()
-	err = doExec(c, h, os.Stdin, os.Stdout, nil, fw)
+	var out io.Writer = os.Stdout
+	if onClip != nil {
+		out = newOSCFilter(os.Stdout, onClip)
+	}
+	err = doExec(c, h, os.Stdin, out, nil, fw)
 	var ee *ExitError
 	if errors.As(err, &ee) {
 		return nil // 端末の中身として終了コードは見せ終わっている

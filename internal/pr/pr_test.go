@@ -1,11 +1,13 @@
 package pr
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func run(t *testing.T, dir string, args ...string) string {
@@ -242,5 +244,33 @@ func TestPublishIgnoresGuestHooks(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); err == nil {
 		t.Fatal("guest の hook が host で実行された")
+	}
+}
+
+func TestPublishLimits(t *testing.T) {
+	f := newFixture(t)
+	run(t, f.guest, "git", "switch", "-q", "-c", "feature")
+	commit(t, f.guest, "a.txt", "a\n")
+	if _, err := f.p.Publish(Request{Branch: "feature", Title: strings.Repeat("あ", maxTitleRunes+1)}); err == nil {
+		t.Fatal("長すぎるタイトルが通った")
+	}
+	f.p.MinInterval = time.Hour
+	if _, err := f.p.Publish(Request{Branch: "feature", Title: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.p.Publish(Request{Branch: "feature", Title: "t"}); err == nil {
+		t.Fatal("間隔の制限が効かない")
+	}
+	f.p.MinInterval = 0
+	for i := range maxBranches + 1 {
+		b := fmt.Sprintf("b%d", i)
+		run(t, f.guest, "git", "switch", "-q", "-c", b, "feature")
+		_, err := f.p.Publish(Request{Branch: b, Title: "t"})
+		if i+1 < maxBranches && err != nil {
+			t.Fatalf("%s: %v", b, err)
+		}
+		if i+1 > maxBranches && err == nil {
+			t.Fatal("ブランチ数の上限が効かない")
+		}
 	}
 }

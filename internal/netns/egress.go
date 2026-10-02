@@ -51,7 +51,20 @@ type egress struct {
 	seen    map[string]map[string]bool // ドメイン -> 応答で見た IP
 	alias   map[string]string          // CNAME の別名 -> 元のドメイン
 	applied string
+
+	// 拒否のログ・通知の量を抑える (ランダムな名前の連打でログを膨らませない)
+	logWindow  time.Time
+	logCount   int
+	logDropped int
+	seenFull   bool
 }
+
+const (
+	// maxSeen は応答を覚えておく名前の上限 (ワイルドカード許可で無限に増やされないように)。
+	maxSeen = 4096
+	// maxDeniedLogs は 1 分あたりに記録・通知する拒否の件数。
+	maxDeniedLogs = 30
+)
 
 func newEgress(nft func(string) error, events *eventWriter, initial []Grant) *egress {
 	return &egress{nft: nft, events: events, grants: initial,
@@ -82,6 +95,21 @@ func (e *egress) allowed(name string) bool {
 }
 
 func (e *egress) denied(name string) {
+	e.mu.Lock()
+	now := time.Now()
+	if now.Sub(e.logWindow) >= time.Minute {
+		if e.logDropped > 0 {
+			log.Printf("dns: 許可外 ほか %d 件 (多すぎるので省略)", e.logDropped)
+		}
+		e.logWindow, e.logCount, e.logDropped = now, 0, 0
+	}
+	e.logCount++
+	if e.logCount > maxDeniedLogs {
+		e.logDropped++
+		e.mu.Unlock()
+		return
+	}
+	e.mu.Unlock()
 	log.Printf("dns: 許可外 %s", name)
 	e.events.send(Event{Denied: name})
 }
@@ -100,6 +128,13 @@ func (e *egress) onAnswer(name string, ips []net.IP, cnames []string) {
 	}
 	m := e.seen[name]
 	if m == nil {
+		if len(e.seen) >= maxSeen {
+			if !e.seenFull {
+				log.Printf("dns: 応答を覚える名前が上限 (%d) に達した。以後の新しい名前には接続できない", maxSeen)
+				e.seenFull = true
+			}
+			return
+		}
 		m = map[string]bool{}
 		e.seen[name] = m
 	}

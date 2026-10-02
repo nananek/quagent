@@ -136,7 +136,7 @@ func (c *child) run() error {
 	if err != nil {
 		return fmt.Errorf("DNS の待ち受けに失敗: %w", err)
 	}
-	dns := &dnsServer{upstream: c.spec.DNS, allowed: eg.allowed, onAnswer: eg.onAnswer, onDenied: eg.denied}
+	dns := &dnsServer{sem: make(chan struct{}, 64), upstream: c.spec.DNS, allowed: eg.allowed, onAnswer: eg.onAnswer, onDenied: eg.denied}
 	go dns.serveUDP(pc)
 	go dns.serveTCP(tl)
 

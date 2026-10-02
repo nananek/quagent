@@ -208,6 +208,11 @@ runcmd:
 		return err
 	}
 	defer con.Close()
+	g.consoleSock = filepath.Join(work, "console.sock")
+	con.Clipboard, err = clipboardSink(cfg.Clipboard)
+	if err != nil {
+		return err
+	}
 	go relayDenied(l, con)
 	protected := cfg.PR.ProtectedBranches
 	if len(protected) == 0 {
@@ -226,7 +231,7 @@ runcmd:
 	publisher := &pr.Publisher{
 		Repo: repo, Work: work, Protected: protected, GH: pr.RunGH,
 		GuestURL: g.gitURL(), GitConfig: []string{"protocol.ext.allow=always"},
-		MarkPub: strings.TrimSpace(string(markPub)),
+		MarkPub: strings.TrimSpace(string(markPub)), MinInterval: 10 * time.Second,
 	}
 	svc.Mux.Handle(mcpsrv.Path, mcpsrv.Handler(mgr, publisher, con.Log))
 
@@ -314,6 +319,23 @@ func sweepRuns() {
 	}
 }
 
+// clipboardSink は承認したクリップボードの中身の入れ方を設定から選ぶ。
+func clipboardSink(c config.Clipboard) (func([]byte) error, error) {
+	switch c.Method {
+	case "", "tmux":
+		return console.TmuxClipboard, nil
+	case "osc52":
+		return console.OSC52Clipboard("/dev/tty"), nil
+	case "command":
+		if len(c.Command) == 0 {
+			return nil, fmt.Errorf("clipboard.method が command なら clipboard.command (例: [\"wl-copy\"]) が要る")
+		}
+		return console.CommandClipboard(c.Command), nil
+	default:
+		return nil, fmt.Errorf("clipboard.method は tmux / osc52 / command のどれか: %q", c.Method)
+	}
+}
+
 // tmpTag は .tmp を 9p で見せるときのタグ。
 const tmpTag = "quagent-tmp"
 
@@ -351,14 +373,31 @@ func newCID() uint32 {
 	return 3 + uint32(rand.Int64N(1<<31-3))
 }
 
-// relayDenied は DNS で拒否したドメインを承認コンソールに流す (同じ名前は 1 分に 1 回)。
+// relayDenied は DNS で拒否したドメインを承認コンソールに流す (同じ名前は 1 分に 1 回、
+// 全体でも 1 分に 10 件まで)。
 func relayDenied(l *netns.Launcher, con *console.Server) {
 	last := map[string]time.Time{}
+	var window time.Time
+	var shown, dropped int
 	for name := range l.Denied {
-		if time.Since(last[name]) < time.Minute {
+		now := time.Now()
+		if now.Sub(window) >= time.Minute {
+			if dropped > 0 {
+				con.Log(fmt.Sprintf("DNS で拒否: ほか %d 件 (多すぎるので省略)", dropped))
+			}
+			window, shown, dropped = now, 0, 0
+			// 覚えている名前も 1 分ごとに捨てる (ランダムな名前で膨らませない)
+			clear(last)
+		}
+		if now.Sub(last[name]) < time.Minute {
 			continue
 		}
-		last[name] = time.Now()
+		last[name] = now
+		if shown >= 10 {
+			dropped++
+			continue
+		}
+		shown++
 		con.Log("DNS で拒否: " + name)
 	}
 }
@@ -377,6 +416,9 @@ func runTmux(session string, agent, consoleArgv []string, quit <-chan struct{}) 
 		return err
 	}
 	defer func() { _ = exec.Command("tmux", "kill-session", "-t", session).Run() }()
+	// VM の出力で窓の名前を書き換えたり、tmux を素通りして外の端末へ送ったりさせない
+	_ = tmux("set-option", "-w", "-t", session+":", "allow-rename", "off")
+	_ = tmux("set-option", "-w", "-t", session+":", "allow-passthrough", "off")
 	if err := tmux(append([]string{"split-window", "-v", "-l", "30%", "-t", session + ":"}, consoleArgv...)...); err != nil {
 		return err
 	}

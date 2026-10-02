@@ -10,6 +10,7 @@ package pr
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -18,10 +19,23 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
+	"unicode/utf8"
 )
 
 // DefaultProtected は既定の保護ブランチ。
 var DefaultProtected = []string{"main", "master", "develop"}
+
+// 敵対的なエージェントに host の資源 (署名・ディスク・GitHub) を使い潰させない上限。
+const (
+	maxTitleRunes = 256
+	maxBodyBytes  = 60000
+	maxNewCommits = 500 // 1 回の依頼で署名し直すコミット数
+	maxBranches   = 10  // 1 回の run で PR にできるブランチ数
+	minInterval   = 10 * time.Second
+	maxFetchFile  = 2 << 30 // guest からの取り込みで書けるファイルの大きさ
+	gitTimeout    = 10 * time.Minute
+)
 
 // Request はエージェントからの PR 作成・更新の依頼。
 type Request struct {
@@ -52,6 +66,8 @@ type Publisher struct {
 	// MarkPub は VM に渡した捨て鍵の公開鍵 (ssh 形式)。この鍵の署名がある
 	// コミットだけを「VM で作ったもの」として署名し直す。
 	MarkPub string
+	// MinInterval は依頼と依頼の最小の間隔 (0 なら制限しない)。
+	MinInterval time.Duration
 	// GH は PR を作る (nil なら作らずに push まで)。テストで差し替える。
 	GH func(dir string, args ...string) ([]byte, error)
 
@@ -60,6 +76,8 @@ type Publisher struct {
 	markFP   string
 	signed   map[string]string // VM のコミット -> 署名し直したコミット
 	identity [2]string         // 署名し直すコミットの committer (host の user.name / user.email)
+	branches map[string]bool   // この run で扱ったブランチ
+	last     time.Time         // 前回の依頼の時刻
 }
 
 func (p *Publisher) gitIO(dir string, env []string, stdin io.Reader, args ...string) (string, error) {
@@ -68,13 +86,23 @@ func (p *Publisher) gitIO(dir string, env []string, stdin io.Reader, args ...str
 	for _, c := range p.GitConfig {
 		pre = append(pre, "-c", c)
 	}
-	cmd := exec.Command("git", append(pre, args...)...)
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	argv := append([]string{"git"}, append(pre, args...)...)
+	if len(args) > 0 && args[0] == "fetch" {
+		// guest から取り込むときは書けるファイルの大きさを制限する (host のディスクを守る)
+		argv = append([]string{"prlimit", fmt.Sprintf("--fsize=%d", maxFetchFile), "--"}, argv...)
+	}
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
 	cmd.Env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"), env...)
 	cmd.Stdin = stdin
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("git %s が %s 以内に終わらなかった", args[0], gitTimeout)
+		}
 		return "", fmt.Errorf("git %s: %v: %s", args[0], err, strings.TrimSpace(errb.String()))
 	}
 	return strings.TrimSpace(out.String()), nil
@@ -131,6 +159,7 @@ func (p *Publisher) prepare() error {
 	}
 	p.bare, p.markFP, p.identity = bare, f[1], [2]string{name, email}
 	p.signed = map[string]string{}
+	p.branches = map[string]bool{}
 	return nil
 }
 
@@ -169,6 +198,13 @@ func (p *Publisher) Publish(req Request) (Result, error) {
 	if strings.TrimSpace(req.Title) == "" {
 		return Result{}, fmt.Errorf("タイトルが必要")
 	}
+	if utf8.RuneCountInString(req.Title) > maxTitleRunes || len(req.Body) > maxBodyBytes {
+		return Result{}, fmt.Errorf("タイトルは %d 文字、本文は %d バイトまで", maxTitleRunes, maxBodyBytes)
+	}
+	if wait := p.MinInterval - time.Since(p.last); wait > 0 {
+		return Result{}, fmt.Errorf("PR の依頼は %s おきにしかできない。%s 後にもう一度", p.MinInterval, wait.Round(time.Second))
+	}
+	p.last = time.Now()
 	base := req.Base
 	if base == "" {
 		base = p.defaultBase()
@@ -178,6 +214,9 @@ func (p *Publisher) Publish(req Request) (Result, error) {
 	}
 	if err := p.prepare(); err != nil {
 		return Result{}, err
+	}
+	if !p.branches[req.Branch] && len(p.branches) >= maxBranches {
+		return Result{}, fmt.Errorf("1 回の run で PR にできるブランチは %d 本まで", maxBranches)
 	}
 	origin, err := p.git(p.Repo, "remote", "get-url", "origin")
 	if err != nil {
@@ -202,6 +241,7 @@ func (p *Publisher) Publish(req Request) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	p.branches[req.Branch] = true
 	prev, _ := p.git(p.bare, "rev-parse", "--verify", "-q", pushedRef)
 	if head == prev {
 		return p.finish(req, base, head, 0)
@@ -227,13 +267,27 @@ func (p *Publisher) rewrite(tip, baseRef string) (string, int, error) {
 	if err != nil {
 		return "", 0, err
 	}
+	commits := strings.Fields(out)
+	fresh := 0
+	for _, c := range commits {
+		if _, ok := p.signed[c]; !ok {
+			fresh++
+		}
+	}
+	// host にあるコミットも含めた数で先に弾く (1 件ずつ確かめる前に)
+	if fresh > maxNewCommits*4 {
+		return "", 0, fmt.Errorf("base に無いコミットが多すぎる (%d 件)", fresh)
+	}
 	n := 0
-	for _, c := range strings.Fields(out) {
+	for _, c := range commits {
 		if _, ok := p.signed[c]; ok {
 			continue
 		}
 		if p.hostHas(c) {
 			continue
+		}
+		if n >= maxNewCommits {
+			return "", 0, fmt.Errorf("1 回に署名し直せるコミットは %d 件まで", maxNewCommits)
 		}
 		marked, err := p.isMarked(c)
 		if err != nil {

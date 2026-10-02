@@ -24,6 +24,16 @@ type Config struct {
 	Claude Claude `json:"claude"`
 	// PR は PR 作成の設定。
 	PR PR `json:"pr"`
+	// Clipboard は VM が OSC 52 で書き込もうとした中身 (承認したもの) の入れ方。
+	Clipboard Clipboard `json:"clipboard"`
+}
+
+// Clipboard はクリップボードへの入れ方。
+type Clipboard struct {
+	// Method は "tmux" (既定。tmux load-buffer -w)、"osc52" (quagent を起動した端末に
+	// OSC 52 を送り直す。Kitty など)、"command" (Command に標準入力で渡す) のどれか。
+	Method  string   `json:"method,omitempty"`
+	Command []string `json:"command,omitempty"`
 }
 
 // Claude は VM 内の Claude Code の設定。

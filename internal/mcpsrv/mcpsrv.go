@@ -30,6 +30,10 @@ and a concrete reason. A human approves or denies the whole request at once.
 Approval works at the DNS level: approved names resolve and can be connected
 to; everything else fails to resolve. Use "*.example.com" for subdomains.
 
+Only one request can be pending at a time: wait for its result (wait_network_access)
+before sending another. After a denial or a timeout, the same domains cannot be
+requested again for 10 minutes.
+
 When you no longer need a domain, call release_network_access. Already-open
 connections keep working after release or expiry; only new connections stop.`
 
@@ -77,11 +81,12 @@ func describe(r access.Result) resultOut {
 			out.Message = "Approved for the rest of this session. Release when done."
 		}
 	case access.Denied:
-		out.Message = "Denied by the reviewer. Do not retry the same request; find another way or explain to the user."
+		out.Message = "Denied by the reviewer. These domains cannot be requested again for 10 minutes; find another way or explain to the user."
 	case access.Question:
 		out.Message = "The reviewer has a question instead of a decision. Answer it in the reason of a new request_network_access call."
 	case access.TimedOut:
-		out.Message = fmt.Sprintf("Denied because the reviewer did not respond within %s (timeout, not an explicit denial).", access.DecisionTimeout)
+		out.Message = fmt.Sprintf("Denied because the reviewer did not respond within %s (timeout, not an explicit denial). "+
+			"These domains cannot be requested again for %s.", access.DecisionTimeout, access.DenyCooldown)
 	case access.Pending:
 		out.Message = "Still waiting for the reviewer. Call wait_network_access with this request_id to keep waiting."
 	}

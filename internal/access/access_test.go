@@ -2,6 +2,7 @@ package access
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -139,7 +140,7 @@ func TestDeniedAndQuestion(t *testing.T) {
 	if res.Status != Denied || len(f.last) != 0 {
 		t.Fatalf("%+v %+v", res, f.last)
 	}
-	r2, _ := m.Submit([]string{"example.com"}, "y")
+	r2, _ := m.Submit([]string{"example.org"}, "y")
 	_ = m.Decide(r2.ID, Decision{Status: Question, Question: "何に使う?"})
 	res, _ = m.Wait(context.Background(), r2.ID, time.Second)
 	if res.Status != Question || res.Question != "何に使う?" {
@@ -191,5 +192,84 @@ func TestRemoveAlways(t *testing.T) {
 	_, _ = m2.Submit([]string{"pypi.org"}, "y")
 	if len(m2.Pending()) != 1 {
 		t.Fatal("取り消したドメインが確認なしで通った")
+	}
+}
+
+func TestOnlyOnePending(t *testing.T) {
+	m, _ := newTestManager(t)
+	r, err := m.Submit([]string{"a.example"}, "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Submit([]string{"b.example"}, "y"); err == nil {
+		t.Fatal("承認待ちがあるのに次の申請が通った")
+	}
+	if len(m.Pending()) != 1 {
+		t.Fatal("承認待ちが増えた")
+	}
+	_ = m.Decide(r.ID, Decision{Status: Question, Question: "?"})
+	if _, err := m.Submit([]string{"b.example"}, "y"); err != nil {
+		t.Fatalf("決着後の申請が通らない: %v", err)
+	}
+}
+
+func TestDenyCooldown(t *testing.T) {
+	m, _ := newTestManager(t)
+	now := time.Now()
+	m.now = func() time.Time { return now }
+	r, _ := m.Submit([]string{"a.example", "b.example"}, "x")
+	_ = m.Decide(r.ID, Decision{Status: Denied})
+	if _, err := m.Submit([]string{"b.example"}, "言い換え"); err == nil {
+		t.Fatal("拒否直後の再申請が通った")
+	}
+	if _, err := m.Submit([]string{"c.example"}, "別件"); err != nil {
+		t.Fatalf("無関係なドメインまで止まった: %v", err)
+	}
+	r3 := m.Pending()[0]
+	_ = m.Decide(r3.ID, Decision{Status: Denied})
+	now = now.Add(DenyCooldown + time.Second)
+	if _, err := m.Submit([]string{"b.example"}, "時間が経った"); err != nil {
+		t.Fatalf("待ち時間の後も再申請できない: %v", err)
+	}
+}
+
+func TestTimeoutAlsoCoolsDown(t *testing.T) {
+	m, _ := newTestManager(t)
+	r, _ := m.Submit([]string{"a.example"}, "x")
+	r.Created = time.Now().Add(-DecisionTimeout - time.Second)
+	_, _ = m.Wait(context.Background(), r.ID, time.Second)
+	if _, err := m.Submit([]string{"a.example"}, "again"); err == nil {
+		t.Fatal("時間切れ直後の再申請が通った")
+	}
+}
+
+func TestLimits(t *testing.T) {
+	m, _ := newTestManager(t)
+	var many []string
+	for i := range MaxDomains + 1 {
+		many = append(many, fmt.Sprintf("d%d.example", i))
+	}
+	if _, err := m.Submit(many, "x"); err == nil {
+		t.Fatal("ドメイン数の上限が効かない")
+	}
+	if _, err := m.Submit([]string{"a.example"}, strings.Repeat("あ", MaxReasonRunes+1)); err == nil {
+		t.Fatal("理由の長さの上限が効かない")
+	}
+}
+
+func TestSettledAreForgotten(t *testing.T) {
+	m, _ := newTestManager(t)
+	_ = m.Preallow([]string{"a.example"})
+	first, _ := m.Submit([]string{"a.example"}, "x")
+	for range keepSettled + 5 {
+		if _, err := m.Submit([]string{"a.example"}, "x"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(m.byID) > keepSettled {
+		t.Fatalf("決着済みの申請が溜まり続ける: %d", len(m.byID))
+	}
+	if _, ok := m.Settled(first.ID); ok {
+		t.Fatal("古い申請を忘れていない")
 	}
 }
