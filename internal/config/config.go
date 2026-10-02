@@ -16,6 +16,15 @@ type Config struct {
 	// Providers は認証プロキシ経由で guest に使わせる LLM API。キーは provider ID
 	// (opencode の provider ID と揃える)。
 	Providers map[string]Provider `json:"providers"`
+	// Opencode は VM 内の opencode の設定。
+	Opencode Opencode `json:"opencode"`
+}
+
+// Opencode は VM 内の opencode の設定。
+type Opencode struct {
+	// Model は既定のモデル ("<provider>/<model>")。providers に挙げた provider の
+	// モデルを指定する (それ以外はプロキシを通らないので使えない)。
+	Model string `json:"model,omitempty"`
 }
 
 // Provider は 1 つの LLM API の転送設定。

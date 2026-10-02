@@ -29,8 +29,37 @@ host ── slirp4netns add_hostfwd ──► 子 netns (qemu hostfwd) ──►
 ```sh
 go build -o bin/quagent ./cmd/quagent
 bin/quagent image build        # ベースイメージを焼く (時々やり直して更新する)
-cd <repo> && quagent run       # VM を起動して /work に入る。exit で破棄
+cd <repo> && quagent run       # VM を起動し、tmux でエージェントと承認コンソールを開く
 ```
+
+`quagent run` は tmux セッションを作り、上のペインで VM 内の opencode
+(`--auto`、作業ディレクトリ `/work`) を、下のペインで承認コンソールを開く。
+エージェントのペインを終了するか、承認コンソールで `quit` すると VM を破棄する。
+デタッチしてもセッションが続くあいだ VM は動き続ける。
+
+## 接続先の申請 (MCP)
+
+VM からの外向き通信は既定でゼロ。エージェントは MCP (`http://quagent.host/mcp`)
+の `request_network_access` で「理由 + ドメイン群」をまとめて申請し、承認
+コンソールで一括して判断する。
+
+| 入力 | 意味 |
+| --- | --- |
+| `1` | 今回は許可 (5 分間、新規接続を許す) |
+| `2` | このセッションでは確認しない |
+| `3` | 以後確認しない (全プロジェクト共通。npm や PyPI のような汎用のものに限る想定) |
+| `d` | 拒否 |
+| `q` | 質問を返す (エージェントは答えを理由に書いて再申請する) |
+
+10 分応答がなければ時間切れとして拒否し、時間切れであることをエージェントに伝える。
+エージェントは `release_network_access` で用済みの許可を自分で放棄できる。
+許可は「新規接続を始めてよいか」の判断なので、期限切れや放棄で確立済みの接続は
+切れない。「以後確認しない」は `~/.local/share/quagent/always-allow.json` に保存される。
+
+許可は DNS で判定する。子 netns 内の DNS サーバーが許可ドメイン (完全一致か
+`*.example.com`) の問い合わせだけを上流へ転送し、応答で見た IP だけを nft で
+通す。許可外の名前は解決できず、外部 DNS への直接通信も遮断するので、DNS を
+使った持ち出しもできない。
 
 host に必要なもの: `qemu-system-x86_64` (KVM)、`qemu-img`、`xorriso`、
 `slirp4netns`、`unshare`/`nsenter` (util-linux)、`nft`、`ssh`、`git`。
@@ -51,18 +80,20 @@ VM からは API のドメインにも直接出られない (既定の外向き�
       "upstream": "https://opencode.ai/zen/go/v1",
       "secret_command": ["pass", "show", "opencode/go"]
     }
-  }
+  },
+  "opencode": { "model": "opencode-go/deepseek-v4.1-flash" }
 }
 ```
 
 provider ID は opencode の provider ID と揃える。秘密の取り出し方は
 `secret_env` (環境変数名)・`secret_file` (パス)・`secret_command` (コマンド) の
 いずれか。ヘッダは既定で `Authorization: Bearer <秘密>` (`header` / `prefix` で変更可)。
-秘密は run 開始時に一度だけ取り出す。
+秘密は run 開始時に一度だけ取り出す。`opencode.model` は VM 内 opencode の既定
+モデルで、`providers` に挙げた provider のものを指定する。
 
 ## 現状
 
-今後: MCP による接続先申請と承認 UI (tmux)、PR の作成と署名、起動時 TUI。
+今後: PR の作成と署名、起動時 TUI、OS ごとのイメージ (Debian / Arch)。
 
 ## ライセンス
 

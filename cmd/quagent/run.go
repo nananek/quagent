@@ -12,10 +12,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nananek/quagent/internal/access"
 	"github.com/nananek/quagent/internal/authproxy"
 	"github.com/nananek/quagent/internal/config"
+	"github.com/nananek/quagent/internal/console"
 	"github.com/nananek/quagent/internal/hostsvc"
 	"github.com/nananek/quagent/internal/image"
+	"github.com/nananek/quagent/internal/mcpsrv"
 	"github.com/nananek/quagent/internal/netns"
 	"github.com/nananek/quagent/internal/paths"
 	"github.com/nananek/quagent/internal/vm"
@@ -26,6 +29,8 @@ type runOpts struct {
 	CPUs   int
 	MemMiB int
 	Allow  []string
+	// Interactive は端末から使うとき true。tmux でエージェントと承認コンソールを開く。
+	Interactive bool
 }
 
 func logf(format string, a ...any) {
@@ -130,6 +135,22 @@ bootcmd:
 	}
 	defer l.Stop()
 
+	// 接続先の申請と承認 (MCP -> Manager -> launcher の nft)
+	mgr, err := access.NewManager(l, filepath.Join(paths.DataDir(), "always-allow.json"))
+	if err != nil {
+		return err
+	}
+	if err := mgr.Preallow(o.Allow); err != nil {
+		return err
+	}
+	con, err := console.NewServer(mgr, filepath.Join(work, "console.sock"))
+	if err != nil {
+		return err
+	}
+	defer con.Close()
+	go relayDenied(l, con)
+	svc.Mux.Handle(mcpsrv.Path, mcpsrv.Handler(mgr))
+
 	// 待機中の Ctrl-C でも後始末を通す。対話中は ssh が pty で受けるので届かない。
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
@@ -159,15 +180,110 @@ bootcmd:
 		return err
 	}
 
-	if err := writeOpencodeConfig(ssh, providers); err != nil {
+	if err := writeOpencodeConfig(ssh, providers, cfg.Opencode.Model); err != nil {
 		return err
 	}
 
-	logf("VM に接続 (exit で破棄)")
-	sh := ssh.Command([]string{"-t"}, "cd /work && exec bash -l")
-	sh.Stdin, sh.Stdout, sh.Stderr = os.Stdin, os.Stdout, os.Stderr
-	_ = sh.Run()
+	if !o.Interactive {
+		// 端末が無い (自動テスト等): tmux を使わず stdin をそのまま VM のシェルへ流す
+		sh := ssh.Command(nil, "cd /work && exec bash -l")
+		sh.Stdin, sh.Stdout, sh.Stderr = os.Stdin, os.Stdout, os.Stderr
+		_ = sh.Run()
+		return nil
+	}
+
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	agent := ssh.Command([]string{"-t"}, "cd /work && ~/.opencode/bin/opencode --auto /work; exec bash -l").Args
+	session := "quagent-" + filepath.Base(work)
+	if err := runTmux(session, agent, []string{self, consoleCommand, filepath.Join(work, "console.sock")}, con.Quit); err != nil {
+		return err
+	}
 	return nil
+}
+
+// relayDenied は DNS で拒否したドメインを承認コンソールに流す (同じ名前は 1 分に 1 回)。
+func relayDenied(l *netns.Launcher, con *console.Server) {
+	last := map[string]time.Time{}
+	for name := range l.Denied {
+		if time.Since(last[name]) < time.Minute {
+			continue
+		}
+		last[name] = time.Now()
+		con.Log("DNS で拒否: " + name)
+	}
+}
+
+// runTmux は上にエージェント、下に承認コンソールを置いた tmux セッションを作り、
+// 終わるまで待つ。エージェントのペインが終わるとセッションごと閉じる。
+func runTmux(session string, agent, consoleArgv []string, quit <-chan struct{}) error {
+	tmux := func(args ...string) error {
+		if out, err := exec.Command("tmux", args...).CombinedOutput(); err != nil {
+			return fmt.Errorf("tmux %s: %v: %s", args[0], err, out)
+		}
+		return nil
+	}
+	agentSh := shellJoin(agent) + "; tmux kill-session -t " + shellQuote(session)
+	if err := tmux("new-session", "-d", "-s", session, "-x", "200", "-y", "50", "sh", "-c", agentSh); err != nil {
+		return err
+	}
+	defer func() { _ = exec.Command("tmux", "kill-session", "-t", session).Run() }()
+	if err := tmux(append([]string{"split-window", "-v", "-l", "30%", "-t", session + ":"}, consoleArgv...)...); err != nil {
+		return err
+	}
+	_ = tmux("select-pane", "-t", session+":.0")
+
+	logf("tmux セッション %s に接続 (エージェントを終了すると VM を破棄)", session)
+	attached := make(chan struct{})
+	if os.Getenv("TMUX") != "" {
+		close(attached)
+		if err := tmux("switch-client", "-t", session); err != nil {
+			return err
+		}
+	} else {
+		att := exec.Command("tmux", "attach-session", "-t", session)
+		att.Stdin, att.Stdout, att.Stderr = os.Stdin, os.Stdout, os.Stderr
+		if err := att.Start(); err != nil {
+			return err
+		}
+		go func() { _ = att.Wait(); close(attached) }()
+	}
+	// 終わるまで待つ。デタッチされてもセッションが続くあいだは VM を生かしておく
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	notified := false
+	for {
+		select {
+		case <-quit:
+			// セッションを閉じれば attach も戻る。端末を返してから後始末に進む
+			_ = exec.Command("tmux", "kill-session", "-t", session).Run()
+			<-attached
+			return nil
+		case <-tick.C:
+		}
+		if exec.Command("tmux", "has-session", "-t", session).Run() != nil {
+			<-attached
+			return nil
+		}
+		select {
+		case <-attached:
+			if !notified && os.Getenv("TMUX") == "" {
+				logf("デタッチ中。戻るには: tmux attach -t %s", session)
+				notified = true
+			}
+		default:
+		}
+	}
+}
+
+func shellJoin(argv []string) string {
+	q := make([]string, len(argv))
+	for i, a := range argv {
+		q[i] = shellQuote(a)
+	}
+	return strings.Join(q, " ")
 }
 
 func repoRoot(dir string) (string, error) {
@@ -209,7 +325,7 @@ func shellQuote(s string) string {
 
 // writeOpencodeConfig は guest の opencode が provider を認証プロキシ経由で使うよう設定する。
 // apiKey はダミー (本物はプロキシが host 側で付ける)。
-func writeOpencodeConfig(ssh vm.SSH, providers []string) error {
+func writeOpencodeConfig(ssh vm.SSH, providers []string, model string) error {
 	prov := map[string]any{}
 	for _, id := range providers {
 		prov[id] = map[string]any{"options": map[string]any{
@@ -217,10 +333,22 @@ func writeOpencodeConfig(ssh vm.SSH, providers []string) error {
 			"apiKey":  "quagent-proxy",
 		}}
 	}
-	b, err := json.MarshalIndent(map[string]any{
+	conf := map[string]any{
 		"$schema":  "https://opencode.ai/config.json",
 		"provider": prov,
-	}, "", "  ")
+		"mcp": map[string]any{
+			"quagent": map[string]any{
+				"type":    "remote",
+				"url":     "http://" + hostsvc.GuestHost + mcpsrv.Path,
+				"enabled": true,
+				"oauth":   false,
+			},
+		},
+	}
+	if model != "" {
+		conf["model"] = model
+	}
+	b, err := json.MarshalIndent(conf, "", "  ")
 	if err != nil {
 		return err
 	}

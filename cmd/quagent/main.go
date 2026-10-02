@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/nananek/quagent/internal/console"
 	"github.com/nananek/quagent/internal/image"
 	"github.com/nananek/quagent/internal/netns"
 )
@@ -37,6 +38,11 @@ func dispatch(args []string) error {
 			return fmt.Errorf("%s: spec のパスが必要", netns.ChildCommand)
 		}
 		return netns.RunChild(args[1])
+	case consoleCommand:
+		if len(args) != 2 {
+			return fmt.Errorf("%s: socket のパスが必要", consoleCommand)
+		}
+		return console.RunClient(args[1])
 	case "image":
 		return cmdImage(args[1:])
 	case "run":
@@ -84,9 +90,18 @@ func cmdRun(args []string) error {
 	allow := fs.String("allow", "", "egress を許すドメイン (空白区切り)。LLM API は認証プロキシ経由なので不要")
 	_ = fs.Parse(args)
 	return run(runOpts{
-		Repo:   *repo,
-		CPUs:   *cpus,
-		MemMiB: *mem,
-		Allow:  strings.Fields(*allow),
+		Repo:        *repo,
+		CPUs:        *cpus,
+		MemMiB:      *mem,
+		Allow:       strings.Fields(*allow),
+		Interactive: isTerminal(os.Stdin),
 	})
+}
+
+// consoleCommand は承認コンソール UI を動かす隠しサブコマンド名。
+const consoleCommand = "__console"
+
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }
