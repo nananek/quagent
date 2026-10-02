@@ -180,6 +180,7 @@ func (c *child) applyRules() error {
     ip daddr 10.0.2.0/24 accept
     ip daddr @allow4 tcp dport 443 accept
     ip daddr @allow4 udp dport 443 accept
+    meta l4proto tcp counter reject with tcp reset
     counter reject
   }
 }
