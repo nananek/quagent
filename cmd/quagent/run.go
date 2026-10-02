@@ -113,17 +113,40 @@ func run(o runOpts) error {
 		logf("VM を破棄した (ログ: %s)", filepath.Join(paths.LogsDir(), filepath.Base(work)))
 	}()
 
+	// guest からの唯一の窓口 (host の vsock。VM 内の受け口が 127.0.0.1 から中継する)
+	hostLog, err := os.Create(filepath.Join(work, "host.log"))
+	if err != nil {
+		return err
+	}
+	defer hostLog.Close()
+	logger := log.New(hostLog, "", log.Ltime)
+	svc, err := hostsvc.New(g.cid)
+	if err != nil {
+		return err
+	}
+	providers, err := authproxy.Register(svc.Mux, cfg.Providers, logger)
+	if err != nil {
+		return err
+	}
+	if len(providers) == 0 {
+		logf("認証プロキシの provider が未設定 (%s)。VM から LLM API は使えない", config.Path())
+	}
+	if err := svc.Start(); err != nil {
+		return err
+	}
+	defer svc.Stop()
+
 	// VM の受け口 (quagent 自身) を seed に入れ、cloud-init で作業ユーザーとして常駐させる。
 	// ssh は既定で止める。--ssh のときだけ使い捨ての鍵で人が入れるようにする。
 	userData := fmt.Sprintf(`#cloud-config
 bootcmd:
-  - echo '%s %s' >> /etc/hosts
+  - echo '127.0.0.1 %s' >> /etc/hosts
   # 外へは出られないので NTP は使えない (時計は KVM が合わせる)。拒否の記録が並ぶだけなので止める
   - [sh, -c, "systemctl mask --now systemd-timesyncd.service 2>/dev/null; true"]
 runcmd:
 %s  - [sh, -c, "mkdir -p /run/quagent-seed && mount -o ro /dev/disk/by-label/cidata /run/quagent-seed && install -m 755 /run/quagent-seed/quagent-guest /usr/local/bin/quagent-guest && umount /run/quagent-seed"]
-  - [systemd-run, --unit=quagent-guest, --uid=%s, -p, Restart=always, /usr/local/bin/quagent-guest, %s]
-`, hostsvc.GuestAddr, hostsvc.GuestHost, mountCmds(shares), vm.GuestUser, guestCommand)
+  - [systemd-run, --unit=quagent-guest, --uid=%s, -p, Restart=always, /usr/local/bin/quagent-guest, %s, "%d"]
+`, hostsvc.GuestHost, mountCmds(shares), vm.GuestUser, guestCommand, svc.Port)
 	var sshPort int
 	var sshKey string
 	if o.SSH {
@@ -152,31 +175,8 @@ runcmd:
 		return err
 	}
 
-	// guest からの唯一の窓口 (guestfwd -> unix socket)
-	hostLog, err := os.Create(filepath.Join(work, "host.log"))
-	if err != nil {
-		return err
-	}
-	defer hostLog.Close()
-	logger := log.New(hostLog, "", log.Ltime)
-	svc, err := hostsvc.New(filepath.Join(work, "host.sock"))
-	if err != nil {
-		return err
-	}
-	providers, err := authproxy.Register(svc.Mux, cfg.Providers, logger)
-	if err != nil {
-		return err
-	}
-	if len(providers) == 0 {
-		logf("認証プロキシの provider が未設定 (%s)。VM から LLM API は使えない", config.Path())
-	}
-	if err := svc.Start(); err != nil {
-		return err
-	}
-	defer svc.Stop()
-
 	// DNS は qemu 既定の 10.0.2.3 -> 子 netns の自前 DNS。子 netns は IPv4 のみ。
-	netdev := "ipv6=off," + hostsvc.Guestfwd(filepath.Join(work, "host.sock"))
+	netdev := "ipv6=off"
 	if o.SSH {
 		// qemu の hostfwd は子 netns 側 (slirp4netns の tap0 = 10.0.2.100) で受ける。
 		netdev += fmt.Sprintf(",hostfwd=tcp:10.0.2.100:%d-:22", sshPort)

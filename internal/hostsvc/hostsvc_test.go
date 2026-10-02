@@ -7,7 +7,7 @@ import (
 )
 
 func TestTokenRequired(t *testing.T) {
-	s, err := New("unused")
+	s, err := New(3)
 	if err != nil {
 		t.Fatal(err)
 	}

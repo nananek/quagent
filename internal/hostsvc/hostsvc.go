@@ -1,8 +1,10 @@
-// Package hostsvc は guest から到達できる唯一の host 側窓口 (HTTP over unix socket)。
+// Package hostsvc は guest から到達できる唯一の host 側窓口 (HTTP over vsock)。
 //
-// qemu の guestfwd が guest の GuestAddr への TCP 接続を socat 経由でこの socket に
-// 中継する。ネットワーク上の穴は開けず、nftables も通らない。認証プロキシや
-// MCP サーバーはここにルートを足して載せる。
+// host の quagent 本体が run ごとのポートで vsock を待ち受け、VM 内の受け口
+// (quagent __guest) が guest の 127.0.0.1:GuestPort への接続をそこへ中継する。
+// ネットワーク上の穴は開けず、nftables も通らない。接続ごとに host でプロセスを
+// 起こさないので、接続を大量に張られても host は耐える (同時接続にも上限がある)。
+// 認証プロキシや MCP サーバーはここにルートを足して載せる。
 package hostsvc
 
 import (
@@ -11,19 +13,27 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
-	"os"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/mdlayher/vsock"
 )
 
 const (
-	// GuestAddr は guest から見た窓口のアドレス (qemu user-net の仮想 IP)。
-	GuestAddr = "10.0.2.200"
-	// GuestHost は guest の /etc/hosts に登録する名前。
+	// GuestHost は guest の /etc/hosts に登録する名前 (127.0.0.1 を指す)。
 	GuestHost = "quagent.host"
+	// GuestPort は guest 内で中継を待ち受けるポート。
+	GuestPort = 7070
+	// maxConns は同時に受け付ける接続の上限。
+	maxConns = 64
 )
+
+// GuestOrigin は guest から見た窓口の URL の先頭 (http://quagent.host:7070)。
+func GuestOrigin() string { return fmt.Sprintf("http://%s:%d", GuestHost, GuestPort) }
 
 // Server は窓口の HTTP サーバー。
 type Server struct {
@@ -32,12 +42,14 @@ type Server struct {
 	// これを持たないリクエストを拒否する (VM 内のエージェント以外のプロセスや
 	// コンテナが、プロキシ経由で鍵や MCP を使えないように)。
 	Token string
-	sock  string
-	srv   *http.Server
+	// Port は host で待ち受ける vsock のポート (Start で決まる)。
+	Port uint32
+	cid  uint32 // 受け付ける VM の CID (他の VM からの接続は切る)
+	srv  *http.Server
 }
 
-// New は sock で待ち受けるサーバーを作る。ルートは Mux に登録してから Start する。
-func New(sock string) (*Server, error) {
+// New は VM (cid) からの接続だけを受ける窓口を作る。ルートは Mux に登録してから Start する。
+func New(cid uint32) (*Server, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return nil, err
@@ -46,7 +58,7 @@ func New(sock string) (*Server, error) {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})
-	return &Server{Mux: mux, Token: "qa-" + hex.EncodeToString(b), sock: sock}, nil
+	return &Server{Mux: mux, Token: "qa-" + hex.EncodeToString(b), cid: cid}, nil
 }
 
 // authorized はリクエストが合言葉を持っているかを返す。
@@ -73,18 +85,31 @@ func (s *Server) handler() http.Handler {
 	})
 }
 
-// Start は待ち受けを始める。
+// Start は host の vsock で待ち受けを始める (ポートは空いているものを選ぶ)。
 func (s *Server) Start() error {
-	_ = os.Remove(s.sock)
-	l, err := net.Listen("unix", s.sock)
+	var l net.Listener
+	var err error
+	for range 20 {
+		n, _ := rand.Int(rand.Reader, big.NewInt(40000))
+		port := uint32(20000 + n.Int64())
+		if l, err = vsock.Listen(port, nil); err == nil {
+			s.Port = port
+			break
+		}
+	}
 	if err != nil {
-		return err
+		return fmt.Errorf("vsock で待ち受けられない: %w", err)
 	}
-	if err := os.Chmod(s.sock, 0o600); err != nil {
-		l.Close()
-		return err
+	return s.serve(&guardListener{Listener: l, cid: s.cid, sem: make(chan struct{}, maxConns)})
+}
+
+func (s *Server) serve(l net.Listener) error {
+	s.srv = &http.Server{
+		Handler:           s.handler(),
+		ReadHeaderTimeout: 30 * time.Second,
+		MaxHeaderBytes:    64 << 10,
+		IdleTimeout:       2 * time.Minute,
 	}
-	s.srv = &http.Server{Handler: s.handler(), ReadHeaderTimeout: 30 * time.Second}
 	go func() { _ = s.srv.Serve(l) }()
 	return nil
 }
@@ -99,10 +124,39 @@ func (s *Server) Stop() {
 	_ = s.srv.Shutdown(ctx)
 }
 
-// Guestfwd は qemu -netdev user に付ける guestfwd オプションを返す。
-// qemu は接続ごとに socat を起動し、その標準入出力を sock につなぐ。
-func Guestfwd(sock string) string {
-	cmd := "socat STDIO UNIX-CONNECT:" + sock
-	// qemu のオプション値の中のカンマは二重にしてエスケープする
-	return fmt.Sprintf("guestfwd=tcp:%s:80-cmd:%s", GuestAddr, strings.ReplaceAll(cmd, ",", ",,"))
+// guardListener はこの run の VM 以外からの接続を切り、同時接続数を絞る。
+type guardListener struct {
+	net.Listener
+	cid uint32
+	sem chan struct{}
+}
+
+func (l *guardListener) Accept() (net.Conn, error) {
+	for {
+		c, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		if a, ok := c.RemoteAddr().(*vsock.Addr); !ok || a.ContextID != l.cid {
+			c.Close() // 別の VM から
+			continue
+		}
+		select {
+		case l.sem <- struct{}{}:
+			return &releaseConn{Conn: c, release: func() { <-l.sem }}, nil
+		default:
+			c.Close() // 同時接続の上限
+		}
+	}
+}
+
+type releaseConn struct {
+	net.Conn
+	release func()
+	once    sync.Once
+}
+
+func (c *releaseConn) Close() error {
+	c.once.Do(c.release)
+	return c.Conn.Close()
 }

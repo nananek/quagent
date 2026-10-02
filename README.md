@@ -12,7 +12,8 @@ socket はその netns の nftables を通り、許可リスト以外への新�
 
 ```
 host ── vsock ──────────────────────────────────────► guest (quagent __guest)
-host ◄─ unix socket ◄─ qemu guestfwd ◄──────────────── guest (quagent.host: LLM / MCP)
+host ◄─ vsock (run ごとのポート、この VM の CID だけ) ◄─ guest 127.0.0.1:7070
+                                                       (quagent.host: LLM / MCP)
         qemu ── tap0 ──► slirp4netns ──► host (uplink)
         └ 子 netns: nftables (許可した名前の IP 以外を reject) + 自前 DNS
 ```
@@ -66,7 +67,7 @@ quagent run --image arch       # VM を起動 (--ssh: 人が ssh で入れる、
 
 ## 接続先の申請 (MCP)
 
-VM からの外向き通信は既定でゼロ。エージェントは MCP (`http://quagent.host/mcp`)
+VM からの外向き通信は既定でゼロ。エージェントは MCP (`http://quagent.host:7070/mcp`)
 の `request_network_access` で「理由 + ドメイン群」をまとめて申請し、承認
 コンソールで一括して判断する。
 
@@ -90,7 +91,7 @@ VM からの外向き通信は既定でゼロ。エージェントは MCP (`http
 使った持ち出しもできない。
 
 host に必要なもの: `qemu-system-x86_64` (KVM)、`qemu-img`、`xorriso`、
-`slirp4netns`、`unshare`/`nsenter` (util-linux)、`nft`、`socat`、`git`、`gh`、`tmux`。
+`slirp4netns`、`unshare`/`nsenter`/`prlimit` (util-linux)、`nft`、`git`、`gh`、`tmux`。
 unprivileged user namespace が有効で、vsock (`/dev/vhost-vsock`、カーネル
 モジュール `vhost_vsock`) が使えること。`--ssh` を使うなら `ssh` / `ssh-keygen` も。
 
@@ -125,7 +126,9 @@ VM の中のエージェントが host の資源や承認者を使い潰せな�
   依頼は 10 秒おき。取り込みは 1 ファイル 2GiB まで、git は 10 分で打ち切る
 - host から VM へのコマンド: 出力は 1MiB、10 分で打ち切る
 - tmux: VM の出力による窓の名前の変更と、tmux を素通りする出力 (passthrough) を無効にする
-- 窓口 (LLM プロキシ・MCP) は run ごとのトークンが要る
+- 窓口 (LLM プロキシ・MCP) は run ごとのトークンが要る。窓口は host の vsock で待ち受け、
+  この run の VM 以外からの接続は切る。同時接続は 64 本まで。接続ごとに host で
+  プロセスを起こさない
 
 残っているもの: `--mount-tmp` の `.tmp` と VM のディスク (overlay、最大 40G) には VM が
 書き込めるので、host のディスクを使える。LLM API の利用量 (課金) は制限していない。
@@ -150,7 +153,7 @@ host の窓口 (LLM プロキシと MCP) は run ごとの合言葉 (トーク�
 設定を読まないプロセスは窓口を使えない (VM 内の docker コンテナは、そもそも窓口に
 経路が無い)。ただしエージェントと同じユーザーで動くプロセスは設定ファイルを読める。
 
-API キーは VM に入れない。VM 内の opencode は `http://quagent.host/llm/<provider>`
+API キーは VM に入れない。VM 内の opencode は `http://quagent.host:7070/llm/<provider>`
 を baseURL として使い、host 側のプロキシが本物の鍵を付けて本来の API へ転送する。
 VM からは API のドメインにも直接出られない (既定の外向き通信はゼロ)。
 

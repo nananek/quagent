@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -19,14 +20,60 @@ import (
 )
 
 // Serve は VM 内で vsock を待ち受け、host からのコマンドを実行する (`quagent __guest`)。
-// 実行するのはこのプロセスのユーザー (作業用の一般ユーザー) の権限。
-func Serve() error {
+// 実行するのはこのプロセスのユーザー (作業用の一般ユーザー) の権限。あわせて
+// 127.0.0.1:relayPort への接続を host の窓口 (vsock の hostPort) へ中継する。
+func Serve(relayPort int, hostPort uint32) error {
 	l, err := vsock.Listen(Port, nil)
 	if err != nil {
 		return err
 	}
 	log.Printf("vsock :%d で待ち受け", Port)
+	if hostPort != 0 {
+		rl, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", relayPort))
+		if err != nil {
+			return err
+		}
+		log.Printf("127.0.0.1:%d -> host の窓口 (vsock :%d) を中継", relayPort, hostPort)
+		go relay(rl, func() (net.Conn, error) { return vsock.Dial(vsock.Host, hostPort, nil) })
+	}
 	return serve(l)
+}
+
+// relay は l への接続を dial 先へそのまま中継する (同時 64 本まで)。
+func relay(l net.Listener, dial func() (net.Conn, error)) {
+	sem := make(chan struct{}, 64)
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			return
+		}
+		select {
+		case sem <- struct{}{}:
+		default:
+			c.Close()
+			continue
+		}
+		go func() {
+			defer func() { <-sem }()
+			defer c.Close()
+			up, err := dial()
+			if err != nil {
+				return
+			}
+			defer up.Close()
+			done := make(chan struct{}, 2)
+			go func() { _, _ = io.Copy(up, c); closeWrite(up); done <- struct{}{} }()
+			go func() { _, _ = io.Copy(c, up); closeWrite(c); done <- struct{}{} }()
+			<-done
+			<-done
+		}()
+	}
+}
+
+func closeWrite(c net.Conn) {
+	if cw, ok := c.(interface{ CloseWrite() error }); ok {
+		_ = cw.CloseWrite()
+	}
 }
 
 func serve(l net.Listener) error {

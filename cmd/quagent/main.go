@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/nananek/quagent/internal/access"
 	"github.com/nananek/quagent/internal/console"
 	"github.com/nananek/quagent/internal/guest"
+	"github.com/nananek/quagent/internal/hostsvc"
 	"github.com/nananek/quagent/internal/image"
 	"github.com/nananek/quagent/internal/netns"
 	"github.com/nananek/quagent/internal/tui"
@@ -59,7 +61,14 @@ func dispatch(args []string) error {
 		}
 		return netns.RunChild(args[1])
 	case guestCommand:
-		return guest.Serve()
+		if len(args) != 2 {
+			return fmt.Errorf("%s: host の窓口のポートが必要", guestCommand)
+		}
+		port, err := strconv.ParseUint(args[1], 10, 32)
+		if err != nil {
+			return fmt.Errorf("%s: ポートが不正: %q", guestCommand, args[1])
+		}
+		return guest.Serve(hostsvc.GuestPort, uint32(port))
 	case execCommand:
 		return cmdExec(args[1:])
 	case attachCommand:

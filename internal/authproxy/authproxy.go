@@ -14,7 +14,7 @@ import (
 	"github.com/nananek/quagent/internal/config"
 )
 
-// Prefix は窓口上のルートの前置き。guest からは http://quagent.host/llm/<id>/... で使う。
+// Prefix は窓口上のルートの前置き。guest からは <窓口>/llm/<id>/... で使う。
 const Prefix = "/llm/"
 
 // guest が送ってきても捨てる認証系ヘッダ。
@@ -65,7 +65,7 @@ func handler(id string, up *url.URL, header, value string, logger *log.Logger) h
 	return rp
 }
 
-// GuestBaseURL は guest に設定する provider の baseURL を返す。
-func GuestBaseURL(guestHost, id string) string {
-	return "http://" + guestHost + Prefix + id
+// GuestBaseURL は guest に設定する provider の baseURL を返す (origin は窓口の URL の先頭)。
+func GuestBaseURL(origin, id string) string {
+	return origin + Prefix + id
 }

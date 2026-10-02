@@ -47,7 +47,7 @@ func agentNames() []string {
 	return names
 }
 
-func guestMCPURL() string { return "http://" + hostsvc.GuestHost + mcpsrv.Path }
+func guestMCPURL() string { return hostsvc.GuestOrigin() + mcpsrv.Path }
 
 // setupOpencode は opencode が provider を認証プロキシ経由で使い、quagent の MCP を
 // 使うよう設定する。apiKey は窓口の合言葉 (本物の鍵はプロキシが host 側で付け替える)。
@@ -55,7 +55,7 @@ func setupOpencode(g vmGuest, cfg *config.Config, providers []string, token stri
 	prov := map[string]any{}
 	for _, id := range providers {
 		prov[id] = map[string]any{"options": map[string]any{
-			"baseURL": authproxy.GuestBaseURL(hostsvc.GuestHost, id),
+			"baseURL": authproxy.GuestBaseURL(hostsvc.GuestOrigin(), id),
 			"apiKey":  token,
 		}}
 	}
@@ -86,7 +86,7 @@ func setupClaude(g vmGuest, cfg *config.Config, providers []string, token string
 	settings := map[string]any{
 		"apiKeyHelper": "echo " + token,
 		"env": map[string]string{
-			"ANTHROPIC_BASE_URL":                       authproxy.GuestBaseURL(hostsvc.GuestHost, claudeProvider),
+			"ANTHROPIC_BASE_URL":                       authproxy.GuestBaseURL(hostsvc.GuestOrigin(), claudeProvider),
 			"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
 			"DISABLE_AUTOUPDATER":                      "1",
 		},
