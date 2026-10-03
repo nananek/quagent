@@ -43,8 +43,11 @@ const (
 
 // Recipe は 1 つの OS のベースイメージの作り方。
 type Recipe struct {
-	Name          string `json:"-"`
-	Description   string `json:"description"`
+	Name string `json:"-"`
+	// Description はメニューに出す短い説明 (OS 名と版くらい。中身の詳細は書かない)。
+	Description string `json:"description"`
+	// Details はイメージ管理の画面に出す中身の説明 (何をどこから入れるか)。
+	Details       string `json:"details,omitempty"`
 	CloudImageURL string `json:"cloud_image_url"`
 	// ChecksumURL は配布元のチェックサムの一覧 ("<16進> <ファイル名>" の行。sha256 か
 	// sha512)。取得したイメージをこれと照合する (必須)。

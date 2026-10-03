@@ -218,6 +218,9 @@ func imagesMenu() error {
 		for _, r := range rs {
 			imgs, _ := image.List(r.Name)
 			fmt.Fprintf(&sb, "%s — %s\n", r.Name, r.Description)
+			if r.Details != "" {
+				fmt.Fprintf(&sb, "  %s\n", r.Details)
+			}
 			if r.Source != "builtin" {
 				fmt.Fprintf(&sb, "  レシピ: %s\n", r.Source)
 			}

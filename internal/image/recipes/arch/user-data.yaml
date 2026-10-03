@@ -21,14 +21,16 @@ write_files:
       # クラウドイメージごと取り直したときに入る。
       pacman -Syu --noconfirm --needed --ignore linux \
         base-devel ca-certificates curl git jq unzip sqlite tmux \
-        shadow slirp4netns fuse-overlayfs iptables-nft
+        shadow slirp4netns fuse-overlayfs iptables-nft \
+        docker-compose opencode
 
       # rootless docker 用の subuid/subgid
       grep -q "^$U:" /etc/subuid || usermod --add-subuids 100000-165535 "$U"
       grep -q "^$U:" /etc/subgid || usermod --add-subgids 100000-165535 "$U"
 
-      # Arch の公式パッケージには rootless 用の部品が無いので、docker 公式の
-      # rootless インストーラーで静的バイナリを利用者のホームに入れる。
+      # Arch の公式パッケージには rootless 用の部品 (dockerd-rootless.sh) が無い
+      # (AUR だけ) ので、docker 公式の rootless インストーラーで静的バイナリを
+      # 利用者のホームに入れる。
       # rootful デーモンは入れない。
       # インストーラーは iptables 用のモジュールが読み込み済みかを確かめる
       modprobe -a nf_tables ip_tables iptable_nat || true
@@ -40,21 +42,14 @@ write_files:
       echo "DOCKER_HOST=unix:///run/user/$UID_/docker.sock" >> /etc/environment
       echo 'export PATH="$HOME/bin:$PATH"' >> "/home/$U/.bash_profile"
 
-      # compose プラグイン (静的バイナリ)
-      install -d -o "$U" -g "$U" "/home/$U/.docker" "/home/$U/.docker/cli-plugins"
-      curl -fsSL -o "/home/$U/.docker/cli-plugins/docker-compose" \
-        https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64
-      chmod 755 "/home/$U/.docker/cli-plugins/docker-compose"
-      chown "$U:$U" "/home/$U/.docker/cli-plugins/docker-compose"
-
       runuser -u "$U" -- env XDG_RUNTIME_DIR="/run/user/$UID_" \
         DOCKER_HOST="unix:///run/user/$UID_/docker.sock" \
         "/home/$U/bin/docker" info --format '{{"{{"}}.SecurityOptions{{"}}"}}' | grep -q rootless
+      # compose プラグインは pacman の docker-compose (/usr/lib/docker/cli-plugins)
+      runuser -l "$U" -c 'docker compose version'
 
-      # opencode (v2)
-      runuser -l "$U" -c 'curl -fsSL https://opencode.ai/v2/install | bash'
-      test -x "/home/$U/.opencode/bin/opencode"
-      echo 'export PATH="$HOME/.opencode/bin:$PATH"' >> "/home/$U/.bash_profile"
+      # opencode (v2) は pacman で入れた /usr/bin/opencode
+      test -x /usr/bin/opencode
 
       # Claude Code (公式のネイティブインストーラー)
       runuser -l "$U" -c 'curl -fsSL https://claude.ai/install.sh | bash'

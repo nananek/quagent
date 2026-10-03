@@ -152,7 +152,8 @@ VM の中のエージェントが host の資源や承認者を使い潰せな�
 
 OS ごとの作り方は `internal/image/recipes/<名前>/` に独立して置いてある
 (`recipe.json` にクラウドイメージの URL、`user-data.yaml` に焼き込みの
-cloud-init)。今は `debian` と `arch`。`~/.config/quagent/images/<名前>/` に同じ
+cloud-init)。今は `debian` と `arch`。`recipe.json` の `description` は起動メニューに
+出す短い名前 (OS 名と版くらい)、`details` はイメージ管理の画面に出す中身の説明。`~/.config/quagent/images/<名前>/` に同じ
 形で置けば、組み込みを差し替えたり別の OS を足したりできる。
 
 取得したクラウドイメージは配布元のチェックサム (`checksum_url`、必須) と照合し、
