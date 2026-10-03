@@ -250,12 +250,17 @@ provider ID は opencode の provider ID と揃える。秘密の取り出し方
    「VM で作った」印になる
 2. host が vsock 経由 (git の `ext::` 転送) で guest の `/work` からブランチを
    取り込む (run 専用の bare repo、hooks は無効、オブジェクトは host の repo を参照)
-3. base に無いコミットのうち、捨て鍵の印があるものだけを host の git 設定の鍵で
-   署名し直す (中身・author・メッセージは変えず、committer は利用者)。host の repo に
+3. base に無いコミットのうち、捨て鍵の印があるものだけを host の git 設定の鍵
+   (対象の repo で効いている `gpg.*` / `user.signingkey`。repo の `.git/config` や
+   `includeIf` の設定も含む) で署名し直す (中身・author・メッセージは変えず、committer は利用者)。host の repo に
    既にあるコミット (他人のものや未 push のもの) はハッシュも署名も変えずにそのまま
    積む。印が無く host にも無いコミット (VM で署名を切って作ったもの) があれば拒否する。
    既に push したコミットは書き換えないので、PR の更新でハッシュは変わらない
 4. host の repo の `origin` へ push し、`gh` で PR を作る (既にあれば更新)
+
+ssh 署名で鍵をエージェントに置いている場合は、quagent を起動したときの
+`SSH_AUTH_SOCK` を使う。ssh のエージェント転送先で使うときは、転送元の接続が切れると
+以後の署名に失敗する (tmux に付け直しても quagent の環境は変わらない)。
 
 push 先は `origin` で固定。保護ブランチ (既定: main / master / develop、
 `config.json` の `pr.protected_branches` で変更可) には push しない。リモートに

@@ -11,6 +11,7 @@ package pr
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -76,6 +77,7 @@ type Publisher struct {
 	markFP   string
 	signed   map[string]string // VM のコミット -> 署名し直したコミット
 	identity [2]string         // 署名し直すコミットの committer (host の user.name / user.email)
+	signCfg  []string          // 署名し直すときに足す -c (host の repo で効いている署名の設定)
 	branches map[string]bool   // この run で扱ったブランチ
 	last     time.Time         // 前回の依頼の時刻
 }
@@ -157,7 +159,11 @@ func (p *Publisher) prepare() error {
 	if name == "" || email == "" {
 		return fmt.Errorf("host の git に user.name / user.email が無い")
 	}
-	p.bare, p.markFP, p.identity = bare, f[1], [2]string{name, email}
+	signCfg, err := p.signingConfig()
+	if err != nil {
+		return err
+	}
+	p.bare, p.markFP, p.identity, p.signCfg = bare, f[1], [2]string{name, email}, signCfg
 	p.signed = map[string]string{}
 	p.branches = map[string]bool{}
 	return nil
@@ -325,6 +331,35 @@ func (p *Publisher) isMarked(c string) (bool, error) {
 	return st == "G" && fp == p.markFP, nil
 }
 
+// signingConfig は host の repo で効いている署名の設定 (gpg.* と user.signingkey) を
+// -c の引数の形で返す。署名し直しは run 専用の bare repo で行うので、そのままでは
+// repo の .git/config や includeIf "gitdir:..." の設定が効かない。捨て鍵の確認に使う
+// allowedSignersFile は bare repo のものを使うので渡さない。
+func (p *Publisher) signingConfig() ([]string, error) {
+	cmd := exec.Command("git", "config", "-z", "--get-regexp", `^(gpg\.|user\.signingkey$)`)
+	cmd.Dir = p.Repo
+	out, err := cmd.Output()
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ee.ExitCode() == 1 {
+		return nil, nil // 該当する設定が無い
+	}
+	if err != nil {
+		return nil, fmt.Errorf("host の repo の署名の設定を読めない: %w", err)
+	}
+	var args []string
+	for _, ent := range strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00") {
+		key, val, hasVal := strings.Cut(ent, "\n")
+		switch {
+		case key == "gpg.ssh.allowedsignersfile":
+		case hasVal:
+			args = append(args, "-c", key+"="+val)
+		default: // 値の無い真偽値 ("[gpg] foo" だけの行)
+			args = append(args, "-c", key)
+		}
+	}
+	return args, nil
+}
+
 // resign はコミット c を、中身・author・メッセージはそのままに、親を署名し直した
 // ものに付け替え、committer を利用者にして利用者の鍵で署名し直す。
 func (p *Publisher) resign(c string) (string, error) {
@@ -341,7 +376,7 @@ func (p *Publisher) resign(c string) (string, error) {
 		return "", err
 	}
 	_, msg, _ := strings.Cut(raw, "\n\n")
-	args := []string{"commit-tree", "--gpg-sign", f[0]}
+	args := append(slices.Clone(p.signCfg), "commit-tree", "--gpg-sign", f[0])
 	for _, parent := range strings.Fields(f[1]) {
 		if np, ok := p.signed[parent]; ok {
 			parent = np

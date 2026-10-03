@@ -154,6 +154,29 @@ func TestPublishResignsVMCommitsIncrementally(t *testing.T) {
 	}
 }
 
+// host の repo だけに書いた署名の設定 (.git/config や includeIf) で署名し直す。
+func TestPublishUsesRepoSigningConfig(t *testing.T) {
+	f := newFixture(t)
+	repoKey := filepath.Join(t.TempDir(), "repokey")
+	keygen(t, repoKey)
+	run(t, f.host, "git", "config", "user.signingkey", repoKey+".pub")
+	run(t, f.host, "git", "config", "gpg.ssh.allowedSignersFile", "/nonexistent") // bare repo の設定を上書きしない
+	run(t, f.guest, "git", "switch", "-q", "-c", "feature")
+	commit(t, f.guest, "a.txt", "a\n")
+
+	if _, err := f.p.Publish(Request{Branch: "feature", Title: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(repoKey + ".pub")
+	signers := filepath.Join(t.TempDir(), "signers")
+	if err := os.WriteFile(signers, []byte("* "+strings.TrimSpace(string(b))+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := sigFP(t, f.origin, "feature", signers), fingerprint(t, repoKey+".pub"); got != want {
+		t.Fatalf("repo の鍵で署名されていない: %q (want %q)", got, want)
+	}
+}
+
 func TestPublishKeepsOthersCommits(t *testing.T) {
 	f := newFixture(t)
 	// 同僚のブランチ: 別の鍵で署名されたコミットと、署名の無いコミット (host にある)
