@@ -204,6 +204,25 @@ Claude Code を使うときは `providers` に `anthropic` を入れる (VM 内�
 }
 ```
 
+サブスクリプション (Pro/Max) で使うときは、host で `claude setup-token` を実行して
+長期 (1 年) のトークンを作り、それを秘密にして `claude.subscription` を true にする。
+`header` / `prefix` は指定しない (既定の `Authorization: Bearer <トークン>` で付ける)。
+VM 内の Claude Code はトークンの代わりに合言葉を `CLAUDE_CODE_OAUTH_TOKEN` で持ち、
+本物のトークンは VM に入らない:
+
+```json
+"providers": {
+  "anthropic": {
+    "upstream": "https://api.anthropic.com",
+    "secret_command": ["pass", "show", "anthropic/claude-oauth-token"]
+  }
+},
+"claude": { "subscription": true }
+```
+
+host でログイン中の Claude Code の認証情報 (`~/.claude/.credentials.json`) は使わない
+(短命で、更新すると host 側のログインが切れうるため)。
+
 `claude.model` で VM 内の Claude Code の既定モデルを指定できる。
 
 provider ID は opencode の provider ID と揃える。秘密の取り出し方は
@@ -247,8 +266,7 @@ PR ができたら GitHub で中身を確認する前提。PR 作成の承認制
 
 ## 現状
 
-今後: PR 作成の承認制 (任意)。Claude Code はサブスクリプションのログインには
-未対応 (API キーのみ)。
+今後: PR 作成の承認制 (任意)。
 
 ## ライセンス
 

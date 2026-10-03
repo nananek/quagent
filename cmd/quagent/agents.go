@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 
 	"github.com/nananek/quagent/internal/authproxy"
 	"github.com/nananek/quagent/internal/config"
@@ -79,19 +80,28 @@ func setupOpencode(g vmGuest, cfg *config.Config, providers []string, token stri
 const claudeProvider = "anthropic"
 
 // setupClaude は Claude Code が Anthropic API を認証プロキシ経由で使い、quagent の
-// MCP を使うよう設定する。鍵の代わりに窓口の合言葉を apiKeyHelper で渡す。初回の
+// MCP を使うよう設定する。鍵の代わりに窓口の合言葉を、API キーなら apiKeyHelper で、
+// サブスクリプションならトークン (CLAUDE_CODE_OAUTH_TOKEN) として渡す。初回の
 // 案内・作業ディレクトリの信頼・権限確認の省略の確認は済ませておく。
 func setupClaude(g vmGuest, cfg *config.Config, providers []string, token string) error {
 	if !slices.Contains(providers, claudeProvider) {
 		return fmt.Errorf("Claude Code を使うには config.json の providers に %q (Anthropic API) を設定する", claudeProvider)
 	}
-	settings := map[string]any{
-		"apiKeyHelper": "echo " + token,
-		"env": map[string]string{
-			"ANTHROPIC_BASE_URL":                       authproxy.GuestBaseURL(hostsvc.GuestOrigin(), claudeProvider),
-			"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-			"DISABLE_AUTOUPDATER":                      "1",
-		},
+	env := map[string]string{
+		"ANTHROPIC_BASE_URL":                       authproxy.GuestBaseURL(hostsvc.GuestOrigin(), claudeProvider),
+		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+		"DISABLE_AUTOUPDATER":                      "1",
+	}
+	settings := map[string]any{"env": env}
+	if cfg.Claude.Subscription {
+		// Claude Code は Authorization: Bearer <合言葉> で送り、プロキシが本物のトークンに付け替える
+		p := cfg.Providers[claudeProvider]
+		if !strings.EqualFold(p.HeaderName(), "Authorization") || p.HeaderPrefix() != "Bearer " {
+			return fmt.Errorf("claude.subscription では providers の %q に header / prefix を指定しない (既定の Authorization: Bearer で付ける)", claudeProvider)
+		}
+		env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+	} else {
+		settings["apiKeyHelper"] = "echo " + token
 	}
 	if cfg.Claude.Model != "" {
 		settings["model"] = cfg.Claude.Model
