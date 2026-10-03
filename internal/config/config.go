@@ -40,10 +40,10 @@ type Clipboard struct {
 type Claude struct {
 	// Model は既定のモデル (Claude Code の model 設定。空なら Claude Code の既定)。
 	Model string `json:"model,omitempty"`
-	// Subscription はサブスクリプション (Pro/Max) のトークンで使うか。true なら
-	// providers の anthropic の秘密は `claude setup-token` で作ったトークンにし、
-	// プロキシが Authorization: Bearer で付ける (header は既定のまま)。
-	Subscription bool `json:"subscription,omitempty"`
+	// Subscription はサブスクリプションのプラン ("pro" / "max" / "team" / "enterprise")。
+	// 指定すると providers の anthropic の秘密は `claude setup-token` で作ったトークンに
+	// し、プロキシが Authorization: Bearer で付ける (header は既定のまま)。空なら API キー。
+	Subscription string `json:"subscription,omitempty"`
 }
 
 // PR は PR 作成の設定。

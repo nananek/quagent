@@ -93,13 +93,18 @@ func setupClaude(g vmGuest, cfg *config.Config, providers []string, token string
 		"DISABLE_AUTOUPDATER":                      "1",
 	}
 	settings := map[string]any{"env": env}
-	if cfg.Claude.Subscription {
+	if plan := cfg.Claude.Subscription; plan != "" {
+		if !slices.Contains([]string{"pro", "max", "team", "enterprise"}, plan) {
+			return fmt.Errorf("claude.subscription は pro / max / team / enterprise のどれか: %q", plan)
+		}
 		// Claude Code は Authorization: Bearer <合言葉> で送り、プロキシが本物のトークンに付け替える
 		p := cfg.Providers[claudeProvider]
 		if !strings.EqualFold(p.HeaderName(), "Authorization") || p.HeaderPrefix() != "Bearer " {
 			return fmt.Errorf("claude.subscription では providers の %q に header / prefix を指定しない (既定の Authorization: Bearer で付ける)", claudeProvider)
 		}
 		env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+		// トークンを環境変数で渡すとプランを問い合わせないので、表示用に教える
+		env["CLAUDE_CODE_SUBSCRIPTION_TYPE"] = plan
 	} else {
 		settings["apiKeyHelper"] = "echo " + token
 	}

@@ -205,7 +205,8 @@ Claude Code を使うときは `providers` に `anthropic` を入れる (VM 内�
 ```
 
 サブスクリプション (Pro/Max) で使うときは、host で `claude setup-token` を実行して
-長期 (1 年) のトークンを作り、それを秘密にして `claude.subscription` を true にする。
+長期 (1 年) のトークンを作り、それを秘密にして `claude.subscription` にプラン
+(`pro` / `max` / `team` / `enterprise`。Claude Code の表示に使う) を書く。
 `header` / `prefix` は指定しない (既定の `Authorization: Bearer <トークン>` で付ける)。
 VM 内の Claude Code はトークンの代わりに合言葉を `CLAUDE_CODE_OAUTH_TOKEN` で持ち、
 本物のトークンは VM に入らない:
@@ -217,8 +218,11 @@ VM 内の Claude Code はトークンの代わりに合言葉を `CLAUDE_CODE_OA
     "secret_command": ["pass", "show", "anthropic/claude-oauth-token"]
   }
 },
-"claude": { "subscription": true }
+"claude": { "subscription": "max" }
 ```
+
+`setup-token` のトークンは推論専用なので、VM 内の `/usage` は使えない (利用量は
+host の Claude Code の `/usage` で見る)。
 
 host でログイン中の Claude Code の認証情報 (`~/.claude/.credentials.json`) は使わない
 (短命で、更新すると host 側のログインが切れうるため)。
