@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -111,6 +113,9 @@ func setupClaude(g vmGuest, cfg *config.Config, providers []string, token string
 	if cfg.Claude.Model != "" {
 		settings["model"] = cfg.Claude.Model
 	}
+	if theme := claudeTheme(cfg); theme != "" {
+		settings["theme"] = theme
+	}
 	if err := writeJSON(g, "~/.claude/settings.json", settings); err != nil {
 		return err
 	}
@@ -126,6 +131,33 @@ func setupClaude(g vmGuest, cfg *config.Config, providers []string, token string
 		},
 	}
 	return writeJSON(g, "~/.claude.json", state)
+}
+
+// claudeTheme は VM 内の Claude Code のカラーテーマを返す。config の claude.theme が
+// あればそれ、無ければ host の Claude Code の設定のもの (読めなければ空)。
+func claudeTheme(cfg *config.Config) string {
+	if cfg.Claude.Theme != "" {
+		return cfg.Claude.Theme
+	}
+	dir := os.Getenv("CLAUDE_CONFIG_DIR")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		dir = filepath.Join(home, ".claude")
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "settings.json"))
+	if err != nil {
+		return ""
+	}
+	var host struct {
+		Theme string `json:"theme"`
+	}
+	if json.Unmarshal(b, &host) != nil {
+		return ""
+	}
+	return host.Theme
 }
 
 func writeJSON(g vmGuest, path string, v any) error {

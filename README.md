@@ -228,7 +228,9 @@ host の Claude Code の `/usage` で見る)。
 host でログイン中の Claude Code の認証情報 (`~/.claude/.credentials.json`) は使わない
 (短命で、更新すると host 側のログインが切れうるため)。
 
-`claude.model` で VM 内の Claude Code の既定モデルを指定できる。
+`claude.model` で VM 内の Claude Code の既定モデルを指定できる。カラーテーマは host の
+Claude Code の設定 (`~/.claude/settings.json` の `theme`) を引き継ぐ。`claude.theme`
+(`dark` / `light-daltonized` など) を書けばそちらを使う。
 
 provider ID は opencode の provider ID と揃える。秘密の取り出し方は
 `secret_env` (環境変数名)・`secret_file` (パス)・`secret_command` (コマンド) の
