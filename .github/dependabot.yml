@@ -1,0 +1,23 @@
+# 依存の更新を週に一度まとめて PR にする。出たばかりの版はすぐには取り込まない
+# (乗っ取られた版を掴まないよう、公開から 7 日は待つ)。
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      go:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
