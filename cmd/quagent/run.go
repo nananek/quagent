@@ -47,6 +47,8 @@ type runOpts struct {
 	LocalHead bool
 	// Agent は VM 内で動かすエージェント (agents のキー)。
 	Agent string
+	// PRApproval は PR の作成を承認コンソールで確認してから push する。
+	PRApproval bool
 }
 
 func logf(format string, a ...any) {
@@ -274,6 +276,11 @@ runcmd:
 		Repo: repo, Work: work, Protected: protected, GH: pr.RunGH,
 		GuestURL: g.gitURL(), GitConfig: []string{"protocol.ext.allow=always"},
 		MarkPub: strings.TrimSpace(string(markPub)), MinInterval: 10 * time.Second,
+	}
+	if o.PRApproval {
+		publisher.Approve = func(req pr.Request) error {
+			return con.AskPR(console.PRInfo{Branch: req.Branch, Base: req.Base, Title: req.Title, Body: req.Body})
+		}
 	}
 	svc.Mux.Handle(mcpsrv.Path, mcpsrv.Handler(mgr, publisher, con.Log))
 

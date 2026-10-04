@@ -27,7 +27,7 @@ const usage = `usage:
   quagent image ls                             焼いたベースイメージの一覧
   quagent image rm IMAGE                       ベースイメージを消す
   quagent always ls | rm DOMAIN...              「以後確認しない」ドメインの一覧・取り消し
-  quagent run [--repo DIR] [--image RECIPE] [--cpus N] [--mem MiB] [--agent opencode|claude] [--allow "d1 d2"] [--ssh] [--mount-tmp] [--nested-virt] [--local-head]
+  quagent run [--repo DIR] [--image RECIPE] [--cpus N] [--mem MiB] [--agent opencode|claude] [--allow "d1 d2"] [--ssh] [--mount-tmp] [--nested-virt] [--local-head] [--pr-approval]
                                                VM を起動し、tmux でエージェントと承認コンソールを開く
 `
 
@@ -52,7 +52,7 @@ func dispatch(args []string) error {
 			return err
 		}
 		return run(runOpts{Repo: l.Repo, Recipe: l.Recipe, CPUs: l.CPUs, MemMiB: l.MemMiB,
-			MountTmp: l.MountTmp, SSH: l.SSH, NestedVirt: l.NestedVirt, LocalHead: l.LocalHead, Agent: l.Agent, Interactive: true})
+			MountTmp: l.MountTmp, SSH: l.SSH, NestedVirt: l.NestedVirt, LocalHead: l.LocalHead, Agent: l.Agent, PRApproval: l.PRApproval, Interactive: true})
 	}
 	switch args[0] {
 	case netns.ChildCommand:
@@ -165,6 +165,7 @@ func cmdRun(args []string) error {
 	localHead := fs.Bool("local-head", false, "checkout 中のブランチをローカルの先頭 (未 push のコミットを含む) で渡す。既定は upstream の先頭")
 	nested := fs.Bool("nested-virt", false, "VM の中で KVM を使えるようにする (VM の中で VM を動かすとき)")
 	useSSH := fs.Bool("ssh", false, "人が ssh で VM に入れるようにする (quagent 自身の操作は vsock)")
+	prApproval := fs.Bool("pr-approval", false, "PR の作成を承認コンソールで確認してから push する")
 	allow := fs.String("allow", "", "egress を許すドメイン (空白区切り)。LLM API は認証プロキシ経由なので不要")
 	_ = fs.Parse(args)
 	return run(runOpts{
@@ -179,6 +180,7 @@ func cmdRun(args []string) error {
 		NestedVirt:  *nested,
 		LocalHead:   *localHead,
 		Agent:       *agent,
+		PRApproval:  *prApproval,
 	})
 }
 

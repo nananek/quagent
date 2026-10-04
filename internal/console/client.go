@@ -136,7 +136,7 @@ func (u *clientUI) onMsg(m Msg) {
 		if len(u.queue) > 0 {
 			fmt.Print(u.prompt())
 		}
-	case "request", "clip":
+	case "request", "clip", "prrequest":
 		for _, q := range u.queue {
 			if q.Type == m.Type && q.ID == m.ID {
 				return
@@ -148,18 +148,31 @@ func (u *clientUI) onMsg(m Msg) {
 		} else {
 			fmt.Println(dim + "(確認待ちがもう 1 件)" + reset)
 		}
-	case "settled", "clipsettled":
+	case "settled", "clipsettled", "prsettled":
 		want := "request"
-		if m.Type == "clipsettled" {
+		switch m.Type {
+		case "clipsettled":
 			want = "clip"
+		case "prsettled":
+			want = "prrequest"
 		}
 		for i, q := range u.queue {
 			if q.Type != want || q.ID != m.ID {
 				continue
 			}
-			if want == "clip" {
+			switch {
+			case want == "clip":
 				fmt.Printf("クリップボード #%d: %s\n", m.ID, Sanitize(m.Text))
-			} else {
+			case want == "prrequest":
+				switch m.Status {
+				case access.Approved:
+					fmt.Printf("PR #%d: 承認して push した\n", m.ID)
+				case access.TimedOut:
+					fmt.Printf("PR #%d: 時間切れ (push しなかった)\n", m.ID)
+				default:
+					fmt.Printf("PR #%d: 拒否 (push しなかった)\n", m.ID)
+				}
+			default:
 				text := statusText[m.Status]
 				if k, ok := kindText[m.Kind]; ok && m.Status == access.Approved {
 					text += " (" + k + ")"
@@ -178,10 +191,22 @@ func (u *clientUI) onMsg(m Msg) {
 
 func (u *clientUI) show() {
 	r := u.queue[0]
-	if r.Type == "clip" {
+	switch r.Type {
+	case "clip":
 		fmt.Printf("\n"+bold+cyan+"━━ クリップボードへの書き込み #%d (%d バイト) ━━"+reset+"\n", r.ID, r.Size)
 		fmt.Println(Sanitize(r.Text))
 		fmt.Printf(dim+"%s までに応答がなければ拒否"+reset+"\n", Sanitize(r.Deadline))
+		fmt.Print(u.prompt())
+		u.focus()
+		return
+	case "prrequest":
+		fmt.Printf("\n"+bold+cyan+"━━ PR の作成承認 #%d ━━"+reset+"\n", r.ID)
+		fmt.Printf(bold+"ブランチ:"+reset+" %s → %s\n", Sanitize(r.Branch), Sanitize(r.Base))
+		fmt.Printf(bold+"タイトル:"+reset+" %s\n", Sanitize(r.Title))
+		if body := strings.TrimSpace(r.Body); body != "" {
+			fmt.Printf(bold+"本文:"+reset+"\n%s\n", Sanitize(truncateRunes(body, 2000)))
+		}
+		fmt.Printf(dim+"%s までに応答がなければ拒否 (push しない)"+reset+"\n", Sanitize(r.Deadline))
 		fmt.Print(u.prompt())
 		u.focus()
 		return
@@ -194,6 +219,15 @@ func (u *clientUI) show() {
 	u.focus()
 }
 
+// truncateRunes は s を最大 n ルーンに切り、切ったら末尾に … を付ける。
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
+
 // prompt は今の確認の入力の案内を返す。
 func (u *clientUI) prompt() string {
 	switch {
@@ -201,6 +235,8 @@ func (u *clientUI) prompt() string {
 		return ""
 	case u.queue[0].Type == "clip":
 		return "[y] コピーする  [n] 拒否 > "
+	case u.queue[0].Type == "prrequest":
+		return "[y] 承認して PR を作る  [n] 拒否 > "
 	case u.asking:
 		return "エージェントへの質問 (空で取り消し): "
 	default:
@@ -263,6 +299,17 @@ func (u *clientUI) onLine(line string) bool {
 			u.decide(Msg{Type: "clipdecide", ID: r.ID, Status: access.Approved})
 		case "n":
 			u.decide(Msg{Type: "clipdecide", ID: r.ID, Status: access.Denied})
+		default:
+			fmt.Print("y / n のどちらか > ")
+		}
+		return false
+	}
+	if r.Type == "prrequest" {
+		switch line {
+		case "y":
+			u.decide(Msg{Type: "prdecide", ID: r.ID, Status: access.Approved})
+		case "n":
+			u.decide(Msg{Type: "prdecide", ID: r.ID, Status: access.Denied})
 		default:
 			fmt.Print("y / n のどちらか > ")
 		}
