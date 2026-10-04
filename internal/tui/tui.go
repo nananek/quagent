@@ -35,6 +35,8 @@ type Launch struct {
 	// LocalHead はブランチをローカルの先頭 (未 push のコミットを含む) で渡す。
 	LocalHead bool   `json:"local_head"`
 	Agent     string `json:"agent"`
+	// PRApproval は PR の作成を承認コンソールで確認してから push する。
+	PRApproval bool `json:"pr_approval"`
 }
 
 // ErrQuit は TUI で終了を選んだ (または中断した)。
@@ -159,6 +161,10 @@ func startForm(agents []string) (Launch, error) {
 	if l.LocalHead {
 		extras = append(extras, "local")
 	}
+	var prApproval []string
+	if l.PRApproval {
+		prApproval = append(prApproval, "pr")
+	}
 	ok := true
 	err = newForm(huh.NewGroup(
 		huh.NewInput().Title("対象 repo").Description("VM の /work にコピーする git repo").
@@ -168,6 +174,10 @@ func startForm(agents []string) (Launch, error) {
 			}
 			return nil
 		}),
+		huh.NewMultiSelect[string]().Title("PR の作成").
+			Description("エージェントの create_pull_request を承認コンソールで確認してから push する").
+			Options(huh.NewOption("PR を承認制にする", "pr")).
+			Value(&prApproval),
 		huh.NewSelect[string]().Title("ベースイメージ").Options(opts...).Value(&l.Recipe),
 		huh.NewSelect[string]().Title("エージェント").Options(agentOpts...).Value(&l.Agent),
 		huh.NewInput().Title("CPU").Value(&cpus).Validate(positive),
@@ -190,6 +200,7 @@ func startForm(agents []string) (Launch, error) {
 	l.MountTmp, l.SSH = slices.Contains(extras, "tmp"), slices.Contains(extras, "ssh")
 	l.NestedVirt = slices.Contains(extras, "nested")
 	l.LocalHead = slices.Contains(extras, "local")
+	l.PRApproval = slices.Contains(prApproval, "pr")
 	l.CPUs, _ = strconv.Atoi(cpus)
 	l.MemMiB, _ = strconv.Atoi(mem)
 	saveLast(l)

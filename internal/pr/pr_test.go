@@ -297,3 +297,40 @@ func TestPublishLimits(t *testing.T) {
 		}
 	}
 }
+
+// 承認制のときは、承認が拒否された依頼では push も PR の作成もしない。
+func TestPublishApprovalGatesPush(t *testing.T) {
+	f := newFixture(t)
+	run(t, f.guest, "git", "switch", "-q", "-c", "feature")
+	commit(t, f.guest, "a.txt", "a\n")
+
+	var got Request
+	calls := 0
+	f.p.Approve = func(req Request) error {
+		calls++
+		got = req
+		return fmt.Errorf("承認されなかった")
+	}
+	if _, err := f.p.Publish(Request{Branch: "feature", Title: "t", Body: "b"}); err == nil {
+		t.Fatal("承認が拒否されたのに push された")
+	}
+	if calls != 1 {
+		t.Fatalf("承認は 1 回のはず: %d", calls)
+	}
+	if got.Branch != "feature" || got.Base != "main" || got.Body != "b" {
+		t.Fatalf("承認に渡す内容が違う: %+v", got)
+	}
+	if out, _ := exec.Command("git", "-C", f.origin, "rev-parse", "--verify", "-q", "feature").Output(); len(out) > 0 {
+		t.Fatal("承認の前に push された")
+	}
+
+	// 承認すれば push される
+	f.p.Approve = func(Request) error { return nil }
+	res, err := f.p.Publish(Request{Branch: "feature", Title: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Signed != 1 {
+		t.Fatalf("承認後の push がおかしい: %+v", res)
+	}
+}

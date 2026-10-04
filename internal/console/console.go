@@ -8,6 +8,7 @@ package console
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"sync"
@@ -36,6 +37,12 @@ type Msg struct {
 	Text string `json:"text,omitempty"`
 	Data []byte `json:"data,omitempty"` // クリップボードに入れたい中身
 	Size int    `json:"size,omitempty"`
+
+	// PR の作成承認 (prrequest / prsettled) の内容。
+	Branch string `json:"branch,omitempty"`
+	Base   string `json:"base,omitempty"`
+	Title  string `json:"title,omitempty"`
+	Body   string `json:"body,omitempty"`
 }
 
 const (
@@ -65,6 +72,28 @@ type Server struct {
 	shown   map[int]bool // UI に送った申請
 	backlog []Msg        // UI が繋がる前のログ
 	clip    clipState
+
+	// PR の作成承認。access.Manager とは別に、この Server が直接待つ。
+	prMu      sync.Mutex
+	prNextID  int
+	prPending []*prRequest
+}
+
+// PRInfo は承認コンソールに諮る PR 作成の内容。
+type PRInfo struct {
+	Branch string
+	Base   string
+	Title  string
+	Body   string
+}
+
+type prRequest struct {
+	id       int
+	info     PRInfo
+	created  time.Time
+	done     chan struct{}
+	status   access.Status
+	approved bool
 }
 
 // NewServer は sock で待ち受ける Server を作る。
@@ -153,6 +182,8 @@ func (s *Server) serve(c net.Conn) {
 			s.onClipboard(msg)
 		case "clipdecide":
 			s.clipDecide(msg.ID, msg.Status == access.Approved)
+		case "prdecide":
+			s.settlePR(msg.ID, msg.Status)
 		case "quit":
 			s.quitOnce.Do(func() { close(s.Quit) })
 		}
@@ -173,12 +204,77 @@ func (s *Server) register(cl *client) {
 	if s.clip.pending != nil {
 		_ = s.send(cl, clipMsg(s.clip.pending))
 	}
+	s.prMu.Lock()
+	for _, r := range s.prPending {
+		_ = s.send(cl, prRequestMsg(r))
+	}
+	s.prMu.Unlock()
 	s.clients[cl] = true
 }
 
 func requestMsg(r *access.Request) Msg {
 	return Msg{Type: "request", ID: r.ID, Domains: r.Domains, Reason: r.Reason,
 		Deadline: r.Created.Add(access.DecisionTimeout).Format("15:04:05")}
+}
+
+// AskPR は PR の作成を承認コンソールに諮り、承認されるまで待つ。拒否・時間切れ・
+// 終了ならエラーを返し、呼び出し側 (pr.Publisher) は push しない。
+func (s *Server) AskPR(info PRInfo) error {
+	req := &prRequest{info: info, created: time.Now(), done: make(chan struct{})}
+	s.prMu.Lock()
+	s.prNextID++
+	req.id = s.prNextID
+	s.prPending = append(s.prPending, req)
+	s.prMu.Unlock()
+	s.broadcast(prRequestMsg(req))
+
+	t := time.NewTimer(access.DecisionTimeout)
+	defer t.Stop()
+	select {
+	case <-req.done:
+	case <-t.C:
+		s.settlePR(req.id, access.TimedOut)
+		<-req.done
+	case <-s.Quit:
+		s.settlePR(req.id, access.Denied)
+		return fmt.Errorf("終了したので PR を作らなかった")
+	}
+	if req.approved {
+		return nil
+	}
+	if req.status == access.TimedOut {
+		return fmt.Errorf("%s 以内に承認されなかったので PR を作らなかった", access.DecisionTimeout)
+	}
+	return fmt.Errorf("PR の作成は承認されなかった")
+}
+
+// settlePR は承認待ちの PR を決着させ、UI に知らせる。既に決着していれば何もしない。
+func (s *Server) settlePR(id int, status access.Status) {
+	s.prMu.Lock()
+	idx := -1
+	for i, r := range s.prPending {
+		if r.id == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		s.prMu.Unlock()
+		return
+	}
+	req := s.prPending[idx]
+	s.prPending = append(s.prPending[:idx], s.prPending[idx+1:]...)
+	req.status = status
+	req.approved = status == access.Approved
+	s.prMu.Unlock()
+	close(req.done)
+	s.broadcast(Msg{Type: "prsettled", ID: id, Status: status})
+}
+
+func prRequestMsg(r *prRequest) Msg {
+	return Msg{Type: "prrequest", ID: r.id, Branch: r.info.Branch, Base: r.info.Base,
+		Title: r.info.Title, Body: r.info.Body,
+		Deadline: r.created.Add(access.DecisionTimeout).Format("15:04:05")}
 }
 
 // watch は新しい申請を UI に送り、決着した申請 (時間切れを含む) を知らせる。

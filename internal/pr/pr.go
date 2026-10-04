@@ -69,6 +69,9 @@ type Publisher struct {
 	MarkPub string
 	// MinInterval は依頼と依頼の最小の間隔 (0 なら制限しない)。
 	MinInterval time.Duration
+	// Approve は push の前に承認を求める (nil なら確認なしで進む)。エラーを返すと
+	// push も PR の作成もしない。base は既定ブランチを埋めた値。
+	Approve func(Request) error
 	// GH は PR を作る (nil なら作らずに push まで)。テストで差し替える。
 	GH func(dir string, args ...string) ([]byte, error)
 
@@ -218,11 +221,19 @@ func (p *Publisher) Publish(req Request) (Result, error) {
 	if strings.HasPrefix(base, "-") {
 		return Result{}, fmt.Errorf("base が不正: %q", base)
 	}
-	if err := p.prepare(); err != nil {
-		return Result{}, err
-	}
 	if !p.branches[req.Branch] && len(p.branches) >= maxBranches {
 		return Result{}, fmt.Errorf("1 回の run で PR にできるブランチは %d 本まで", maxBranches)
+	}
+	// 承認制なら、取り込みや push の前に人が確認する。拒否・時間切れなら何もしない。
+	if p.Approve != nil {
+		ar := req
+		ar.Base = base
+		if err := p.Approve(ar); err != nil {
+			return Result{}, err
+		}
+	}
+	if err := p.prepare(); err != nil {
+		return Result{}, err
 	}
 	origin, err := p.git(p.Repo, "remote", "get-url", "origin")
 	if err != nil {
