@@ -21,9 +21,9 @@ type agentSpec struct {
 	// setup は VM 内に設定を書く。providers は認証プロキシに登録した provider ID、
 	// token は窓口の合言葉 (LLM プロキシと MCP の両方に要る)。
 	setup func(g vmGuest, cfg *config.Config, providers []string, token string) error
-	// command はエージェントのペインで実行するシェルスクリプト (/work で起動し、
-	// 終わったらシェルに落とす)。
-	command string
+	// entrypoint は VM の /entrypoint.sh に書く内容 (/work でエージェントを起動する)。
+	// シェルから何度でも呼び戻せるよう、ここでは exec せず、終わったら戻る。
+	entrypoint string
 }
 
 // DefaultAgent は特に指定がないときのエージェント。
@@ -32,13 +32,55 @@ const DefaultAgent = "opencode"
 var agents = map[string]agentSpec{
 	"opencode": {
 		setup: setupOpencode,
-		// 更新確認とモデル一覧の取得は外へ出られず DNS の拒否が並ぶだけなので止める
-		command: "cd /work && OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 opencode --auto /work; exec bash -l",
+		entrypoint: `#!/bin/bash
+# quagent: エージェントを起動する (終了したあと ↑ で呼び戻せる)
+cd /work
+# 更新確認とモデル一覧の取得は外へ出られず DNS の拒否が並ぶだけなので止める
+OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 opencode --auto /work`,
 	},
 	"claude": {
-		setup:   setupClaude,
-		command: "cd /work && claude --dangerously-skip-permissions; exec bash -l",
+		setup: setupClaude,
+		entrypoint: `#!/bin/bash
+# quagent: エージェントを起動する (終了したあと ↑ で呼び戻せる)
+cd /work
+claude --dangerously-skip-permissions`,
 	},
+}
+
+// paneCommand はエージェントのペインで実行するコマンド。エージェントが終わったら
+// シェルに落とし、↑ で /entrypoint.sh を呼び戻せるようにする (非ログインの対話
+// シェルなので ~/.bashrc が確実に読まれる)。
+const paneCommand = "/entrypoint.sh; exec bash -i"
+
+// historyMarker は ~/.bashrc への追記が済んでいるかの目印。
+const historyMarker = "quagent: エージェントを終了したあと"
+
+// historySnippet は作業ユーザーの ~/.bashrc に追記する。対話シェルが始まるとき、
+// 履歴を読んだあとの最初のプロンプトで /entrypoint.sh を履歴の先頭に入れるので、
+// エージェントを終了したあと ↑ を押すだけで呼び戻せる。追記は 1 回だけで、
+// 元の PROMPT_COMMAND があれば戻す。
+const historySnippet = `# quagent: エージェントを終了したあと、↑ で /entrypoint.sh を呼び戻せるようにする
+if [ -n "$PS1" ] && [ -z "$QUAGENT_HISTORY_SEEDED" ]; then
+  QUAGENT_HISTORY_SEEDED=1
+  __quagent_prompt_command="$PROMPT_COMMAND"
+  quagent_seed_history() {
+    history -s /entrypoint.sh
+    PROMPT_COMMAND="$__quagent_prompt_command"
+    unset __quagent_prompt_command
+    unset -f quagent_seed_history
+  }
+  PROMPT_COMMAND=quagent_seed_history
+fi`
+
+// setupHistory は ~/.bashrc に上の仕掛けを 1 回だけ追記する (何度呼んでも増えない)。
+func setupHistory(g vmGuest) error {
+	script := `grep -qF ` + shellQuote(historyMarker) + ` ~/.bashrc 2>/dev/null || cat >> ~/.bashrc <<'QUAGENT_HISTORY'
+` + historySnippet + `
+QUAGENT_HISTORY`
+	if out, err := g.sh(script, nil); err != nil {
+		return fmt.Errorf("~/.bashrc に履歴の仕掛けを書けない: %v: %s", err, out)
+	}
+	return nil
 }
 
 // agentNames はエージェント名の一覧を返す。

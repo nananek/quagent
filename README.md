@@ -73,6 +73,9 @@ quagent run --image arch       # VM を起動 (--ssh: 人が ssh で入れる、
 下のペインで承認コンソールを開く。エージェントは `--agent` (TUI でも選べる) で
 `opencode` (既定、`--auto`) か `claude` (Claude Code、
 `--dangerously-skip-permissions`) を選ぶ。VM という檻の中では確認なしで動かす。
+エージェントの起動は VM の `/entrypoint.sh` にまとめてあり、終了するとシェルに落ちる。
+`~/.bashrc` にあらかじめ仕込んだ仕掛けで `/entrypoint.sh` が履歴の先頭に入るので、
+`↑` を押して Enter するだけで素早く再起動できる。
 エージェントのペインを終了するか、承認コンソールで `quit` すると VM を破棄する。
 デタッチしてもセッションが続くあいだ VM は動き続ける。
 

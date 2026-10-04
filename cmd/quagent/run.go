@@ -159,6 +159,12 @@ func run(o runOpts) error {
 		tmpCmd = tmpRuncmd(strconv.Itoa(vm.GuestUID))
 	}
 	userData := fmt.Sprintf(`#cloud-config
+write_files:
+  # エージェントの起動はここにまとめる (↑ で呼び戻せる)
+  - path: /entrypoint.sh
+    permissions: '0755'
+    content: |
+%s
 bootcmd:
   - echo '127.0.0.1 %s' >> /etc/hosts
   # 外へは出られないので NTP は使えない (時計は KVM が合わせる)。拒否の記録が並ぶだけなので止める
@@ -167,7 +173,7 @@ bootcmd:
 runcmd:
 %s  - [sh, -c, "mkdir -p /run/quagent-seed && mount -o ro /dev/disk/by-label/cidata /run/quagent-seed && install -m 755 /run/quagent-seed/quagent-guest /usr/local/bin/quagent-guest && umount /run/quagent-seed"]
   - [systemd-run, --unit=quagent-guest, --uid=%s, -p, Restart=always, /usr/local/bin/quagent-guest, %s, "%d"]
-`, hostsvc.GuestHost, maskCmd(sshUnits(o.SSH)), tmpCmd, vm.GuestUser, guestCommand, svc.Port)
+`, indentBlock(ag.entrypoint, "      "), hostsvc.GuestHost, maskCmd(sshUnits(o.SSH)), tmpCmd, vm.GuestUser, guestCommand, svc.Port)
 	// 時刻の表示 (承認の期限やコミットの日時) を host とそろえる
 	if tz := hostTimezone(); tz != "" {
 		userData += "timezone: " + tz + "\n"
@@ -310,6 +316,9 @@ runcmd:
 	if err := ag.setup(g, cfg, providers, svc.Token); err != nil {
 		return err
 	}
+	if err := setupHistory(g); err != nil {
+		return err
+	}
 	if o.SSH {
 		con.Log(fmt.Sprintf("ssh: ssh -i %s -p %d -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null %s@127.0.0.1",
 			sshKey, sshPort, vm.GuestUser))
@@ -322,7 +331,7 @@ runcmd:
 		return nil
 	}
 
-	agent := g.interactiveArgv(ag.command)
+	agent := g.interactiveArgv(paneCommand)
 	session := "quagent-" + filepath.Base(work)
 	return runTmux(session, agent, []string{self, consoleCommand, filepath.Join(work, "console.sock")}, con.Quit)
 }
@@ -731,6 +740,17 @@ func gitIdentity(repo string) (name, email string, err error) {
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// indentBlock は s の各行を prefix で字下げする (cloud-config のブロックスカラー用)。
+func indentBlock(s, prefix string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	for i, line := range lines {
+		if line != "" {
+			lines[i] = prefix + line
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // saveLogs は host 側のログだけを残す (VM のディスクや鍵は残さない)。
