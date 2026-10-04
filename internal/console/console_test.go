@@ -55,6 +55,9 @@ func TestAskPR(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// ID は単調に増える。UI の接続と申請の送信が競合すると同じ申請が二度
+	// 届くことがある (実 UI も onMsg で重複を捨てる) ので、処理済みの ID は読み飛ばす。
+	lastID := 0
 	ask := func(info PRInfo) (chan error, Msg) {
 		errCh := make(chan error, 1)
 		go func() { errCh <- s.AskPR(info) }()
@@ -64,7 +67,8 @@ func TestAskPR(t *testing.T) {
 			if err := dec.Decode(&msg); err != nil {
 				t.Fatal(err)
 			}
-			if msg.Type == "prrequest" {
+			if msg.Type == "prrequest" && msg.ID > lastID {
+				lastID = msg.ID
 				return errCh, msg
 			}
 		}
