@@ -75,14 +75,15 @@ type Publisher struct {
 	// GH は PR を作る (nil なら作らずに push まで)。テストで差し替える。
 	GH func(dir string, args ...string) ([]byte, error)
 
-	mu       sync.Mutex
-	bare     string
-	markFP   string
-	signed   map[string]string // VM のコミット -> 署名し直したコミット
-	identity [2]string         // 署名し直すコミットの committer (host の user.name / user.email)
-	signCfg  []string          // 署名し直すときに足す -c (host の repo で効いている署名の設定)
-	branches map[string]bool   // この run で扱ったブランチ
-	last     time.Time         // 前回の依頼の時刻
+	mu        sync.Mutex
+	bare      string
+	markFP    string
+	signed    map[string]string // VM のコミット -> 署名し直したコミット
+	identity  [2]string         // 署名し直すコミットの committer (host の user.name / user.email)
+	signCfg   []string          // 署名し直すときに足す -c (host の repo で効いている署名の設定)
+	branches  map[string]bool   // この run で扱ったブランチ
+	last      time.Time         // 前回の依頼の時刻
+	remoteTip string            // 既に push 済みのブランチの先端 (無ければ空)
 }
 
 func (p *Publisher) gitIO(dir string, env []string, stdin io.Reader, args ...string) (string, error) {
@@ -242,12 +243,25 @@ func (p *Publisher) Publish(req Request) (Result, error) {
 
 	incoming := "refs/quagent/incoming/" + req.Branch
 	baseRef := "refs/quagent/base/" + base
-	pushedRef := "refs/heads/" + req.Branch // 前回 push したもの
+	pushedRef := "refs/heads/" + req.Branch
+	remoteRef := "refs/quagent/remote/" + req.Branch
 	if _, err := p.git(p.bare, "fetch", "-q", "--no-tags", p.GuestURL, "+refs/heads/"+req.Branch+":"+incoming); err != nil {
 		return Result{}, fmt.Errorf("guest からブランチ %q を取り込めない (/work でコミット済みか確認): %w", req.Branch, err)
 	}
 	if _, err := p.git(p.bare, "fetch", "-q", "--no-tags", origin, "+refs/heads/"+base+":"+baseRef); err != nil {
 		return Result{}, fmt.Errorf("origin の %q を取り込めない: %w", base, err)
+	}
+	// 既に push 済みのブランチなら取り込む。同じ run でなくても、guest に残っている
+	// 対応するコミットを再利用して追記できるようにする (内容で照合し、対応しない
+	// コミットがあるブランチは rewrite が拒否する)。
+	p.remoteTip = ""
+	if out, err := p.git(p.bare, "ls-remote", origin, "refs/heads/"+req.Branch); err == nil {
+		if f := strings.Fields(out); len(f) > 0 {
+			p.remoteTip = f[0]
+			if _, err := p.git(p.bare, "fetch", "-q", "--no-tags", origin, "+refs/heads/"+req.Branch+":"+remoteRef); err != nil {
+				return Result{}, fmt.Errorf("origin の %q を取り込めない: %w", req.Branch, err)
+			}
+		}
 	}
 	tip, err := p.git(p.bare, "rev-parse", incoming)
 	if err != nil {
@@ -259,18 +273,15 @@ func (p *Publisher) Publish(req Request) (Result, error) {
 		return Result{}, err
 	}
 	p.branches[req.Branch] = true
-	prev, _ := p.git(p.bare, "rev-parse", "--verify", "-q", pushedRef)
-	if head == prev {
+	if p.remoteTip != "" && head == p.remoteTip {
 		return p.finish(req, base, head, 0)
 	}
-	// 初回はリモートに同名のブランチが無いことを、更新時は前回 push したコミットの
-	// ままであることを条件にする (利用者のブランチを上書きしない)
-	lease := "--force-with-lease=" + pushedRef + ":" + prev
+	// 新規はリモートに同名のブランチが無いことを、更新は取り込んだ先端のままで
+	// あることを条件にする。既存ブランチへは、rewrite が「guest のコミットと
+	// 対応する」と確かめた先端にしか push しない (他人のブランチを書き換えない)。
+	lease := "--force-with-lease=" + pushedRef + ":" + p.remoteTip
 	if _, err := p.git(p.bare, "push", "-q", lease, origin, head+":"+pushedRef); err != nil {
 		return Result{}, fmt.Errorf("push に失敗 (リモートに同名のブランチが既にあるなら上書きしない): %w", err)
-	}
-	if _, err := p.git(p.bare, "update-ref", pushedRef, head); err != nil {
-		return Result{}, err
 	}
 	return p.finish(req, base, head, n)
 }
@@ -285,6 +296,13 @@ func (p *Publisher) rewrite(tip, baseRef string) (string, int, error) {
 		return "", 0, err
 	}
 	commits := strings.Fields(out)
+	// 既存ブランチなら、前に push したコミットを guest のコミットと内容で照合し、
+	// 署名し直さずそのまま使う (ハッシュを変えずに追記できるようにする)。
+	if p.remoteTip != "" {
+		if err := p.reuseRemote(commits, baseRef); err != nil {
+			return "", 0, err
+		}
+	}
 	fresh := 0
 	for _, c := range commits {
 		if _, ok := p.signed[c]; !ok {
@@ -325,6 +343,104 @@ func (p *Publisher) rewrite(tip, baseRef string) (string, int, error) {
 		return nc, n, nil
 	}
 	return tip, n, nil
+}
+
+// reuseRemote は、既に push 済みのブランチのコミットを guest のコミットと内容で
+// 照合し、対応するものは署名し直さずそのまま使う (PR への追記でハッシュを変え
+// ないため)。リモートに guest と対応しないコミットがあるなら、quagent が作った
+// ブランチではないので拒否する (他人のブランチを書き換えない)。
+func (p *Publisher) reuseRemote(commits []string, baseRef string) error {
+	out, err := p.git(p.bare, "rev-list", "--reverse", "--topo-order", p.remoteTip, "--not", baseRef)
+	if err != nil {
+		return err
+	}
+	remote := strings.Fields(out)
+	used := map[string]bool{}
+	for _, c := range commits {
+		if s, ok := p.signed[c]; ok {
+			used[s] = true // この run で既に署名した分
+			continue
+		}
+		cm, err := p.commitMeta(c)
+		if err != nil {
+			return err
+		}
+		want := make([]string, len(cm.parents))
+		for i, par := range cm.parents {
+			if s, ok := p.signed[par]; ok {
+				want[i] = s
+			} else {
+				want[i] = par
+			}
+		}
+		for _, r := range remote {
+			if used[r] {
+				continue
+			}
+			rm, err := p.commitMeta(r)
+			if err != nil {
+				return err
+			}
+			if sameCommit(cm, rm, want) {
+				p.signed[c] = r
+				used[r] = true
+				break
+			}
+		}
+	}
+	if !used[p.remoteTip] {
+		return fmt.Errorf("リモートのブランチは guest のコミットと対応していない。上書きしない")
+	}
+	for _, r := range remote {
+		if !used[r] {
+			return fmt.Errorf("リモートのブランチに guest と対応しないコミットがある。上書きしない")
+		}
+	}
+	return nil
+}
+
+// commitMeta は署名と committer の名義を除いた、コミットの中身を比べるための情報。
+// guest のコミット (捨て鍵で署名) と host が署名し直したコミットは、中身・author・
+// author date・committer date・メッセージが同じで、親は署名し直しの対応をたどれば
+// 一致する。committer の名義 (捨て鍵の run か利用者か) と署名だけが違う。
+type commitMeta struct {
+	tree          string
+	parents       []string
+	authorName    string
+	authorEmail   string
+	authorDate    string
+	committerDate string
+	message       string
+}
+
+func (p *Publisher) commitMeta(rev string) (commitMeta, error) {
+	out, err := p.git(p.bare, "log", "-1", "--date=raw",
+		"--format=%T%x00%P%x00%an%x00%ae%x00%ad%x00%cd%x00%B", rev)
+	if err != nil {
+		return commitMeta{}, err
+	}
+	f := strings.Split(out, "\x00")
+	if len(f) < 7 {
+		return commitMeta{}, fmt.Errorf("コミット %s を読めない", rev)
+	}
+	return commitMeta{tree: f[0], parents: strings.Fields(f[1]), authorName: f[2], authorEmail: f[3],
+		authorDate: f[4], committerDate: f[5], message: f[6]}, nil
+}
+
+func sameCommit(a, b commitMeta, wantParents []string) bool {
+	if a.tree != b.tree || a.authorName != b.authorName || a.authorEmail != b.authorEmail ||
+		a.authorDate != b.authorDate || a.committerDate != b.committerDate || a.message != b.message {
+		return false
+	}
+	if len(b.parents) != len(wantParents) {
+		return false
+	}
+	for i := range wantParents {
+		if b.parents[i] != wantParents[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (p *Publisher) hostHas(c string) bool {

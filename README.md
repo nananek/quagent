@@ -261,7 +261,8 @@ provider ID は opencode の provider ID と揃える。秘密の取り出し方
    `includeIf` の設定も含む) で署名し直す (中身・author・メッセージは変えず、committer は利用者)。host の repo に
    既にあるコミット (他人のものや未 push のもの) はハッシュも署名も変えずにそのまま
    積む。印が無く host にも無いコミット (VM で署名を切って作ったもの) があれば拒否する。
-   既に push したコミットは書き換えないので、PR の更新でハッシュは変わらない
+   既に push したコミットは、guest に残っていれば内容で照合してそのまま使うので、
+   PR の更新 (別の run からの追加コミットを含む) でハッシュは変わらない
 4. host の repo の `origin` へ push し、`gh` で PR を作る (既にあれば更新)
 
 ssh 署名で鍵をエージェントに置いている場合は、quagent を起動したときの
@@ -270,8 +271,10 @@ ssh 署名で鍵をエージェントに置いている場合は、quagent を�
 
 push 先は `origin` で固定。保護ブランチ (既定: main / master / develop、
 `config.json` の `pr.protected_branches` で変更可) には push しない。リモートに
-同名のブランチが既にあれば上書きしない。コミットは利用者の名前で作られる (VM には
-host の git の `user.name` / `user.email` だけを渡す。署名鍵や認証の設定は渡さない)。
+同名のブランチが既にある場合、その先端までのコミットがすべて guest のコミットと
+対応していれば (quagent が前に push した PR なら) 追加コミットを積める。対応しない
+コミットがあれば書き換えない。コミットは利用者の名前で作られる (VM には host の
+git の `user.name` / `user.email` だけを渡す。署名鍵や認証の設定は渡さない)。
 
 VM に渡すのは既定で origin に公開済みのコミットだけなので、host にしか無い未 push の
 コミットは PR に入らない。`--local-head` を付けると checkout 中のブランチの未 push の
