@@ -334,3 +334,62 @@ func TestPublishApprovalGatesPush(t *testing.T) {
 		t.Fatalf("承認後の push がおかしい: %+v", res)
 	}
 }
+
+// 別の run でも、quagent が前に push したブランチに追加コミットを積める。
+// 前に push したコミットは内容で照合して再利用するので履歴は書き換わらない。
+func TestPublishUpdatesExistingBranch(t *testing.T) {
+	f := newFixture(t)
+	run(t, f.guest, "git", "switch", "-q", "-c", "feature")
+	commit(t, f.guest, "a.txt", "a\n")
+	res1, err := f.p.Publish(Request{Branch: "feature", Title: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res1.Signed != 1 {
+		t.Fatalf("1 回目: %+v", res1)
+	}
+
+	// 新しい run (bare repo も別) から同じ guest ブランチに積む
+	p2 := &Publisher{Repo: f.host, Work: t.TempDir(), GuestURL: f.guest,
+		Protected: DefaultProtected, MarkPub: f.p.MarkPub}
+	commit(t, f.guest, "b.txt", "b\n")
+	res2, err := p2.Publish(Request{Branch: "feature", Title: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.Signed != 1 {
+		t.Fatalf("追加分だけのはず: %+v", res2)
+	}
+	if run(t, f.origin, "git", "rev-parse", "feature~1") != res1.Head {
+		t.Fatal("既に push したコミットが書き換わった")
+	}
+	if run(t, f.origin, "git", "rev-parse", "feature") != res2.Head {
+		t.Fatal("push された先端が結果と違う")
+	}
+
+	// 変化がなければ何もしない
+	res3, err := p2.Publish(Request{Branch: "feature", Title: "t"})
+	if err != nil || res3.Signed != 0 || res3.Head != res2.Head {
+		t.Fatalf("変化なしで何かした: %+v %v", res3, err)
+	}
+}
+
+// guest と対応しないコミットがある既存ブランチは書き換えない。
+func TestPublishRejectsForeignExistingBranch(t *testing.T) {
+	f := newFixture(t)
+	// 利用者が other ブランチにコミットして push 済み
+	run(t, f.host, "git", "switch", "-q", "-c", "other", "main")
+	commit(t, f.host, "o.txt", "o\n")
+	run(t, f.host, "git", "push", "-q", "origin", "other")
+	before := run(t, f.origin, "git", "rev-parse", "other")
+
+	// guest は別の中身で同名のブランチを作る
+	run(t, f.guest, "git", "switch", "-q", "-c", "other", "main")
+	commit(t, f.guest, "z.txt", "z\n")
+	if _, err := f.p.Publish(Request{Branch: "other", Title: "t"}); err == nil {
+		t.Fatal("対応しないコミットがあるブランチを書き換えた")
+	}
+	if run(t, f.origin, "git", "rev-parse", "other") != before {
+		t.Fatal("他人のブランチが変わった")
+	}
+}
