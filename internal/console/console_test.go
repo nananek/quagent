@@ -155,10 +155,10 @@ func TestAskGuard(t *testing.T) {
 	}
 
 	info := GuardInfo{Provider: "p", Method: "POST", URL: "h/p", Reason: "メールが漏れる",
-		Headers: []string{"User-Agent: leak"}, Body: "body"}
+		Evidence: "me@example.com", Headers: []string{"User-Agent: leak"}, Body: "body"}
 	errCh, req := ask(info)
 	if req.Provider != "p" || req.Method != "POST" || req.URL != "h/p" || req.Reason != "メールが漏れる" ||
-		len(req.Headers) != 1 || req.Body != "body" {
+		req.Evidence != "me@example.com" || len(req.Headers) != 1 || req.Body != "body" {
 		t.Fatalf("承認に渡す内容が違う: %+v", req)
 	}
 	if err := enc.Encode(Msg{Type: "guarddecide", ID: req.ID, Status: access.Approved}); err != nil {

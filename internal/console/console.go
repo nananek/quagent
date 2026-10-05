@@ -49,6 +49,7 @@ type Msg struct {
 	Provider string   `json:"provider,omitempty"`
 	Method   string   `json:"method,omitempty"`
 	URL      string   `json:"url,omitempty"`
+	Evidence string   `json:"evidence,omitempty"`
 	Headers  []string `json:"headers,omitempty"`
 }
 
@@ -114,6 +115,8 @@ type GuardInfo struct {
 	Method   string
 	URL      string
 	Reason   string
+	// Evidence はローカル LLM が「これが機密だ」と指摘した該当箇所。
+	Evidence string
 	Headers  []string
 	Body     string
 }
@@ -374,7 +377,8 @@ func (s *Server) settleGuard(id int, status access.Status) {
 
 func guardRequestMsg(r *guardRequest) Msg {
 	return Msg{Type: "guardrequest", ID: r.id, Provider: r.info.Provider, Method: r.info.Method,
-		URL: r.info.URL, Reason: r.info.Reason, Headers: r.info.Headers, Body: r.info.Body,
+		URL: r.info.URL, Reason: r.info.Reason, Evidence: r.info.Evidence,
+		Headers: r.info.Headers, Body: r.info.Body,
 		Deadline: r.created.Add(access.DecisionTimeout).Format("15:04:05")}
 }
 

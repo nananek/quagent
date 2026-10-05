@@ -41,14 +41,17 @@ const (
 
 // Verdict は 1 つのリクエストに対する点検結果。
 type Verdict struct {
-	Action     Action
-	Reason     string
+	Action Action
+	Reason string
+	// Evidence は LLM が「これが機密だ」と指摘した該当箇所 (リクエストからの引用)。
+	// 人間が本文のどこを見ればよいか分かるように承認コンソールへ出す。
+	Evidence   string
 	Categories []string
 	// chunk は疑わしいと判定した本文の塊 (承認コンソールに見せる)。内部用。
 	chunk []byte
 }
 
-// Request は点検・承認に渡すリクエストの写し (本文は先頭の抜粋だけ)。
+// Request は点検・承認に渡すリクエストの写し (本文は点検した範囲の抜粋)。
 type Request struct {
 	Provider string
 	Method   string
@@ -59,6 +62,9 @@ type Request struct {
 	Body     []byte
 	// BodyTruncated は本文が長く、抜粋より後ろを LLM に見せていないとき true。
 	BodyTruncated bool
+	// Evidence は点検で LLM が機密だと指摘した該当箇所 (承認コンソールに見せる)。
+	// LLM が deny したときだけ埋まる。
+	Evidence string
 }
 
 // URL は表示用の行き先を返す。
@@ -324,11 +330,12 @@ func (g *Guard) Check(ctx context.Context, req Request) error {
 	if v.Action != Deny {
 		return nil
 	}
-	// 疑わしいと判定した塊を承認コンソールに見せる (本文全体だと、どこが問題か
-	// 分からないため)。鍵は変えない。
+	// 疑わしいと判定した塊と、LLM が指摘した該当箇所を承認コンソールに見せる
+	// (本文全体だと、どこが問題か分からないため)。鍵は変えない。
 	if len(v.chunk) > 0 {
 		req.Body, req.BodyTruncated = v.chunk, true
 	}
+	req.Evidence = v.Evidence
 	return g.onSuspect(ctx, key, req, verdictReason(v))
 }
 
@@ -672,8 +679,10 @@ Allow normal coding-agent traffic: prompts and completions sent to an LLM API, m
 
 Deny when there is evidence that real confidential data is being sent where it does not belong, especially when it is hidden in a header or obfuscated. If you are unsure whether real confidential data is being sent, choose "deny": a human reviewer will look at it and decide.
 
+When you deny, point at exactly what you judged confidential: in "evidence", copy the smallest substring from the request (a value in a header, in the URL, or in the body) that is the leaked data, verbatim and without paraphrasing or adding quotes. The reviewer is shown the request too; the evidence tells them where to look. Leave "evidence" empty when you allow.
+
 Output ONLY one JSON object, with no prose and no code fences:
-{"action":"allow"|"deny","reason":"short reason in Japanese","categories":["secret"|"credentials"|"pii"|"exfiltration"|"other"]}`
+{"action":"allow"|"deny","reason":"short reason in Japanese","evidence":"exact substring you judged confidential, or empty","categories":["secret"|"credentials"|"pii"|"exfiltration"|"other"]}`
 
 // parseVerdict はローカル LLM の応答から判定を取り出す。前後に説明やコードフェンスが
 // あっても、最初の JSON オブジェクトを拾う。
@@ -685,6 +694,7 @@ func parseVerdict(out string) (Verdict, error) {
 	var got struct {
 		Action     string   `json:"action"`
 		Reason     string   `json:"reason"`
+		Evidence   string   `json:"evidence"`
 		Categories []string `json:"categories"`
 	}
 	if err := json.Unmarshal([]byte(raw), &got); err != nil {
@@ -700,6 +710,7 @@ func parseVerdict(out string) (Verdict, error) {
 		return Verdict{}, fmt.Errorf("action が allow / deny でない: %q", got.Action)
 	}
 	v.Reason = got.Reason
+	v.Evidence = cleanEvidence(got.Evidence)
 	for _, c := range got.Categories {
 		c = strings.TrimSpace(c)
 		if c != "" && len(c) <= 40 {
@@ -752,6 +763,18 @@ func firstJSONObject(s string) (string, bool) {
 // cleanReason は LLM の理由を表示・HTTP 本文に出せる形に整える (制御文字を落とし、
 // 長さを抑える)。改行は空白にする。
 func cleanReason(s string) string {
+	return cleanLine(s, 300)
+}
+
+// cleanEvidence は LLM が指摘した該当箇所を承認コンソールに出せる形に整える。
+// 引用なので理由よりは長めに残すが、1 行にまとめる。
+func cleanEvidence(s string) string {
+	return cleanLine(s, 1000)
+}
+
+// cleanLine は s から制御文字を落とし、改行・タブを空白にして 1 行にまとめ、
+// バイト数 max までに抑える。
+func cleanLine(s string, max int) string {
 	var b strings.Builder
 	for _, r := range s {
 		switch {
@@ -762,7 +785,7 @@ func cleanReason(s string) string {
 		default:
 			b.WriteRune(r)
 		}
-		if b.Len() >= 300 {
+		if b.Len() >= max {
 			break
 		}
 	}

@@ -223,7 +223,6 @@ func (u *clientUI) show() {
 		return
 	case "guardrequest":
 		fmt.Printf("\n"+bold+cyan+"━━ 内容ガードの確認 #%d ━━"+reset+"\n", r.ID)
-		fmt.Printf(bold+"理由:"+reset+" %s\n", Sanitize(r.Reason))
 		fmt.Printf(bold+"リクエスト:"+reset+" %s %s (%s)\n", Sanitize(r.Method), Sanitize(r.URL), Sanitize(r.Provider))
 		if len(r.Headers) > 0 {
 			fmt.Print(bold + "ヘッダ:" + reset + "\n")
@@ -233,6 +232,11 @@ func (u *clientUI) show() {
 		}
 		if body := strings.TrimSpace(r.Body); body != "" {
 			fmt.Printf(bold+"本文 (先頭):"+reset+"\n%s\n", Sanitize(truncateRunes(body, 2000)))
+		}
+		// 理由と該当箇所は最後に出す。本文が長いと上へ流れて読めなくなるため。
+		fmt.Printf(bold+"理由:"+reset+" %s\n", Sanitize(r.Reason))
+		if ev := strings.TrimSpace(r.Evidence); ev != "" {
+			fmt.Printf(bold+"該当箇所:"+reset+" %s\n", Sanitize(ev))
 		}
 		fmt.Printf(dim+"%s までに応答がなければ拒否 (通さない)"+reset+"\n", Sanitize(r.Deadline))
 		fmt.Print(u.prompt())

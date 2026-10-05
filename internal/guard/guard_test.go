@@ -131,6 +131,29 @@ func TestParseVerdict(t *testing.T) {
 	}
 }
 
+func TestParseVerdictEvidence(t *testing.T) {
+	v, err := parseVerdict(`{"action":"deny","reason":"漏れる","evidence":"me@example.com\n","categories":["pii"]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Evidence != "me@example.com" {
+		t.Errorf("evidence = %q, want %q", v.Evidence, "me@example.com")
+	}
+	// allow のときは空のままでよい
+	if v, err := parseVerdict(`{"action":"allow","reason":"ok"}`); err != nil || v.Evidence != "" {
+		t.Errorf("evidence = %q, err = %v", v.Evidence, err)
+	}
+	// 制御文字は落とし、長さを抑える
+	long := `{"action":"deny","reason":"x","evidence":"a` + strings.Repeat("b", 2000) + `"}`
+	v, err = parseVerdict(long)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsRune(v.Evidence, '\n') || len(v.Evidence) > 1000 {
+		t.Errorf("evidence が整えられていない: %d バイト", len(v.Evidence))
+	}
+}
+
 func TestFirstJSONObjectIgnoresBracesInStrings(t *testing.T) {
 	got, ok := firstJSONObject(`x {"a":"}","b":{"c":1}} y`)
 	if !ok || got != `{"a":"}","b":{"c":1}}` {
@@ -173,12 +196,15 @@ func TestInspectTruncatesBody(t *testing.T) {
 }
 
 func TestCheckDenyAsksReviewerAndCachesDecision(t *testing.T) {
-	g, fake := newTest(t, config.Guard{Mode: "ask"}, `{"action":"deny","reason":"メールが漏れる","categories":["pii"]}`, nil)
+	g, fake := newTest(t, config.Guard{Mode: "ask"}, `{"action":"deny","reason":"メールが漏れる","evidence":"me@example.com","categories":["pii"]}`, nil)
 	reviews := 0
 	g.SetReviewer(func(_ context.Context, req Request, reason string) error {
 		reviews++
 		if !strings.Contains(reason, "メールが漏れる") || !strings.Contains(reason, "pii") {
 			t.Errorf("理由が承認者に伝わっていない: %q", reason)
+		}
+		if req.Evidence != "me@example.com" {
+			t.Errorf("該当箇所が承認者に伝わっていない: %q", req.Evidence)
 		}
 		if req.URL() != "h/p" {
 			t.Errorf("URL が違う: %q", req.URL())

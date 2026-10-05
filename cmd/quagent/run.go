@@ -263,6 +263,7 @@ runcmd:
 				Method:   req.Method,
 				URL:      req.URL(),
 				Reason:   reason,
+				Evidence: req.Evidence,
 				Headers:  req.HeaderLines(),
 				Body:     string(req.Body),
 			})
