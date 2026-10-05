@@ -231,7 +231,11 @@ func (u *clientUI) show() {
 			}
 		}
 		if body := strings.TrimSpace(r.Body); body != "" {
-			fmt.Printf(bold+"本文 (先頭):"+reset+"\n%s\n", Sanitize(truncateRunes(body, 2000)))
+			label := "本文 (先頭):"
+			if strings.TrimSpace(r.Evidence) != "" {
+				label = "本文 (該当箇所の周辺):"
+			}
+			fmt.Printf(bold+label+reset+"\n%s\n", Sanitize(truncateRunes(body, 2000)))
 		}
 		// 理由と該当箇所は最後に出す。本文が長いと上へ流れて読めなくなるため。
 		fmt.Printf(bold+"理由:"+reset+" %s\n", Sanitize(r.Reason))
