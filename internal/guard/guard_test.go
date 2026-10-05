@@ -17,6 +17,7 @@ type fakeCompleter struct {
 	calls  int
 	system string
 	user   string
+	users  []string
 	reply  string
 	err    error
 }
@@ -26,10 +27,26 @@ func (f *fakeCompleter) Complete(_ context.Context, system, user string) (string
 	defer f.mu.Unlock()
 	f.calls++
 	f.system, f.user = system, user
+	f.users = append(f.users, user)
 	if f.err != nil {
 		return "", f.err
 	}
 	return f.reply, nil
+}
+
+func (f *fakeCompleter) allUsers() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.users...)
+}
+
+func (f *fakeCompleter) firstUser() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.users) == 0 {
+		return ""
+	}
+	return f.users[0]
 }
 
 func (f *fakeCompleter) count() int {
@@ -66,6 +83,9 @@ func TestResolveDefaults(t *testing.T) {
 	if s.mode != modeAsk || s.onError != "ask" || s.concurrency != 1 || s.maxBytes != defaultMaxBytes {
 		t.Fatalf("既定が違う: %+v", s)
 	}
+	if s.maxChunks != defaultMaxChunks {
+		t.Fatalf("max_chunks の既定が違う: %d", s.maxChunks)
+	}
 	if s, err := resolve(config.Guard{Backend: "ollama"}); err != nil || s.endpoint != defaultOllamaEndpoint {
 		t.Errorf("ollama の既定 endpoint が違う: %+v, %v", s, err)
 	}
@@ -78,8 +98,11 @@ func TestResolveDefaults(t *testing.T) {
 	if _, err := resolve(config.Guard{OnError: "nope"}); err == nil {
 		t.Error("不明な on_error を受け付けた")
 	}
-	if s, _ := resolve(config.Guard{MaxBytes: 1 << 20}); s.maxBytes != MaxInspect {
+	if s, _ := resolve(config.Guard{MaxBytes: 1 << 20}); s.maxBytes != MaxChunkBytes {
 		t.Errorf("max_bytes が上限で切られていない: %d", s.maxBytes)
+	}
+	if s, _ := resolve(config.Guard{MaxChunks: 1 << 20}); s.maxChunks != MaxChunks {
+		t.Errorf("max_chunks が上限で切られていない: %d", s.maxChunks)
 	}
 }
 
@@ -299,5 +322,56 @@ func TestCleanReasonStripsControl(t *testing.T) {
 	long := strings.Repeat("x", 1000)
 	if got := cleanReason(long); len(got) > 300 {
 		t.Errorf("cleanReason が長すぎる: %d", len(got))
+	}
+}
+
+// 判断の鍵は LLM に見せる先頭 max_bytes だけでなく本文全体を見る (後ろが違う
+// リクエストに人間の判断を流用しない)。
+func TestCacheKeyCoversFullBody(t *testing.T) {
+	g, _ := newTest(t, config.Guard{MaxBytes: 4}, `{"action":"allow","reason":"ok"}`, nil)
+	k1 := g.cacheKey(Request{Body: []byte("AAAAone")})
+	k2 := g.cacheKey(Request{Body: []byte("AAAAtwo")})
+	if k1 == k2 {
+		t.Error("先頭だけ同じ本文の鍵が同じになった")
+	}
+}
+
+// 判断の鍵は各ヘッダの先頭 1024 バイトだけではない。
+func TestCacheKeyCoversFullHeader(t *testing.T) {
+	g, _ := newTest(t, config.Guard{}, `{"action":"allow","reason":"ok"}`, nil)
+	long := strings.Repeat("x", MaxHeaderBytes)
+	k1 := g.cacheKey(Request{Headers: http.Header{"User-Agent": {long + "one"}}})
+	k2 := g.cacheKey(Request{Headers: http.Header{"User-Agent": {long + "two"}}})
+	if k1 == k2 {
+		t.Error("先頭だけ同じヘッダの鍵が同じになった")
+	}
+}
+
+// 塊の境目にまたがる短い秘密も、どれかの塊に丸ごと入って点検される。
+func TestSplitChunksOverlapKeepsSecret(t *testing.T) {
+	g, fake := newTest(t, config.Guard{MaxBytes: 16}, `{"action":"allow","reason":"ok"}`, nil)
+	// 秘密が 16 バイトの境目をまたぐ位置に置く (重なりが無いと分断される)
+	body := strings.Repeat("A", 14) + "SECRET"
+	if _, err := g.Inspect(context.Background(), Request{Body: []byte(body)}); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(fake.allUsers(), "\n")
+	if !strings.Contains(joined, "SECRET") {
+		t.Error("境目にまたがる秘密がどの塊にも丸ごと入っていない")
+	}
+}
+
+// 分割数と、塊ごとに点検していることを確かめる。
+func TestInspectSplitsBodyIntoChunks(t *testing.T) {
+	g, fake := newTest(t, config.Guard{MaxBytes: 8, MaxChunks: 4}, `{"action":"allow","reason":"ok"}`, nil)
+	body := strings.Repeat("A", 100)
+	if _, err := g.Inspect(context.Background(), Request{Body: []byte(body)}); err != nil {
+		t.Fatal(err)
+	}
+	if fake.count() != 4 {
+		t.Fatalf("点検回数 = %d, want 4", fake.count())
+	}
+	if !strings.Contains(fake.firstUser(), "part: 1/4") {
+		t.Errorf("塊の番号がプロンプトに出ていない")
 	}
 }

@@ -46,8 +46,11 @@ type Guard struct {
 	Model string `json:"model,omitempty"`
 	// TimeoutSeconds は 1 リクエストの点検の上限。既定 30。
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
-	// MaxBytes は LLM に見せる本文の先頭バイト数。既定 8192、上限 32768。
+	// MaxBytes は LLM に見せる本文の塊 1 つの先頭バイト数。既定 8192、上限 32768。
 	MaxBytes int `json:"max_bytes,omitempty"`
+	// MaxChunks は 1 リクエストの本文を何個の塊に分けて点検するか。既定 8、上限 64。
+	// 塊は少し重ねてあり、境目にまたがる短い秘密もどれかの塊に丸ごと入る。
+	MaxChunks int `json:"max_chunks,omitempty"`
 	// Concurrency は同時に点検する件数。GPU 1 枚なら 1 (既定)。
 	Concurrency int `json:"concurrency,omitempty"`
 	// Mode は疑わしいときの扱い。"ask" (既定。承認コンソールが通すか止めるか決める)、

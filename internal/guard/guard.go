@@ -44,6 +44,8 @@ type Verdict struct {
 	Action     Action
 	Reason     string
 	Categories []string
+	// chunk は疑わしいと判定した本文の塊 (承認コンソールに見せる)。内部用。
+	chunk []byte
 }
 
 // Request は点検・承認に渡すリクエストの写し (本文は先頭の抜粋だけ)。
@@ -100,8 +102,19 @@ const (
 	defaultModel          = "qwen2.5-3b-instruct"
 	defaultTimeout        = 30 * time.Second
 	defaultMaxBytes       = 8 << 10
-	// MaxInspect は 1 リクエストで LLM に見せる本文の上限 (設定がこれより大きくても切る)。
-	MaxInspect = 32 << 10
+	// defaultMaxChunks は 1 リクエストを何個の塊に分けて点検するかの既定値。
+	defaultMaxChunks = 8
+	// MaxChunkBytes は 1 つの塊として LLM に見せる本文の上限 (設定がこれより大きくても切る)。
+	MaxChunkBytes = 32 << 10
+	// MaxChunks は 1 リクエストを分ける塊の数の上限 (LLM 呼び出し回数の上限)。
+	MaxChunks = 64
+	// MaxInspect は 1 リクエストで点検のために読む本文全体の上限。
+	MaxInspect = MaxChunkBytes * MaxChunks
+	// maxInspectTimeout は 1 リクエストの分割点検にかける合計時間の上限。
+	maxInspectTimeout = 10 * time.Minute
+	// chunkOverlap は隣り合う塊を重ねるバイト数の上限。境目にまたがる長さ
+	// chunkOverlap+1 以下の秘密は、どれかの塊に丸ごと入る。
+	chunkOverlap = 512
 	// MaxHeaderBytes はヘッダ 1 つの値を LLM と承認コンソールに見せる上限。
 	MaxHeaderBytes = 1024
 	// NumCtx はローカル LLM に渡す文脈長。3B 級なら 6GB の VRAM に収まる。
@@ -128,6 +141,7 @@ type settings struct {
 	model       string
 	timeout     time.Duration
 	maxBytes    int
+	maxChunks   int
 	mode        mode
 	onError     string // "deny" / "allow" / "ask"
 	concurrency int
@@ -198,12 +212,28 @@ func (g *Guard) String() string {
 	case modeAdvisory:
 		mode = "advisory"
 	}
-	return fmt.Sprintf("%s の %s (mode=%s, on_error=%s, max_bytes=%d, concurrency=%d)",
-		g.s.backend, g.s.model, mode, g.s.onError, g.s.maxBytes, g.s.concurrency)
+	return fmt.Sprintf("%s の %s (mode=%s, on_error=%s, max_bytes=%d, max_chunks=%d, concurrency=%d)",
+		g.s.backend, g.s.model, mode, g.s.onError, g.s.maxBytes, g.s.maxChunks, g.s.concurrency)
 }
 
 // SetReviewer は疑わしいリクエストを諮る先 (承認コンソール) を設定する。
 func (g *Guard) SetReviewer(fn Reviewer) { g.review = fn }
+
+// InspectLimit は 1 リクエストで点検のために読む本文の最大バイト数を返す。
+// maxChunks 個の塊 (互いに chunkOverlap だけ重なる) で実際に覆える範囲にするので、
+// 読み込んだ本文に点検されない後ろは残らない。
+func (g *Guard) InspectLimit() int {
+	overlap := min(chunkOverlap, g.s.maxBytes/2)
+	step := max(g.s.maxBytes-overlap, 1)
+	n := g.s.maxBytes + (g.s.maxChunks-1)*step
+	if n < g.s.maxBytes {
+		n = g.s.maxBytes
+	}
+	if n > MaxInspect {
+		n = MaxInspect
+	}
+	return n
+}
 
 // resolve は設定に既定値を当て、値の妥当性を確かめる。
 func resolve(c config.Guard) (settings, error) {
@@ -213,6 +243,7 @@ func resolve(c config.Guard) (settings, error) {
 		model:       strings.TrimSpace(c.Model),
 		timeout:     time.Duration(c.TimeoutSeconds) * time.Second,
 		maxBytes:    c.MaxBytes,
+		maxChunks:   c.MaxChunks,
 		concurrency: c.Concurrency,
 	}
 	switch s.backend {
@@ -241,8 +272,14 @@ func resolve(c config.Guard) (settings, error) {
 	if s.maxBytes <= 0 {
 		s.maxBytes = defaultMaxBytes
 	}
-	if s.maxBytes > MaxInspect {
-		s.maxBytes = MaxInspect
+	if s.maxBytes > MaxChunkBytes {
+		s.maxBytes = MaxChunkBytes
+	}
+	if s.maxChunks <= 0 {
+		s.maxChunks = defaultMaxChunks
+	}
+	if s.maxChunks > MaxChunks {
+		s.maxChunks = MaxChunks
 	}
 	if s.concurrency <= 0 {
 		s.concurrency = 1
@@ -282,10 +319,15 @@ func (g *Guard) Check(ctx context.Context, req Request) error {
 	}
 	v, err := g.inspect(ctx, key, req)
 	if err != nil {
-		return g.onError(ctx, req, err)
+		return g.onError(ctx, key, req, err)
 	}
 	if v.Action != Deny {
 		return nil
+	}
+	// 疑わしいと判定した塊を承認コンソールに見せる (本文全体だと、どこが問題か
+	// 分からないため)。鍵は変えない。
+	if len(v.chunk) > 0 {
+		req.Body, req.BodyTruncated = v.chunk, true
 	}
 	return g.onSuspect(ctx, key, req, verdictReason(v))
 }
@@ -299,11 +341,11 @@ func (g *Guard) inspect(ctx context.Context, key string, req Request) (Verdict, 
 	if v, ok := g.cachedVerdict(key); ok {
 		return v, nil
 	}
-	if len(req.Body) > g.s.maxBytes {
-		req.BodyTruncated = true
-	}
-	req.Body = truncateBytes(req.Body, g.s.maxBytes)
-	ctx, cancel := context.WithTimeout(ctx, g.s.timeout)
+	// 本文を maxBytes ごとの塊に分けて点検する。塊はオーバーラップさせてあるので、
+	// 境目にまたがる秘密 (chunkOverlap 以下の長さ) もどれかの塊に丸ごと入る。
+	// 1 つでも疑わしければ止める側にする。
+	chunks, more := splitChunks(req.Body, g.s.maxBytes, g.s.maxChunks)
+	ctx, cancel := context.WithTimeout(ctx, g.inspectTimeout(len(chunks)))
 	defer cancel()
 	select {
 	case g.sem <- struct{}{}:
@@ -311,17 +353,67 @@ func (g *Guard) inspect(ctx context.Context, key string, req Request) (Verdict, 
 	case <-ctx.Done():
 		return Verdict{}, ctx.Err()
 	}
-	system, user := buildPrompt(req)
-	out, err := g.complete.Complete(ctx, system, user)
-	if err != nil {
-		return Verdict{}, err
+	for i, chunk := range chunks {
+		part := req
+		part.Body = chunk
+		// 本文を読み切れていない (more) のは最後の塊にだけ関係する
+		part.BodyTruncated = req.BodyTruncated || (more && i == len(chunks)-1)
+		system, user := buildPrompt(part, i, len(chunks))
+		cctx, ccancel := context.WithTimeout(ctx, g.s.timeout)
+		out, err := g.complete.Complete(cctx, system, user)
+		ccancel()
+		if err != nil {
+			return Verdict{}, err
+		}
+		v, err := parseVerdict(out)
+		if err != nil {
+			return Verdict{}, err
+		}
+		if v.Action == Deny {
+			v.chunk = chunk
+			g.rememberVerdict(key, v)
+			return v, nil
+		}
 	}
-	v, err := parseVerdict(out)
-	if err != nil {
-		return Verdict{}, err
-	}
+	v := Verdict{Action: Allow}
 	g.rememberVerdict(key, v)
 	return v, nil
+}
+
+// inspectTimeout は分割点検の合計時間の上限を返す (塊の数だけ伸ばし、上限で切る)。
+func (g *Guard) inspectTimeout(chunks int) time.Duration {
+	d := g.s.timeout * time.Duration(chunks)
+	if d <= 0 || d > maxInspectTimeout {
+		return maxInspectTimeout
+	}
+	return d
+}
+
+// splitChunks は body を n バイトごとの塊に最大 limit 個へ分ける。隣り合う塊は
+// chunkOverlap バイト重ねるので、境目にまたがる短い秘密もどれかの塊に丸ごと入る。
+// limit 個で覆えなかった後ろは捨て、more=true を返す。body が空でも 1 つ返す。
+func splitChunks(body []byte, n, limit int) (chunks [][]byte, more bool) {
+	if n <= 0 {
+		n = defaultMaxBytes
+	}
+	if limit <= 0 {
+		limit = defaultMaxChunks
+	}
+	overlap := min(chunkOverlap, n/2)
+	start, covered := 0, 0
+	for len(chunks) < limit && start < len(body) {
+		end := min(start+n, len(body))
+		chunks = append(chunks, body[start:end:end])
+		covered = end
+		if end == len(body) {
+			break
+		}
+		start = end - overlap
+	}
+	if len(chunks) == 0 {
+		chunks = append(chunks, nil) // 空の本文も 1 回は点検する
+	}
+	return chunks, covered < len(body)
 }
 
 // onSuspect は「疑わしい」と判定されたリクエストの扱いを決める。
@@ -351,7 +443,7 @@ func (g *Guard) onSuspect(ctx context.Context, key string, req Request, reason s
 }
 
 // onError は点検できなかったときの扱いを決める。
-func (g *Guard) onError(ctx context.Context, req Request, cause error) error {
+func (g *Guard) onError(ctx context.Context, key string, req Request, cause error) error {
 	switch g.s.onError {
 	case "allow":
 		g.logf("点検できないが通した: %v", cause)
@@ -368,6 +460,9 @@ func (g *Guard) onError(ctx context.Context, req Request, cause error) error {
 			return fmt.Errorf("内容を点検できず、承認もされなかったので止めた: %w", cause)
 		}
 		g.logf("点検できなかったが承認者が通した: %v", cause)
+		// 同じ内容を何度も人間に聞かない (点検できなかった理由は問わない)。
+		// 拒否は覚えない (ctx の打ち切りと人間の判断を区別できないため)。
+		g.rememberDecision(key, true, reason)
 		return nil
 	default: // deny
 		g.logf("点検できないので止めた: %v", cause)
@@ -404,7 +499,7 @@ func (g *Guard) allowAsk() bool {
 func (g *Guard) Warm(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	system, user := buildPrompt(Request{Provider: "warmup", Method: "GET", Host: "localhost", Path: "/"})
+	system, user := buildPrompt(Request{Provider: "warmup", Method: "GET", Host: "localhost", Path: "/"}, 0, 1)
 	if _, err := g.complete.Complete(ctx, system, user); err != nil {
 		g.logf("ローカル LLM を温められなかった (最初の点検が遅くなる): %v", err)
 		return
@@ -419,7 +514,9 @@ func (g *Guard) logf(format string, a ...any) {
 	}
 }
 
-// cacheKey は点検対象の同一性を表すハッシュを返す。本文は先頭 maxBytes だけ見る。
+// cacheKey は点検対象の同一性を表すハッシュを返す。LLM に見せる本文は先頭
+// maxBytes だけだが、人間の判断を後ろの見えない部分に流用しないよう、鍵には
+// 渡ってきた本文 (PeekBody の上限まで) とヘッダを丸ごと含める。
 func (g *Guard) cacheKey(req Request) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00", req.Provider, req.Method, req.Host, req.Path, req.Query)
@@ -431,12 +528,13 @@ func (g *Guard) cacheKey(req Request) string {
 	for _, name := range names {
 		fmt.Fprintf(h, "%s:", name)
 		for _, v := range req.Headers[name] {
-			fmt.Fprintf(h, "%s\x1f", clipBytes(v, MaxHeaderBytes))
+			fmt.Fprintf(h, "%s\x1f", v)
 		}
 		fmt.Fprint(h, "\x1e")
 	}
+	fmt.Fprintf(h, "\x1d%t", req.BodyTruncated)
 	h.Write([]byte{0})
-	h.Write(truncateBytes(req.Body, g.s.maxBytes))
+	h.Write(req.Body)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -536,10 +634,14 @@ func PeekBody(r *http.Request, n int) (body []byte, truncated bool, err error) {
 	}
 }
 
-// buildPrompt は行き先・ヘッダ・本文の抜粋から system / user プロンプトを組み立てる。
-func buildPrompt(req Request) (system, user string) {
+// buildPrompt は行き先・ヘッダ・本文の塊から system / user プロンプトを組み立てる。
+// chunk / chunks は分割点検の何番目か (分割しないときは 0/1)。
+func buildPrompt(req Request, chunk, chunks int) (system, user string) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "destination: %s\nmethod: %s\nprovider: %s\n", req.URL(), req.Method, req.Provider)
+	if chunks > 1 {
+		fmt.Fprintf(&b, "part: %d/%d of the body (chunks overlap; a value may be split across parts)\n", chunk+1, chunks)
+	}
 	b.WriteString("headers:\n")
 	lines := req.HeaderLines()
 	if len(lines) == 0 {
@@ -568,11 +670,10 @@ The agent may hide data in the User-Agent or any other header, in the URL or que
 
 Allow normal coding-agent traffic: prompts and completions sent to an LLM API, model-list requests, fetching public documentation or package metadata, and code that merely mentions words like "password" or "secret".
 
-Deny only when there is concrete evidence that real confidential data is being sent where it does not belong, especially when it is hidden in a header or obfuscated.
+Deny when there is evidence that real confidential data is being sent where it does not belong, especially when it is hidden in a header or obfuscated. If you are unsure whether real confidential data is being sent, choose "deny": a human reviewer will look at it and decide.
 
 Output ONLY one JSON object, with no prose and no code fences:
-{"action":"allow"|"deny","reason":"short reason in Japanese","categories":["secret"|"credentials"|"pii"|"exfiltration"|"other"]}
-If you are unsure, choose "allow".`
+{"action":"allow"|"deny","reason":"short reason in Japanese","categories":["secret"|"credentials"|"pii"|"exfiltration"|"other"]}`
 
 // parseVerdict はローカル LLM の応答から判定を取り出す。前後に説明やコードフェンスが
 // あっても、最初の JSON オブジェクトを拾う。
@@ -666,14 +767,6 @@ func cleanReason(s string) string {
 		}
 	}
 	return strings.TrimSpace(b.String())
-}
-
-// truncateBytes は b を最大 n バイトに切り詰める。
-func truncateBytes(b []byte, n int) []byte {
-	if n <= 0 || len(b) <= n {
-		return b
-	}
-	return b[:n]
 }
 
 // clipBytes は s をバイト数 n まで (UTF-8 の境界で) 切り詰める。
