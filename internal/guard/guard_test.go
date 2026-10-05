@@ -1,0 +1,377 @@
+package guard
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/nananek/quagent/internal/config"
+)
+
+type fakeCompleter struct {
+	mu     sync.Mutex
+	calls  int
+	system string
+	user   string
+	users  []string
+	reply  string
+	err    error
+}
+
+func (f *fakeCompleter) Complete(_ context.Context, system, user string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.system, f.user = system, user
+	f.users = append(f.users, user)
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.reply, nil
+}
+
+func (f *fakeCompleter) allUsers() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.users...)
+}
+
+func (f *fakeCompleter) firstUser() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.users) == 0 {
+		return ""
+	}
+	return f.users[0]
+}
+
+func (f *fakeCompleter) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+func (f *fakeCompleter) prompt() (string, string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.system, f.user
+}
+
+// newTest は既定設定に c を当てた点検器と、その偽モデルを返す。
+func newTest(t *testing.T, c config.Guard, reply string, modelErr error) (*Guard, *fakeCompleter) {
+	t.Helper()
+	s, err := resolve(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeCompleter{reply: reply, err: modelErr}
+	return newWithCompleter(s, fake, nil), fake
+}
+
+func TestResolveDefaults(t *testing.T) {
+	s, err := resolve(config.Guard{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.backend != "openai" || s.endpoint != defaultOpenAIEndpoint || s.model != defaultModel {
+		t.Fatalf("既定が違う: %+v", s)
+	}
+	if s.mode != modeAsk || s.onError != "ask" || s.concurrency != 1 || s.maxBytes != defaultMaxBytes {
+		t.Fatalf("既定が違う: %+v", s)
+	}
+	if s.maxChunks != defaultMaxChunks {
+		t.Fatalf("max_chunks の既定が違う: %d", s.maxChunks)
+	}
+	if s, err := resolve(config.Guard{Backend: "ollama"}); err != nil || s.endpoint != defaultOllamaEndpoint {
+		t.Errorf("ollama の既定 endpoint が違う: %+v, %v", s, err)
+	}
+	if _, err := resolve(config.Guard{Backend: "nope"}); err == nil {
+		t.Error("不明な backend を受け付けた")
+	}
+	if _, err := resolve(config.Guard{Mode: "nope"}); err == nil {
+		t.Error("不明な mode を受け付けた")
+	}
+	if _, err := resolve(config.Guard{OnError: "nope"}); err == nil {
+		t.Error("不明な on_error を受け付けた")
+	}
+	if s, _ := resolve(config.Guard{MaxBytes: 1 << 20}); s.maxBytes != MaxChunkBytes {
+		t.Errorf("max_bytes が上限で切られていない: %d", s.maxBytes)
+	}
+	if s, _ := resolve(config.Guard{MaxChunks: 1 << 20}); s.maxChunks != MaxChunks {
+		t.Errorf("max_chunks が上限で切られていない: %d", s.maxChunks)
+	}
+}
+
+func TestParseVerdict(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want Action
+		ok   bool
+	}{
+		{`{"action":"allow","reason":"ok"}`, Allow, true},
+		{`{"action":"DENY","reason":"鍵","categories":["secret"]}`, Deny, true},
+		{"```json\n{\"action\":\"allow\",\"reason\":\"x\"}\n```", Allow, true},
+		{"前置き {\"action\":\"deny\",\"reason\":\"y\"} 後書き", Deny, true},
+		{`{"reason":"no action"}`, "", false},
+		{`{"action":"maybe","reason":"?"}`, "", false},
+		{`not json`, "", false},
+	} {
+		v, err := parseVerdict(c.in)
+		if c.ok != (err == nil) {
+			t.Errorf("parseVerdict(%q) err=%v", c.in, err)
+			continue
+		}
+		if c.ok && v.Action != c.want {
+			t.Errorf("parseVerdict(%q) action=%q want %q", c.in, v.Action, c.want)
+		}
+	}
+}
+
+func TestFirstJSONObjectIgnoresBracesInStrings(t *testing.T) {
+	got, ok := firstJSONObject(`x {"a":"}","b":{"c":1}} y`)
+	if !ok || got != `{"a":"}","b":{"c":1}}` {
+		t.Fatalf("firstJSONObject = %q, %v", got, ok)
+	}
+}
+
+func TestInspectSendsHeadersAndBody(t *testing.T) {
+	g, fake := newTest(t, config.Guard{}, `{"action":"allow","reason":"ok"}`, nil)
+	req := Request{
+		Provider: "p", Method: "POST", Host: "api.example.com", Path: "/v1/chat",
+		Headers: http.Header{"User-Agent": {"curl/8 me@example.com"}},
+		Body:    []byte("hello prompt"),
+	}
+	v, err := g.Inspect(context.Background(), req)
+	if err != nil || v.Action != Allow {
+		t.Fatalf("v=%+v err=%v", v, err)
+	}
+	_, user := fake.prompt()
+	for _, want := range []string{"POST", "api.example.com/v1/chat", "User-Agent: curl/8 me@example.com", "hello prompt"} {
+		if !strings.Contains(user, want) {
+			t.Errorf("プロンプトに %q が無い:\n%s", want, user)
+		}
+	}
+}
+
+func TestInspectTruncatesBody(t *testing.T) {
+	g, fake := newTest(t, config.Guard{MaxBytes: 16}, `{"action":"allow","reason":"ok"}`, nil)
+	body := strings.Repeat("A", 100) + "SECRET"
+	if _, err := g.Inspect(context.Background(), Request{Body: []byte(body)}); err != nil {
+		t.Fatal(err)
+	}
+	_, user := fake.prompt()
+	if strings.Contains(user, "SECRET") {
+		t.Error("上限を超えた本文がモデルに渡っている")
+	}
+	if !strings.Contains(user, "(本文は先頭のみ)") {
+		t.Error("切り詰めたことがプロンプトに出ていない")
+	}
+}
+
+func TestCheckDenyAsksReviewerAndCachesDecision(t *testing.T) {
+	g, fake := newTest(t, config.Guard{Mode: "ask"}, `{"action":"deny","reason":"メールが漏れる","categories":["pii"]}`, nil)
+	reviews := 0
+	g.SetReviewer(func(_ context.Context, req Request, reason string) error {
+		reviews++
+		if !strings.Contains(reason, "メールが漏れる") || !strings.Contains(reason, "pii") {
+			t.Errorf("理由が承認者に伝わっていない: %q", reason)
+		}
+		if req.URL() != "h/p" {
+			t.Errorf("URL が違う: %q", req.URL())
+		}
+		return nil // 人間が通した
+	})
+	req := Request{Provider: "p", Method: "POST", Host: "h", Path: "/p", Body: []byte("x")}
+	if err := g.Check(context.Background(), req); err != nil {
+		t.Fatalf("承認されたのに止めた: %v", err)
+	}
+	// 同じ内容は判断を覚えていて、モデルも人間ももう呼ばない
+	if err := g.Check(context.Background(), req); err != nil {
+		t.Fatalf("承認済みなのに止めた: %v", err)
+	}
+	if reviews != 1 {
+		t.Errorf("承認コンソールへの確認が %d 回", reviews)
+	}
+	if fake.count() != 1 {
+		t.Errorf("モデルを %d 回呼んだ (判定は覚えるはず)", fake.count())
+	}
+}
+
+func TestCheckReviewerRejects(t *testing.T) {
+	g, _ := newTest(t, config.Guard{Mode: "ask"}, `{"action":"deny","reason":"だめ"}`, nil)
+	g.SetReviewer(func(context.Context, Request, string) error { return errors.New("拒否") })
+	err := g.Check(context.Background(), Request{Body: []byte("x")})
+	if err == nil || !strings.Contains(err.Error(), "承認されなかった") {
+		t.Fatalf("止まらなかった: %v", err)
+	}
+}
+
+func TestCheckModes(t *testing.T) {
+	// deny: 人間に聞かずに止める
+	g, _ := newTest(t, config.Guard{Mode: "deny"}, `{"action":"deny","reason":"だめ"}`, nil)
+	asked := false
+	g.SetReviewer(func(context.Context, Request, string) error { asked = true; return nil })
+	if err := g.Check(context.Background(), Request{Body: []byte("x")}); err == nil {
+		t.Error("deny モードで止まらなかった")
+	}
+	if asked {
+		t.Error("deny モードなのに承認者に聞いた")
+	}
+	// advisory: 通すがモデルは呼ぶ
+	g, fake := newTest(t, config.Guard{Mode: "advisory"}, `{"action":"deny","reason":"だめ"}`, nil)
+	if err := g.Check(context.Background(), Request{Body: []byte("x")}); err != nil {
+		t.Errorf("advisory で止めた: %v", err)
+	}
+	if fake.count() != 1 {
+		t.Error("advisory でモデルを呼んでいない")
+	}
+}
+
+func TestCheckOnError(t *testing.T) {
+	t.Run("ask", func(t *testing.T) {
+		g, _ := newTest(t, config.Guard{OnError: "ask"}, "", errors.New("接続できない"))
+		reviews := 0
+		g.SetReviewer(func(_ context.Context, _ Request, reason string) error {
+			reviews++
+			if !strings.Contains(reason, "点検できなかった") {
+				t.Errorf("理由が違う: %q", reason)
+			}
+			return nil
+		})
+		if err := g.Check(context.Background(), Request{Body: []byte("x")}); err != nil {
+			t.Fatalf("承認されたのに止めた: %v", err)
+		}
+		if reviews != 1 {
+			t.Errorf("確認 %d 回", reviews)
+		}
+	})
+	t.Run("deny", func(t *testing.T) {
+		g, _ := newTest(t, config.Guard{OnError: "deny"}, "", errors.New("接続できない"))
+		if err := g.Check(context.Background(), Request{Body: []byte("x")}); err == nil {
+			t.Error("点検できないのに止まらなかった")
+		}
+	})
+	t.Run("allow", func(t *testing.T) {
+		g, _ := newTest(t, config.Guard{OnError: "allow"}, "", errors.New("接続できない"))
+		if err := g.Check(context.Background(), Request{Body: []byte("x")}); err != nil {
+			t.Errorf("allow なのに止めた: %v", err)
+		}
+	})
+}
+
+func TestCheckAllowDoesNotAsk(t *testing.T) {
+	g, _ := newTest(t, config.Guard{Mode: "ask"}, `{"action":"allow","reason":"ok"}`, nil)
+	g.SetReviewer(func(context.Context, Request, string) error {
+		t.Error("allow なのに承認者に聞いた")
+		return nil
+	})
+	if err := g.Check(context.Background(), Request{Body: []byte("x")}); err != nil {
+		t.Fatalf("allow なのに止めた: %v", err)
+	}
+}
+
+func TestAllowRateLimit(t *testing.T) {
+	g, _ := newTest(t, config.Guard{}, "", nil)
+	for i := 0; i < asksPerMinute; i++ {
+		if !g.allowAsk() {
+			t.Fatalf("%d 回目で制限に引っかかった", i+1)
+		}
+	}
+	if g.allowAsk() {
+		t.Error("上限を超えても確認を許した")
+	}
+}
+
+func TestPeekBodyRestoresRest(t *testing.T) {
+	full := strings.Repeat("a", 100) + "TAIL"
+	r, _ := http.NewRequest(http.MethodPost, "http://x/", strings.NewReader(full))
+	head, truncated, err := PeekBody(r, 100)
+	if err != nil || !truncated || string(head) != strings.Repeat("a", 100) {
+		t.Fatalf("head=%d trunc=%v err=%v", len(head), truncated, err)
+	}
+	rest, _ := io.ReadAll(r.Body)
+	if string(rest) != full {
+		t.Fatalf("本文全体が保たれていない: %q", rest)
+	}
+	// 本文が短いときは truncated=false
+	r2, _ := http.NewRequest(http.MethodPost, "http://x/", strings.NewReader("short"))
+	head, truncated, err = PeekBody(r2, 100)
+	if err != nil || truncated || string(head) != "short" {
+		t.Fatalf("head=%q trunc=%v err=%v", head, truncated, err)
+	}
+}
+
+func TestClipBytesKeepsUTF8(t *testing.T) {
+	s := "日本語"
+	if got := clipBytes(s, 4); got != "日" {
+		t.Errorf("clipBytes = %q", got)
+	}
+	if got := clipBytes(s, 100); got != s {
+		t.Errorf("clipBytes が短い文字列を変えた: %q", got)
+	}
+}
+
+func TestCleanReasonStripsControl(t *testing.T) {
+	if got := cleanReason("a\nb\x00c"); got != "a bc" {
+		t.Errorf("cleanReason = %q", got)
+	}
+	long := strings.Repeat("x", 1000)
+	if got := cleanReason(long); len(got) > 300 {
+		t.Errorf("cleanReason が長すぎる: %d", len(got))
+	}
+}
+
+// 判断の鍵は LLM に見せる先頭 max_bytes だけでなく本文全体を見る (後ろが違う
+// リクエストに人間の判断を流用しない)。
+func TestCacheKeyCoversFullBody(t *testing.T) {
+	g, _ := newTest(t, config.Guard{MaxBytes: 4}, `{"action":"allow","reason":"ok"}`, nil)
+	k1 := g.cacheKey(Request{Body: []byte("AAAAone")})
+	k2 := g.cacheKey(Request{Body: []byte("AAAAtwo")})
+	if k1 == k2 {
+		t.Error("先頭だけ同じ本文の鍵が同じになった")
+	}
+}
+
+// 判断の鍵は各ヘッダの先頭 1024 バイトだけではない。
+func TestCacheKeyCoversFullHeader(t *testing.T) {
+	g, _ := newTest(t, config.Guard{}, `{"action":"allow","reason":"ok"}`, nil)
+	long := strings.Repeat("x", MaxHeaderBytes)
+	k1 := g.cacheKey(Request{Headers: http.Header{"User-Agent": {long + "one"}}})
+	k2 := g.cacheKey(Request{Headers: http.Header{"User-Agent": {long + "two"}}})
+	if k1 == k2 {
+		t.Error("先頭だけ同じヘッダの鍵が同じになった")
+	}
+}
+
+// 塊の境目にまたがる短い秘密も、どれかの塊に丸ごと入って点検される。
+func TestSplitChunksOverlapKeepsSecret(t *testing.T) {
+	g, fake := newTest(t, config.Guard{MaxBytes: 16}, `{"action":"allow","reason":"ok"}`, nil)
+	// 秘密が 16 バイトの境目をまたぐ位置に置く (重なりが無いと分断される)
+	body := strings.Repeat("A", 14) + "SECRET"
+	if _, err := g.Inspect(context.Background(), Request{Body: []byte(body)}); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(fake.allUsers(), "\n")
+	if !strings.Contains(joined, "SECRET") {
+		t.Error("境目にまたがる秘密がどの塊にも丸ごと入っていない")
+	}
+}
+
+// 分割数と、塊ごとに点検していることを確かめる。
+func TestInspectSplitsBodyIntoChunks(t *testing.T) {
+	g, fake := newTest(t, config.Guard{MaxBytes: 8, MaxChunks: 4}, `{"action":"allow","reason":"ok"}`, nil)
+	body := strings.Repeat("A", 100)
+	if _, err := g.Inspect(context.Background(), Request{Body: []byte(body)}); err != nil {
+		t.Fatal(err)
+	}
+	if fake.count() != 4 {
+		t.Fatalf("点検回数 = %d, want 4", fake.count())
+	}
+	if !strings.Contains(fake.firstUser(), "part: 1/4") {
+		t.Errorf("塊の番号がプロンプトに出ていない")
+	}
+}
