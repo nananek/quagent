@@ -36,6 +36,8 @@ type Event struct {
 	Applied int `json:"applied,omitempty"`
 	// Denied は許可外として名前解決を拒否したドメイン。
 	Denied string `json:"denied,omitempty"`
+	// Blocked は透明プロキシが許可外の名前 (SNI/Host) で止めた Web 接続。
+	Blocked string `json:"blocked,omitempty"`
 }
 
 // egress は許可の状態と nft の allow set を同期させる。
@@ -59,6 +61,11 @@ type egress struct {
 	logCount   int
 	logDropped int
 	seenFull   bool
+
+	// Web 接続 (SNI/Host) を止めたログ・通知の量を抑える
+	webWindow  time.Time
+	webCount   int
+	webDropped int
 }
 
 const (
@@ -139,6 +146,28 @@ func (e *egress) denied(name string) {
 	e.mu.Unlock()
 	log.Printf("dns: 許可外 %s", name)
 	e.events.send(Event{Denied: name})
+}
+
+// webBlocked は透明プロキシが許可外の名前 (SNI/Host) で止めた Web 接続を記録・通知する。
+// DNS の拒否と同じく量を抑える (ランダムな名前の連打でログを膨らませない)。
+func (e *egress) webBlocked(reason string) {
+	e.mu.Lock()
+	now := time.Now()
+	if now.Sub(e.webWindow) >= time.Minute {
+		if e.webDropped > 0 {
+			log.Printf("web: 許可外 ほか %d 件 (多すぎるので省略)", e.webDropped)
+		}
+		e.webWindow, e.webCount, e.webDropped = now, 0, 0
+	}
+	e.webCount++
+	if e.webCount > maxDeniedLogs {
+		e.webDropped++
+		e.mu.Unlock()
+		return
+	}
+	e.mu.Unlock()
+	log.Printf("web: 許可外 %s", reason)
+	e.events.send(Event{Blocked: reason})
 }
 
 // onAnswer は DNS 応答を guest に返す前に呼ばれ、IP を set に反映し終えてから戻る。

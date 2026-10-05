@@ -94,10 +94,14 @@ var egressPorts = []int{80, 443}
 // egressRules は子 netns に張る nftables のルールを返す。qemu を起動する前に
 // 張るので、guest は最初から閉じた網で起きる。出てよいのは loopback (自前 DNS) と、
 // 許可ドメインの応答で見た IP への TCP 80/443 だけ (確立済みの接続は切らない)。
+// 80/443 は nat で透明プロキシへ回し、接続先が言ってきた名前 (SNI/Host) が許可名と
+// 一致するかを確かめる。プロキシ自身の外向き接続は mark で redirect から除く。
 func egressRules() string {
 	ports := make([]string, 0, len(egressPorts))
+	redirects := make([]string, 0, len(egressPorts))
 	for _, p := range egressPorts {
 		ports = append(ports, strconv.Itoa(p))
+		redirects = append(redirects, fmt.Sprintf("    ip daddr @allow4 tcp dport %d redirect to :%d", p, proxyListenPort(p)))
 	}
 	return fmt.Sprintf(`table inet quagent {
   set allow4 { type ipv4_addr; }
@@ -109,8 +113,21 @@ func egressRules() string {
     meta l4proto tcp counter reject with tcp reset
     counter reject
   }
+  chain dstnat {
+    type nat hook output priority -100; policy accept;
+    meta mark %d return
+%s
+  }
 }
-`, strings.Join(ports, ", "))
+`, strings.Join(ports, ", "), proxyMark, strings.Join(redirects, "\n"))
+}
+
+// proxyListenPort は宛先ポートに対応する透明プロキシの待ち受けポートを返す。
+func proxyListenPort(dst int) int {
+	if dst == 443 {
+		return proxyTLSPort
+	}
+	return proxyHTTPPort
 }
 
 func (c *child) run() error {
@@ -155,6 +172,20 @@ func (c *child) run() error {
 	dns := &dnsServer{sem: make(chan struct{}, 64), upstream: c.spec.DNS, allowed: eg.allowed, onAnswer: eg.onAnswer, onDenied: eg.denied}
 	go dns.serveUDP(pc)
 	go dns.serveTCP(tl)
+
+	// 3.5 透明プロキシ: 許可した IP への Web 接続の SNI/Host を確かめる。nft の
+	// redirect 先が無いと接続が弾かれるので、qemu を起動する前に待ち受ける。
+	web := newWebProxy(c.holder.Process.Pid, eg.allowed, eg.webBlocked)
+	for _, lp := range []struct {
+		port int
+		tls  bool
+	}{{proxyTLSPort, true}, {proxyHTTPPort, false}} {
+		ln, err := tcpListenerInNetns(c.holder.Process.Pid, fmt.Sprintf("127.0.0.1:%d", lp.port))
+		if err != nil {
+			return fmt.Errorf("Web プロキシの待ち受けに失敗: %w", err)
+		}
+		go web.serve(ln, lp.tls)
+	}
 
 	// 4. uplink (slirp4netns)。API socket は hostfwd の追加に使う。
 	sock := c.spec.file("slirp.sock")
