@@ -267,8 +267,13 @@ provider ID は opencode の provider ID と揃える。秘密の取り出し方
 ### 用意する (llama.cpp + 6GB 級)
 
 ```sh
-# llama.cpp の llama-server を OpenAI 互換で立てる。RTX 3050 6GB なら 3B 級 (Q4) が収まる
+# llama.cpp の llama-server を OpenAI 互換で立てる。RTX 3050 6GB なら 3B〜4B 級 (Q4) が収まる
 llama-server -m qwen2.5-3b-instruct-q4_k_m.gguf --port 8080 --alias qwen2.5-3b-instruct --jinja
+
+# 思考 (reasoning) するモデル (Qwen3.5 など) を使うときは思考を切ってから点検に使う。
+# 切らないと判定が reasoning_content 側へ出て content が空になり、点検が毎回失敗して
+# on_error の扱いになる (既定の ask では毎回承認コンソールに出る)。
+llama-server -m Qwen3.5-4B-Q4_K_M.gguf --port 8080 --alias qwen3.5-4b --jinja --reasoning off
 ```
 
 `~/.config/quagent/config.json`:
@@ -303,7 +308,8 @@ Ollama を使うなら `"backend": "ollama"` にする (既定 endpoint は `htt
 | `on_error` | 点検できなかったとき。`ask` (既定) / `deny` / `allow` |
 
 `response_format` の対応はローカル LLM のビルドによって差がある。対応していなければ
-`json_object`、それも駄目なら付けずに再試行し、通った形を覚える。
+`json_object`、それも駄目なら付けずに再試行し、通った形を覚える。llama.cpp は
+`json_schema` に対応している (文法制約で JSON を強制する) ので、そのまま使える。
 
 疑わしいリクエストは承認コンソールに理由・行き先・ヘッダ・本文の先頭が出て、`y` で通す /
 `n` で止める。時間切れ (既定 10 分) と `quit` は止める側。同じ内容は判断を覚えていて二度は
