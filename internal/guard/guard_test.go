@@ -493,3 +493,52 @@ func TestInspectReusesInspectedChunks(t *testing.T) {
 		t.Errorf("伸びた本文で %d 塊を点検した (新しい 1 塊だけのはず)", got)
 	}
 }
+
+// Content-Type が JSON の本文は、jq のように字下げしてモデルに見せる。
+func TestInspectPrettyPrintsJSONBody(t *testing.T) {
+	g, fake := newTest(t, config.Guard{}, `{"action":"allow","reason":"ok"}`, nil)
+	req := Request{
+		Provider: "p", Method: "POST", Host: "api.example.com", Path: "/v1/chat",
+		Headers: http.Header{"Content-Type": {"application/json"}},
+		Body:    []byte(`{"model":"x","messages":[{"role":"user","content":"hi"}]}`),
+	}
+	if _, err := g.Inspect(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	_, user := fake.prompt()
+	if !strings.Contains(user, "\n  \"model\": \"x\"") || !strings.Contains(user, "\n      \"role\": \"user\"") {
+		t.Errorf("JSON が字下げされていない:\n%s", user)
+	}
+	if strings.Contains(user, `{"model":"x"`) {
+		t.Errorf("minify された本文がそのまま渡っている:\n%s", user)
+	}
+}
+
+// JSON でない本文 (先頭が { でも JSON として読めない) はそのまま渡す。
+func TestInspectLeavesNonJSONBody(t *testing.T) {
+	g, fake := newTest(t, config.Guard{}, `{"action":"allow","reason":"ok"}`, nil)
+	body := []byte("not json { but braces")
+	if _, err := g.Inspect(context.Background(), Request{Body: body}); err != nil {
+		t.Fatal(err)
+	}
+	_, user := fake.prompt()
+	if !strings.Contains(user, string(body)) {
+		t.Errorf("本文が変わった:\n%s", user)
+	}
+}
+
+// 字下げした形で指摘された該当箇所 (コロンの後の空白を含む) でも、minify された
+// 本文の再送を止められる (照合は元の本文と字下げした本文の両方で行う)。
+func TestDeniedEvidenceMatchesPresentedJSON(t *testing.T) {
+	g, _ := newTest(t, config.Guard{Mode: "deny"},
+		`{"action":"deny","reason":"漏れる","evidence":"\"email\": \"me@example.com\""}`, nil)
+	req := Request{Provider: "p", Method: "POST", Host: "h", Path: "/p",
+		Headers: http.Header{"Content-Type": {"application/json"}},
+		Body:    []byte(`{"email":"me@example.com"}`)}
+	if err := g.Check(context.Background(), req); err == nil {
+		t.Fatal("deny モードで止まらなかった")
+	}
+	if err := g.Check(context.Background(), req); err == nil {
+		t.Fatal("字下げ形で指摘された該当箇所の再送を止められていない")
+	}
+}

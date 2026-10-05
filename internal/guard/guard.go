@@ -380,8 +380,10 @@ func (g *Guard) inspect(ctx context.Context, key string, req Request) (Verdict, 
 	}
 	// 本文を maxBytes ごとの塊に分けて点検する。塊はオーバーラップさせてあるので、
 	// 境目にまたがる秘密 (chunkOverlap 以下の長さ) もどれかの塊に丸ごと入る。
-	// 1 つでも疑わしければ止める側にする。
-	chunks, more := splitChunks(req.Body, g.s.maxBytes, g.s.maxChunks)
+	// 1 つでも疑わしければ止める側にする。点検に渡す前に JSON は字下げしておく
+	// (minify されたままでは小さなモデルにどこに何があるか分かりにくい)。
+	body := presentBody(req)
+	chunks, more := splitChunks(body, g.s.maxBytes, g.s.maxChunks)
 	ctx, cancel := context.WithTimeout(ctx, g.inspectTimeout(len(chunks)))
 	defer cancel()
 	select {
@@ -512,6 +514,8 @@ func (g *Guard) onError(ctx context.Context, key string, req Request, cause erro
 		if !g.allowAsk() {
 			return fmt.Errorf("内容を点検できない (確認も多すぎる) ので止めた: %w", cause)
 		}
+		// 承認者にも読みやすい形 (JSON なら字下げ) で見せる。
+		req.Body = presentBody(req)
 		if err := g.reviewWithSem(ctx, req, reason); err != nil {
 			return fmt.Errorf("内容を点検できず、承認もされなかったので止めた: %w", cause)
 		}
@@ -729,8 +733,10 @@ func (g *Guard) deniedIn(req Request) (reason string, ok bool) {
 	// 走査は長くなりうるので、ロックの外でやる (該当箇所は短いのでコピーは安い)。
 	list := append([]deniedEvidence(nil), g.denied...)
 	g.mu.Unlock()
+	// 点検した本文は JSON なら字下げしてあるので、その形でも照合する。
+	presented := presentBody(req)
 	for _, d := range list {
-		if containsRequest(req, d.text) {
+		if containsRequest(req, presented, d.text) {
 			r := d.reason
 			if r == "" {
 				r = "機密情報の持ち出しが疑われる内容"
@@ -742,8 +748,9 @@ func (g *Guard) deniedIn(req Request) (reason string, ok bool) {
 }
 
 // containsRequest は req の表示・点検の対象 (URL・ヘッダ・点検した本文) に s が
-// 含まれるかを返す。以前に拒否した該当箇所の再送を止めるために使う。
-func containsRequest(req Request, s string) bool {
+// 含まれるかを返す。presented は点検に渡した本文 (JSON なら字下げしたもの)。
+// 以前に拒否した該当箇所の再送を止めるために使う。
+func containsRequest(req Request, presented []byte, s string) bool {
 	if s == "" {
 		return false
 	}
@@ -757,7 +764,10 @@ func containsRequest(req Request, s string) bool {
 			}
 		}
 	}
-	return bytes.Contains(req.Body, []byte(s))
+	if bytes.Contains(req.Body, []byte(s)) {
+		return true
+	}
+	return !bytes.Equal(presented, req.Body) && bytes.Contains(presented, []byte(s))
 }
 
 // RequestFrom は *http.Request から点検用の写しを作る (本文は呼び出し側が読んだ抜粋)。
@@ -806,6 +816,32 @@ func PeekBody(r *http.Request, n int) (body []byte, truncated bool, err error) {
 	default:
 		return nil, false, err
 	}
+}
+
+// presentBody はローカル LLM と承認者に見せる本文を返す。Content-Type が JSON の
+// とき、または本文が JSON のオブジェクト/配列として読めるときは、jq のように
+// 字下げして値を追いやすくする。minify された JSON を 1 行のまま渡すと、小さな
+// モデルではどこに何があるか分かりにくい。json.Indent は文字列の中身 (エスケープ)
+// を変えないので、LLM が引用した該当箇所は元の本文にもそのまま現れる。
+func presentBody(req Request) []byte {
+	if len(req.Body) == 0 || !jsonBody(req) {
+		return req.Body
+	}
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, req.Body, "", "  "); err != nil {
+		return req.Body // JSON として読めない (途中で切れているなど)
+	}
+	return buf.Bytes()
+}
+
+// jsonBody は本文を JSON として字下げして見せるべきかを返す。Content-Type を
+// 優先し、無ければ本文の形 (先頭が { か [) で判断する (CLI の確認など)。
+func jsonBody(req Request) bool {
+	if strings.Contains(strings.ToLower(req.Headers.Get("Content-Type")), "json") {
+		return true
+	}
+	b := bytes.TrimLeft(req.Body, " \t\r\n")
+	return len(b) > 0 && (b[0] == '{' || b[0] == '[')
 }
 
 // buildPrompt は行き先・ヘッダ・本文の塊から system / user プロンプトを組み立てる。
