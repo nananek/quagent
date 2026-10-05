@@ -66,7 +66,11 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 
 // writeFile は VM の path (~ 始まり可) に data を書く。
 func (g vmGuest) writeFile(path string, data []byte) error {
-	dir := path[:strings.LastIndex(path, "/")]
+	i := strings.LastIndex(path, "/")
+	if i < 0 {
+		return fmt.Errorf("書き込み先が不正: %q", path)
+	}
+	dir := path[:i]
 	if out, err := g.sh(fmt.Sprintf("mkdir -p %s && cat > %s", dir, path), bytes.NewReader(data)); err != nil {
 		return fmt.Errorf("VM への書き込みに失敗 (%s): %v: %s", path, err, out)
 	}
