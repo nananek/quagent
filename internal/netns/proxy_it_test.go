@@ -62,6 +62,14 @@ func TestProxyIntegration(t *testing.T) {
 		}
 	}
 	must("ip", "addr", "add", "203.0.113.5/32", "dev", "lo")
+	// 実際の uplink (tap0) のように、宛先が loopback 以外のインターフェース経由に
+	// なる場合も確かめる。nat の redirect 後は宛先が 127.0.0.1 になるが、oif は
+	// uplink のままなので、filter が書き換え後の宛先を通していないとここで弾かれる。
+	must("ip", "link", "add", "veth0", "type", "veth", "peer", "name", "veth1")
+	must("ip", "addr", "add", "10.199.199.1/24", "dev", "veth0")
+	must("ip", "link", "set", "veth0", "up")
+	must("ip", "link", "set", "veth1", "up")
+	must("ip", "route", "add", "198.51.100.9/32", "dev", "veth0")
 
 	nft := func(script string) error {
 		cmd := exec.Command("nsenter", "-t", ns, "-n", "--", "nft", "-f", "-")
@@ -75,8 +83,9 @@ func TestProxyIntegration(t *testing.T) {
 	if err := nft(egressRules()); err != nil {
 		t.Fatal(err)
 	}
-	eg := newEgress(nft, &eventWriter{enc: json.NewEncoder(io.Discard)}, []Grant{{Pattern: "allowed.example"}})
+	eg := newEgress(nft, &eventWriter{enc: json.NewEncoder(io.Discard)}, []Grant{{Pattern: "allowed.example"}, {Pattern: "dummy.example"}})
 	eg.onAnswer("allowed.example", []net.IP{net.ParseIP("203.0.113.5")})
+	eg.onAnswer("dummy.example", []net.IP{net.ParseIP("198.51.100.9")})
 
 	cert := selfSignedCert(t, "allowed.example")
 	upLn, err := tcpListenerInNetns(pid, "203.0.113.5:443")
@@ -156,6 +165,19 @@ func TestProxyIntegration(t *testing.T) {
 	if got, err := httpRequestErr(t, pid, "evil.example"); err == nil {
 		t.Fatalf("許可外の Host が通った: %q", got)
 	}
+	// loopback 以外の uplink 経由でも redirect がプロキシに届く (接続が RST されない)。
+	// 届かなければ filter が書き換え後の宛先を弾いている。
+	nlc, err := dialInNetns(pid, "tcp4", "198.51.100.9:443", 0)
+	if err != nil {
+		t.Fatalf("loopback でない uplink 経由の Web 接続がプロキシに届かない: %v", err)
+	}
+	_ = nlc.Close()
+	// HTTP (80) も同じ
+	nlc80, err := dialInNetns(pid, "tcp4", "198.51.100.9:80", 0)
+	if err != nil {
+		t.Fatalf("loopback でない uplink 経由の HTTP 接続がプロキシに届かない: %v", err)
+	}
+	_ = nlc80.Close()
 }
 
 func httpConn(pid int) (net.Conn, error) {

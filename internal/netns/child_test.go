@@ -45,4 +45,10 @@ func TestEgressRulesRedirectWebPorts(t *testing.T) {
 	if !strings.Contains(rules, "meta mark 1 return") {
 		t.Fatalf("プロキシ自身の接続を redirect から除外していない:\n%s", rules)
 	}
+	// redirect 後は宛先が loopback のプロキシポートになる。uplink が lo でなくても
+	// プロキシへ届くよう、書き換え後の宛先を filter で通すこと (これが無いと
+	// 許可した Web 接続がプロキシに届く前に reject される)。
+	if !strings.Contains(rules, "ip daddr 127.0.0.1 tcp dport { 8080, 8443 } accept") {
+		t.Fatalf("redirect 後の宛先 (loopback のプロキシポート) が通らない:\n%s", rules)
+	}
 }
