@@ -1,6 +1,7 @@
 package console
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"path/filepath"
@@ -101,5 +102,77 @@ func TestAskPR(t *testing.T) {
 	}
 	if err := wait(errCh); err == nil {
 		t.Fatal("拒否したのに nil が返った")
+	}
+}
+
+// AskGuard は内容ガードの確認を承認コンソールに流し、y/n で決着する。
+func TestAskGuard(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "console.sock")
+	m, err := access.NewManager(noApply{}, filepath.Join(t.TempDir(), "always.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(m, sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+
+	c, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	enc, dec := json.NewEncoder(c), json.NewDecoder(c)
+	if err := enc.Encode(Msg{Type: "ui"}); err != nil {
+		t.Fatal(err)
+	}
+
+	lastID := 0
+	ask := func(info GuardInfo) (chan error, Msg) {
+		errCh := make(chan error, 1)
+		go func() { errCh <- s.AskGuard(context.Background(), info) }()
+		for {
+			_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+			var msg Msg
+			if err := dec.Decode(&msg); err != nil {
+				t.Fatal(err)
+			}
+			if msg.Type == "guardrequest" && msg.ID > lastID {
+				lastID = msg.ID
+				return errCh, msg
+			}
+		}
+	}
+	wait := func(errCh chan error) error {
+		select {
+		case err := <-errCh:
+			return err
+		case <-time.After(3 * time.Second):
+			t.Fatal("AskGuard が返らない")
+			return nil
+		}
+	}
+
+	info := GuardInfo{Provider: "p", Method: "POST", URL: "h/p", Reason: "メールが漏れる",
+		Headers: []string{"User-Agent: leak"}, Body: "body"}
+	errCh, req := ask(info)
+	if req.Provider != "p" || req.Method != "POST" || req.URL != "h/p" || req.Reason != "メールが漏れる" ||
+		len(req.Headers) != 1 || req.Body != "body" {
+		t.Fatalf("承認に渡す内容が違う: %+v", req)
+	}
+	if err := enc.Encode(Msg{Type: "guarddecide", ID: req.ID, Status: access.Approved}); err != nil {
+		t.Fatal(err)
+	}
+	if err := wait(errCh); err != nil {
+		t.Fatalf("通したのに %v", err)
+	}
+
+	errCh, req = ask(GuardInfo{Provider: "p", Method: "POST", URL: "h/p", Reason: "x"})
+	if err := enc.Encode(Msg{Type: "guarddecide", ID: req.ID, Status: access.Denied}); err != nil {
+		t.Fatal(err)
+	}
+	if err := wait(errCh); err == nil {
+		t.Fatal("止めたのに nil が返った")
 	}
 }

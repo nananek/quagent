@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/nananek/quagent/internal/config"
+	"github.com/nananek/quagent/internal/guard"
 )
 
 // Prefix は窓口上のルートの前置き。guest からは <窓口>/llm/<id>/... で使う。
@@ -70,7 +71,8 @@ func allowed(rules []rule, method, path string) bool {
 // Register は providers の転送ルートを mux に登録し、登録した provider ID を返す。
 // 秘密は起動時に一度だけ取り出す (secret_command の対話を run 開始時に済ませるため)。
 // 許可していない操作は upstream へ送らず 403 を返し、denied に知らせる (nil 可)。
-func Register(mux *http.ServeMux, providers map[string]config.Provider, logger *log.Logger, denied func(string)) ([]string, error) {
+// g が nil でなければ、転送する前にローカル LLM でリクエストの中身を点検する。
+func Register(mux *http.ServeMux, providers map[string]config.Provider, logger *log.Logger, denied func(string), g *guard.Guard) ([]string, error) {
 	var ids []string
 	for id, p := range providers {
 		up, err := url.Parse(p.Upstream)
@@ -90,15 +92,15 @@ func Register(mux *http.ServeMux, providers map[string]config.Provider, logger *
 			return nil, fmt.Errorf("provider %s: 秘密を取り出せない: %w", id, err)
 		}
 		h := handler(id, up, p.HeaderName(), p.HeaderPrefix()+secret, logger)
-		mux.Handle(Prefix+id+"/", http.MaxBytesHandler(guard(id, rules, h, logger, denied), 32<<20))
+		mux.Handle(Prefix+id+"/", http.MaxBytesHandler(gate(id, rules, h, logger, denied, g), 32<<20))
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
 	return ids, nil
 }
 
-// guard は rules に無い操作を upstream へ送らずに断る。
-func guard(id string, rules []rule, next http.Handler, logger *log.Logger, denied func(string)) http.Handler {
+// gate は rules に無い操作を upstream へ送らずに断り、g があれば中身を点検する。
+func gate(id string, rules []rule, next http.Handler, logger *log.Logger, denied func(string), g *guard.Guard) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rest := strings.TrimPrefix(r.URL.Path, Prefix+id)
 		if !allowed(rules, r.Method, rest) {
@@ -108,6 +110,26 @@ func guard(id string, rules []rule, next http.Handler, logger *log.Logger, denie
 			}
 			http.Error(w, fmt.Sprintf("quagent: %s %s is not allowed by the LLM proxy (only inference endpoints are forwarded)", r.Method, rest), http.StatusForbidden)
 			return
+		}
+		if g != nil {
+			body, truncated, err := guard.PeekBody(r, guard.MaxInspect)
+			if err != nil {
+				logger.Printf("llm %s 本文を読めない (%v) -> 403", id, err)
+				if denied != nil {
+					denied(fmt.Sprintf("%s %s %q: 本文を読めない: %v", id, r.Method, rest, err))
+				}
+				http.Error(w, "quagent: the request body could not be inspected, so it was not forwarded", http.StatusForbidden)
+				return
+			}
+			req := guard.RequestFrom(r, id, body, truncated)
+			if err := g.Check(r.Context(), req); err != nil {
+				logger.Printf("llm %s 内容ガードが止めた %s %q: %v", id, r.Method, rest, err)
+				if denied != nil {
+					denied(fmt.Sprintf("%s %s %q: %v", id, r.Method, rest, err))
+				}
+				http.Error(w, "quagent: blocked by the request content guard: "+err.Error(), http.StatusForbidden)
+				return
+			}
 		}
 		next.ServeHTTP(w, r)
 	})

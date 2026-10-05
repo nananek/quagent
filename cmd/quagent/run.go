@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log"
 	"math/rand/v2"
@@ -18,6 +19,7 @@ import (
 	"github.com/nananek/quagent/internal/authproxy"
 	"github.com/nananek/quagent/internal/config"
 	"github.com/nananek/quagent/internal/console"
+	"github.com/nananek/quagent/internal/guard"
 	"github.com/nananek/quagent/internal/guest"
 	"github.com/nananek/quagent/internal/hostsvc"
 	"github.com/nananek/quagent/internal/image"
@@ -137,12 +139,21 @@ func run(o runOpts) error {
 	}
 	// 許可していない LLM API の操作は、承認コンソールができてからそこに出す
 	llmDenied := make(chan string, 16)
+	// 内容ガード (ローカル LLM)。承認コンソールはこの後で作るので、Reviewer は後から差す。
+	var contentGuard *guard.Guard
+	if cfg.Guard.Enabled {
+		contentGuard, err = guard.New(cfg.Guard, logger)
+		if err != nil {
+			return fmt.Errorf("内容ガードを作れない: %w", err)
+		}
+		logf("内容ガード: %s で LLM プロキシのリクエストを点検する", contentGuard)
+	}
 	providers, err := authproxy.Register(svc.Mux, cfg.Providers, logger, func(s string) {
 		select {
 		case llmDenied <- s:
 		default: // 溢れた分は host.log にだけ残る
 		}
-	})
+	}, contentGuard)
 	if err != nil {
 		return err
 	}
@@ -243,6 +254,21 @@ runcmd:
 	con.Clipboard, err = clipboardSink(cfg.Clipboard)
 	if err != nil {
 		return err
+	}
+	if contentGuard != nil {
+		// 疑わしいリクエストは承認コンソールで人間が通すか止めるか決める
+		contentGuard.SetReviewer(func(ctx context.Context, req guard.Request, reason string) error {
+			return con.AskGuard(ctx, console.GuardInfo{
+				Provider: req.Provider,
+				Method:   req.Method,
+				URL:      req.URL(),
+				Reason:   reason,
+				Headers:  req.HeaderLines(),
+				Body:     string(req.Body),
+			})
+		})
+		// 最初の本番リクエストがモデルの読み込み待ちで時間切れにならないよう先に載せる
+		go contentGuard.Warm(context.Background())
 	}
 	go relayDenied(l, con)
 	go func() {

@@ -66,6 +66,7 @@ TUI を使わずに直接操作することもできる:
 quagent image recipes          # 使えるレシピ (OS) の一覧
 quagent image build [--refresh] arch   # ベースイメージを焼く (--refresh でクラウドイメージも取り直す)
 quagent image ls / rm IMAGE    # 焼いたイメージの一覧・削除
+quagent guard check "本文"      # ローカル LLM による内容点検を 1 件試す (下記)
 quagent run --image arch       # VM を起動 (--ssh: 人が ssh で入れる、--mount-tmp: .tmp を受け渡す)
 ```
 
@@ -147,6 +148,8 @@ VM の中のエージェントが host の資源や承認者を使い潰せな�
 - 窓口 (LLM プロキシ・MCP) は run ごとのトークンが要る。窓口は host の vsock で待ち受け、
   この run の VM 以外からの接続は切る。同時接続は 64 本まで。接続ごとに host で
   プロセスを起こさない
+- 内容ガード: 承認コンソールへの確認は同時に 1 件、1 分に 12 件まで (溢れは拒否)。
+  点検に渡す本文は先頭 max_bytes まで。判定と人間の判断は内容ごとに覚える (10 分、512 件)
 
 残っているもの: VM のディスク (overlay、最大 40G) には VM が書き込めるので、host の
 ディスクを使える。LLM API の利用量 (課金) は制限していない。
@@ -246,6 +249,79 @@ provider ID は opencode の provider ID と揃える。秘密の取り出し方
 `/v1` 付きも)。ファイルやバッチなどほかの API は 403 で断り、承認コンソールに出す。
 足りなければ provider ごとに `"allow": ["POST /messages", "GET /models/*"]` のように
 指定する (upstream からの相対パス。末尾の `*` は前方一致。指定すると既定は使わない)。
+
+## 内容ガード (ローカル LLM)
+
+接続先の許可制は「どのドメインへ出てよいか」しか見ないので、許可したドメインへ秘密や
+個人情報を持ち出す要求は通ってしまう。たとえば User-Agent にメールアドレスを紛れ込ませれば、
+許可済みの行き先へそのまま出てしまう。そこで任意で、LLM 認証プロキシを通るリクエストの
+中身を手元のローカル LLM に点検させ、疑わしければその理由と中身を承認コンソールに出し、
+人間が通すか止めるかを決められるようにする。
+
+点検するのは host が平文で見られるリクエスト (認証プロキシ) だけ。行き先・メソッド・
+ヘッダ (User-Agent など)・本文の先頭をローカル LLM に渡し、「外部へ持ち出そうとしていないか」
+を JSON で判定させる。疑わしいとき・判定できないときは、既定で止まる側 (承認コンソールで
+確認、時間切れなら拒否) に倒れる。ローカル LLM は間違えるので、許可制や承認コンソールを
+置き換えるものではなく、追加の一枚として使う。
+
+### 用意する (llama.cpp + 6GB 級)
+
+```sh
+# llama.cpp の llama-server を OpenAI 互換で立てる。RTX 3050 6GB なら 3B 級 (Q4) が収まる
+llama-server -m qwen2.5-3b-instruct-q4_k_m.gguf --port 8080 --alias qwen2.5-3b-instruct --jinja
+```
+
+`~/.config/quagent/config.json`:
+
+```json
+"guard": {
+  "enabled": true,
+  "backend": "openai",
+  "endpoint": "http://127.0.0.1:8080",
+  "model": "qwen2.5-3b-instruct",
+  "timeout_seconds": 30,
+  "max_bytes": 8192,
+  "concurrency": 1,
+  "mode": "ask",
+  "on_error": "ask"
+}
+```
+
+Ollama を使うなら `"backend": "ollama"` にする (既定 endpoint は `http://127.0.0.1:11434`、
+モデルは `qwen2.5:3b` など)。
+
+| フィールド | 意味 |
+| --- | --- |
+| `enabled` | 点検するか (既定 false) |
+| `backend` | `openai` (既定。llama.cpp など OpenAI 互換) か `ollama` |
+| `endpoint` | ローカル LLM の URL。既定 `http://127.0.0.1:8080` (llama.cpp) |
+| `model` | 使うモデル。既定 `qwen2.5-3b-instruct` (llama.cpp は起動時の `--alias` と合わせる) |
+| `timeout_seconds` | 1 リクエストの点検の上限。既定 30 |
+| `max_bytes` | LLM に見せる本文の先頭バイト数。既定 8192、上限 32768 |
+| `concurrency` | 同時に点検する件数。GPU 1 枚なら 1 (既定) |
+| `mode` | 疑わしいとき。`ask` (既定。承認コンソールが決める) / `deny` (確認せず止める) / `advisory` (ログに残して通す) |
+| `on_error` | 点検できなかったとき。`ask` (既定) / `deny` / `allow` |
+
+`response_format` の対応はローカル LLM のビルドによって差がある。対応していなければ
+`json_object`、それも駄目なら付けずに再試行し、通った形を覚える。
+
+疑わしいリクエストは承認コンソールに理由・行き先・ヘッダ・本文の先頭が出て、`y` で通す /
+`n` で止める。時間切れ (既定 10 分) と `quit` は止める側。同じ内容は判断を覚えていて二度は
+聞かない。確認は 1 分に 12 件までで、溢れた分は止める。
+
+`quagent guard check "本文"` で、設定したローカル LLM がどう判定するかを試せる (標準入力
+からも読む)。
+
+### 効かないところ
+
+- 外向きの HTTPS をそのまま見ることはできない。TLS を終端しないので、認証プロキシ以外の
+  通信 (許可したドメインへの直接の fetch など) は点検の外にある。ここで見えるのは
+  エージェントが LLM API へ送る平文のリクエストだけ。
+- 本文は先頭 `max_bytes` しか見ない。後ろに隠した持ち出しは見逃しうる。
+- ローカル LLM の判定は当てにならないことがある。誤って通すことも、誤って止めることも
+  ある。止められた場合は承認コンソールから通せる。
+- すべての LLM 呼び出しの前にローカル LLM が 1 回走るので、その分遅く、GPU を使う。
+  最初の 1 回はモデルの読み込みで遅い (起動時に先に読み込む)。
 
 ## PR の作成と署名
 

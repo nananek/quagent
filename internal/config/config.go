@@ -26,6 +26,35 @@ type Config struct {
 	PR PR `json:"pr"`
 	// Clipboard は VM が OSC 52 で書き込もうとした中身 (承認したもの) の入れ方。
 	Clipboard Clipboard `json:"clipboard"`
+	// Guard はローカル LLM による HTTP リクエストの内容点検の設定。
+	Guard Guard `json:"guard"`
+}
+
+// Guard はローカル LLM による HTTP リクエストの内容点検の設定。ネットワークの
+// 許可制だけでは、許可したドメインへ秘密や個人情報を持ち出す要求を見抜けないので、
+// LLM 認証プロキシを通るリクエストを近くのローカル LLM に点検させる。
+type Guard struct {
+	// Enabled が true のときだけ点検する (既定 false)。
+	Enabled bool `json:"enabled"`
+	// Backend は "openai" (既定。llama.cpp の llama-server など OpenAI 互換) か
+	// "ollama"。
+	Backend string `json:"backend,omitempty"`
+	// Endpoint はローカル LLM の URL。既定 "http://127.0.0.1:8080" (llama.cpp)。
+	Endpoint string `json:"endpoint,omitempty"`
+	// Model は使うモデル。既定 "qwen2.5-3b-instruct" (6GB の VRAM 向け。
+	// llama.cpp は起動時の --alias と合わせる)。
+	Model string `json:"model,omitempty"`
+	// TimeoutSeconds は 1 リクエストの点検の上限。既定 30。
+	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+	// MaxBytes は LLM に見せる本文の先頭バイト数。既定 8192、上限 32768。
+	MaxBytes int `json:"max_bytes,omitempty"`
+	// Concurrency は同時に点検する件数。GPU 1 枚なら 1 (既定)。
+	Concurrency int `json:"concurrency,omitempty"`
+	// Mode は疑わしいときの扱い。"ask" (既定。承認コンソールが通すか止めるか決める)、
+	// "deny" (確認せず止める)、"advisory" (ログに残して通す) のどれか。
+	Mode string `json:"mode,omitempty"`
+	// OnError は点検できなかったときの扱い。"ask" (既定)、"deny"、"allow" のどれか。
+	OnError string `json:"on_error,omitempty"`
 }
 
 // Clipboard はクリップボードへの入れ方。

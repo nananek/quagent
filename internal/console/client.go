@@ -136,7 +136,7 @@ func (u *clientUI) onMsg(m Msg) {
 		if len(u.queue) > 0 {
 			fmt.Print(u.prompt())
 		}
-	case "request", "clip", "prrequest":
+	case "request", "clip", "prrequest", "guardrequest":
 		for _, q := range u.queue {
 			if q.Type == m.Type && q.ID == m.ID {
 				return
@@ -148,13 +148,15 @@ func (u *clientUI) onMsg(m Msg) {
 		} else {
 			fmt.Println(dim + "(確認待ちがもう 1 件)" + reset)
 		}
-	case "settled", "clipsettled", "prsettled":
+	case "settled", "clipsettled", "prsettled", "guardsettled":
 		want := "request"
 		switch m.Type {
 		case "clipsettled":
 			want = "clip"
 		case "prsettled":
 			want = "prrequest"
+		case "guardsettled":
+			want = "guardrequest"
 		}
 		for i, q := range u.queue {
 			if q.Type != want || q.ID != m.ID {
@@ -171,6 +173,15 @@ func (u *clientUI) onMsg(m Msg) {
 					fmt.Printf("PR #%d: 時間切れ (push しなかった)\n", m.ID)
 				default:
 					fmt.Printf("PR #%d: 拒否 (push しなかった)\n", m.ID)
+				}
+			case want == "guardrequest":
+				switch m.Status {
+				case access.Approved:
+					fmt.Printf("内容ガード #%d: 通した\n", m.ID)
+				case access.TimedOut:
+					fmt.Printf("内容ガード #%d: 時間切れ (止めた)\n", m.ID)
+				default:
+					fmt.Printf("内容ガード #%d: 止めた\n", m.ID)
 				}
 			default:
 				text := statusText[m.Status]
@@ -210,6 +221,23 @@ func (u *clientUI) show() {
 		fmt.Print(u.prompt())
 		u.focus()
 		return
+	case "guardrequest":
+		fmt.Printf("\n"+bold+cyan+"━━ 内容ガードの確認 #%d ━━"+reset+"\n", r.ID)
+		fmt.Printf(bold+"理由:"+reset+" %s\n", Sanitize(r.Reason))
+		fmt.Printf(bold+"リクエスト:"+reset+" %s %s (%s)\n", Sanitize(r.Method), Sanitize(r.URL), Sanitize(r.Provider))
+		if len(r.Headers) > 0 {
+			fmt.Print(bold + "ヘッダ:" + reset + "\n")
+			for _, h := range r.Headers {
+				fmt.Printf("  %s\n", Sanitize(h))
+			}
+		}
+		if body := strings.TrimSpace(r.Body); body != "" {
+			fmt.Printf(bold+"本文 (先頭):"+reset+"\n%s\n", Sanitize(truncateRunes(body, 2000)))
+		}
+		fmt.Printf(dim+"%s までに応答がなければ拒否 (通さない)"+reset+"\n", Sanitize(r.Deadline))
+		fmt.Print(u.prompt())
+		u.focus()
+		return
 	}
 	fmt.Printf("\n"+bold+cyan+"━━ 接続申請 #%d ━━"+reset+"\n", r.ID)
 	fmt.Printf(bold+"理由:"+reset+" %s\n", Sanitize(r.Reason))
@@ -237,6 +265,8 @@ func (u *clientUI) prompt() string {
 		return "[y] コピーする  [n] 拒否 > "
 	case u.queue[0].Type == "prrequest":
 		return "[y] 承認して PR を作る  [n] 拒否 > "
+	case u.queue[0].Type == "guardrequest":
+		return "[y] 通す  [n] 止める > "
 	case u.asking:
 		return "エージェントへの質問 (空で取り消し): "
 	default:
@@ -310,6 +340,17 @@ func (u *clientUI) onLine(line string) bool {
 			u.decide(Msg{Type: "prdecide", ID: r.ID, Status: access.Approved})
 		case "n":
 			u.decide(Msg{Type: "prdecide", ID: r.ID, Status: access.Denied})
+		default:
+			fmt.Print("y / n のどちらか > ")
+		}
+		return false
+	}
+	if r.Type == "guardrequest" {
+		switch line {
+		case "y":
+			u.decide(Msg{Type: "guarddecide", ID: r.ID, Status: access.Approved})
+		case "n":
+			u.decide(Msg{Type: "guarddecide", ID: r.ID, Status: access.Denied})
 		default:
 			fmt.Print("y / n のどちらか > ")
 		}
