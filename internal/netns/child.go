@@ -86,6 +86,33 @@ func (c *child) nft(script string) error {
 	return nil
 }
 
+// egressPorts は許可した行き先へ張ってよい新規接続の宛先ポート (TCP)。HTTP/HTTPS
+// 以外は通さない。任意ポートへ届く経路を残すと、内容ガードの外で持ち出せるうえ、
+// IP 単位の許可 (共有 CDN の同じ IP を指す別のホスト) で穴が広がるため。
+var egressPorts = []int{80, 443}
+
+// egressRules は子 netns に張る nftables のルールを返す。qemu を起動する前に
+// 張るので、guest は最初から閉じた網で起きる。出てよいのは loopback (自前 DNS) と、
+// 許可ドメインの応答で見た IP への TCP 80/443 だけ (確立済みの接続は切らない)。
+func egressRules() string {
+	ports := make([]string, 0, len(egressPorts))
+	for _, p := range egressPorts {
+		ports = append(ports, strconv.Itoa(p))
+	}
+	return fmt.Sprintf(`table inet quagent {
+  set allow4 { type ipv4_addr; }
+  chain output {
+    type filter hook output priority 0; policy accept;
+    oifname "lo" accept
+    ct state established,related accept
+    ip daddr @allow4 tcp dport { %s } accept
+    meta l4proto tcp counter reject with tcp reset
+    counter reject
+  }
+}
+`, strings.Join(ports, ", "))
+}
+
 func (c *child) run() error {
 	// 1. 子 netns を保持するプロセス
 	c.holder = deathCmd("unshare", "-n", "sh", "-c", "ip link set lo up; exec sleep infinity")
@@ -109,20 +136,9 @@ func (c *child) run() error {
 	}
 
 	// 2. egress ルール。qemu を起動する前に張るので、guest は最初から閉じた網で起きる。
-	// 出てよいのは loopback (自前 DNS) と allow set (許可ドメインの応答で見た IP) だけ。
-	rules := `table inet quagent {
-  set allow4 { type ipv4_addr; }
-  chain output {
-    type filter hook output priority 0; policy accept;
-    oifname "lo" accept
-    ct state established,related accept
-    ip daddr @allow4 accept
-    meta l4proto tcp counter reject with tcp reset
-    counter reject
-  }
-}
-`
-	if err := c.nft(rules); err != nil {
+	// 出てよいのは loopback (自前 DNS) と allow set (許可ドメインの応答で見た IP) の
+	// Web ポートだけ。
+	if err := c.nft(egressRules()); err != nil {
 		return fmt.Errorf("nftables の適用に失敗: %w", err)
 	}
 	initial := make([]Grant, 0, len(c.spec.Allow))
