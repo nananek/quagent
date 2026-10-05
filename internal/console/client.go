@@ -227,7 +227,7 @@ func (u *clientUI) show() {
 		if len(r.Headers) > 0 {
 			fmt.Print(bold + "ヘッダ:" + reset + "\n")
 			for _, h := range r.Headers {
-				fmt.Printf("  %s\n", Sanitize(h))
+				fmt.Printf("  %s\n", Sanitize(truncateRunes(h, guardExcerptCols)))
 			}
 		}
 		if body := strings.TrimSpace(r.Body); body != "" {
@@ -235,12 +235,14 @@ func (u *clientUI) show() {
 			if strings.TrimSpace(r.Evidence) != "" {
 				label = "本文 (該当箇所の周辺):"
 			}
-			fmt.Printf(bold+label+reset+"\n%s\n", Sanitize(truncateRunes(body, 2000)))
+			// 本文全体ではなく、該当箇所を中心に画面に収まるぶんだけを見せる。
+			fmt.Printf(bold+label+reset+"\n%s\n",
+				Sanitize(compactExcerpt(body, r.Evidence, guardExcerptLines, guardExcerptCols)))
 		}
 		// 理由と該当箇所は最後に出す。本文が長いと上へ流れて読めなくなるため。
 		fmt.Printf(bold+"理由:"+reset+" %s\n", Sanitize(r.Reason))
 		if ev := strings.TrimSpace(r.Evidence); ev != "" {
-			fmt.Printf(bold+"該当箇所:"+reset+" %s\n", Sanitize(ev))
+			fmt.Printf(bold+"該当箇所:"+reset+" %s\n", Sanitize(truncateRunes(ev, guardExcerptCols)))
 		}
 		fmt.Printf(dim+"%s までに応答がなければ拒否 (通さない)"+reset+"\n", Sanitize(r.Deadline))
 		fmt.Print(u.prompt())
@@ -262,6 +264,85 @@ func truncateRunes(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "…"
+}
+
+// 内容ガードの確認に出す本文の抜粋の大きさ。承認コンソールの画面に収まるよう、
+// 該当箇所の前後を少しだけ見せ、行が長ければ横にも切る。
+const (
+	guardExcerptLines = 10
+	guardExcerptCols  = 160
+)
+
+// compactExcerpt は本文を承認コンソールに収まる範囲にまとめる。該当箇所が
+// あればそれを含む行を中心に前後数行だけを出し、行が長ければ該当箇所の前後
+// (無ければ先頭) が見えるように切り詰める。省いたところは … で示す。
+func compactExcerpt(body, evidence string, maxLines, maxCols int) string {
+	if maxLines <= 0 || maxCols <= 0 {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	start, end := 0, min(len(lines), maxLines)
+	if i := lineWith(lines, evidence); i >= 0 {
+		half := maxLines / 2
+		start = max(0, i-half)
+		end = min(len(lines), start+maxLines)
+		if end-start < maxLines {
+			start = max(0, end-maxLines)
+		}
+	}
+	var b strings.Builder
+	if start > 0 {
+		b.WriteString("…\n")
+	}
+	for _, ln := range lines[start:end] {
+		b.WriteString(clipLine(ln, evidence, maxCols))
+		b.WriteByte('\n')
+	}
+	if end < len(lines) {
+		b.WriteString("…\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// lineWith は evidence を含む最初の行の番号を返す (無ければ -1)。
+func lineWith(lines []string, evidence string) int {
+	if evidence == "" {
+		return -1
+	}
+	for i, ln := range lines {
+		if strings.Contains(ln, evidence) {
+			return i
+		}
+	}
+	return -1
+}
+
+// clipLine は ln を maxCols ルーンまでに切る。該当箇所を含む行は、その前後が
+// 残るように中央を切り出す。
+func clipLine(ln, evidence string, maxCols int) string {
+	r := []rune(ln)
+	if len(r) <= maxCols {
+		return ln
+	}
+	if evidence != "" {
+		if i := strings.Index(ln, evidence); i >= 0 {
+			ri := utf8.RuneCountInString(ln[:i])
+			start := max(0, ri-maxCols/2)
+			end := min(len(r), start+maxCols)
+			if end-start < maxCols {
+				start = max(0, end-maxCols)
+			}
+			out := string(r[start:end])
+			if start > 0 {
+				out = "…" + out
+			}
+			if end < len(r) {
+				out += "…"
+			}
+			return out
+		}
+	}
+	return string(r[:maxCols]) + "…"
 }
 
 // prompt は今の確認の入力の案内を返す。

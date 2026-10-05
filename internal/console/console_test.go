@@ -3,8 +3,10 @@ package console
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -102,6 +104,42 @@ func TestAskPR(t *testing.T) {
 	}
 	if err := wait(errCh); err == nil {
 		t.Fatal("拒否したのに nil が返った")
+	}
+}
+
+// compactExcerpt は該当箇所を中心に画面に収まる範囲だけを返す。
+func TestCompactExcerpt(t *testing.T) {
+	lines := make([]string, 0, 100)
+	for i := 0; i < 100; i++ {
+		lines = append(lines, fmt.Sprintf("line %d", i))
+	}
+	lines[50] = "the secret me@example.com here"
+	got := compactExcerpt(strings.Join(lines, "\n"), "me@example.com", 12, 200)
+	if !strings.Contains(got, "me@example.com") {
+		t.Errorf("該当箇所が抜粋に無い:\n%s", got)
+	}
+	if strings.Count(got, "\n") > 13 {
+		t.Errorf("行数が多い (%d):\n%s", strings.Count(got, "\n"), got)
+	}
+	if !strings.Contains(got, "line 45") {
+		t.Errorf("該当箇所の前後の行が無い:\n%s", got)
+	}
+	if strings.Contains(got, "line 0\n") || strings.Contains(got, "line 99") {
+		t.Errorf("該当箇所から遠い行まで出している:\n%s", got)
+	}
+	// 長い 1 行は該当箇所の前後が見えるように横に切る。
+	long := strings.Repeat("A", 5000) + "secret-token" + strings.Repeat("B", 5000)
+	got = compactExcerpt(long, "secret-token", 12, 200)
+	if !strings.Contains(got, "secret-token") {
+		t.Errorf("長い行で該当箇所が見えない")
+	}
+	if n := len([]rune(got)); n > 210 {
+		t.Errorf("長い行が切られていない: %d ルーン", n)
+	}
+	// 該当箇所が無ければ先頭から。
+	got = compactExcerpt(strings.Join(lines, "\n"), "", 3, 200)
+	if !strings.HasPrefix(got, "line 0\nline 1\nline 2") || !strings.Contains(got, "…") {
+		t.Errorf("先頭の抜粋が違う:\n%s", got)
 	}
 }
 
