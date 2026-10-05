@@ -253,6 +253,9 @@ func cmdGuard(args []string) error {
 		return fmt.Errorf("点検できない (Ollama などは動いている?): %w", err)
 	}
 	fmt.Printf("%s: %s\n", v.Action, v.Reason)
+	if v.Evidence != "" {
+		fmt.Printf("evidence: %s\n", v.Evidence)
+	}
 	if len(v.Categories) > 0 {
 		fmt.Println("categories:", strings.Join(v.Categories, ", "))
 	}
