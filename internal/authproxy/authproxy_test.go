@@ -50,7 +50,7 @@ func TestGuardBlocksBeforeUpstream(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = append(reached, r.Method+" "+r.URL.Path) })
 	rules, _ := parseRules([]string{"POST /messages"})
 	var denied []string
-	h := gate("p", rules, next, log.New(io.Discard, "", 0), func(s string) { denied = append(denied, s) }, nil)
+	h := gate("p", "up.example", rules, next, log.New(io.Discard, "", 0), func(s string) { denied = append(denied, s) }, nil)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/llm/p/files/all", nil))
@@ -100,7 +100,7 @@ func TestGateContentGuard(t *testing.T) {
 		}
 	})
 	var denied []string
-	h := gate("p", rules, next, log.New(io.Discard, "", 0), func(s string) { denied = append(denied, s) }, g)
+	h := gate("p", "up.example", rules, next, log.New(io.Discard, "", 0), func(s string) { denied = append(denied, s) }, g)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/llm/p/v1/chat/completions", strings.NewReader("hello")))
