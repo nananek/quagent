@@ -167,9 +167,12 @@ type Guard struct {
 	sem    chan struct{} // ローカル LLM を同時に叩く数
 	askSem chan struct{} // 承認コンソールに同時に出す確認の数
 
-	mu        sync.Mutex
-	cache     map[string]entry
-	order     []string
+	mu    sync.Mutex
+	cache map[string]entry
+	order []string
+	// denied は人間 (または deny モード) が拒否した該当箇所。一度拒否した内容は
+	// 本文が変わっても再送できないようにするため、該当箇所そのものを覚えておく。
+	denied    []deniedEvidence
 	askWindow time.Time
 	askShown  int
 }
@@ -179,6 +182,14 @@ type entry struct {
 	hasV   bool
 	allow  bool
 	hasDec bool
+	reason string
+	at     time.Time
+}
+
+// deniedEvidence は拒否した該当箇所 (LLM が指摘した機密だと思った部分) と、
+// その理由。承認コンソールに出したのと同じ内容を再送されたときに使う。
+type deniedEvidence struct {
+	text   string
 	reason string
 	at     time.Time
 }
@@ -320,6 +331,11 @@ func resolve(c config.Guard) (settings, error) {
 // Check はリクエストを点検し、通すなら nil、止めるなら理由を返す。人間の判断 (Reviewer)、
 // Mode、OnError を当てはめた最終判断はここで行う。
 func (g *Guard) Check(ctx context.Context, req Request) error {
+	// 一度拒否した該当箇所が含まれていれば、LLM や人間の判断を待たずに止める。
+	// 本文が変わっても再送できないようにするため (LLM が判定を覆しても通さない)。
+	if reason, ok := g.deniedIn(req); ok {
+		return fmt.Errorf("%s", reason)
+	}
 	key := g.cacheKey(req)
 	if allow, reason, ok := g.decision(key); ok {
 		if allow {
@@ -461,6 +477,7 @@ func (g *Guard) onSuspect(ctx context.Context, key string, req Request, reason s
 		g.logf("疑わしいが通した (advisory): %s", reason)
 		return nil
 	case modeDeny:
+		g.rememberDenied(req.Evidence, reason)
 		return fmt.Errorf("%s", reason)
 	}
 	if g.review == nil {
@@ -473,6 +490,7 @@ func (g *Guard) onSuspect(ctx context.Context, key string, req Request, reason s
 	}
 	if err := g.reviewWithSem(ctx, req, reason); err != nil {
 		g.rememberDecision(key, false, reason)
+		g.rememberDenied(req.Evidence, reason)
 		return fmt.Errorf("承認されなかったので止めた: %s", reason)
 	}
 	g.logf("承認者が通した: %s", reason)
@@ -671,6 +689,75 @@ func (g *Guard) store(key string, e entry) {
 		}
 	}
 	g.cache[key] = e
+}
+
+// rememberDenied は拒否した該当箇所を覚える。空の該当箇所は覚えない (該当箇所が
+// 無いときはリクエスト全体の鍵で判断するので、内容が変われば訊き直す)。
+func (g *Guard) rememberDenied(text, reason string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := time.Now()
+	for i := range g.denied {
+		if g.denied[i].text == text {
+			g.denied[i].reason, g.denied[i].at = reason, now
+			return
+		}
+	}
+	g.denied = append(g.denied, deniedEvidence{text: text, reason: reason, at: now})
+	if len(g.denied) > cacheMax {
+		g.denied = g.denied[len(g.denied)-cacheMax:]
+	}
+}
+
+// deniedIn は req (行き先・ヘッダ・点検した本文) に、直近に拒否した該当箇所が
+// 含まれるかを返す。含まれるならその理由を返す。LLM が判定を覆しても (allow と
+// 答えても) 素通りさせないために、点検の前に見る。
+func (g *Guard) deniedIn(req Request) (reason string, ok bool) {
+	g.mu.Lock()
+	now := time.Now()
+	kept := g.denied[:0]
+	for _, d := range g.denied {
+		if now.Sub(d.at) <= cacheTTL {
+			kept = append(kept, d)
+		}
+	}
+	g.denied = kept
+	// 走査は長くなりうるので、ロックの外でやる (該当箇所は短いのでコピーは安い)。
+	list := append([]deniedEvidence(nil), g.denied...)
+	g.mu.Unlock()
+	for _, d := range list {
+		if containsRequest(req, d.text) {
+			r := d.reason
+			if r == "" {
+				r = "機密情報の持ち出しが疑われる内容"
+			}
+			return "以前に拒否した内容が含まれる: " + r, true
+		}
+	}
+	return "", false
+}
+
+// containsRequest は req の表示・点検の対象 (URL・ヘッダ・点検した本文) に s が
+// 含まれるかを返す。以前に拒否した該当箇所の再送を止めるために使う。
+func containsRequest(req Request, s string) bool {
+	if s == "" {
+		return false
+	}
+	if strings.Contains(req.URL(), s) {
+		return true
+	}
+	for _, vs := range req.Headers {
+		for _, v := range vs {
+			if strings.Contains(v, s) {
+				return true
+			}
+		}
+	}
+	return bytes.Contains(req.Body, []byte(s))
 }
 
 // RequestFrom は *http.Request から点検用の写しを作る (本文は呼び出し側が読んだ抜粋)。
