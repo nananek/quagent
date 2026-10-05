@@ -3,6 +3,7 @@ package netns
 import (
 	"bufio"
 	"bytes"
+	"crypto/x509"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nananek/quagent/internal/tlsmitm"
 	"golang.org/x/sys/unix"
 )
 
@@ -31,6 +33,19 @@ type webProxy struct {
 	blocked   func(reason string)
 	// sem は同時に扱う Web 接続の上限。溢れた分は切って guest に任せる。
 	sem chan struct{}
+
+	// mitm が nil でなければ、許可した TLS 接続を終端し、中身を点検してから
+	// 本来のサーバーへ張り直す (内部 HTTPS の内容ガード)。
+	mitm *tlsmitm.CA
+	// inspect は終端した HTTPS リクエストを点検する。通すなら nil、止めるなら理由。
+	// nil なら点検せず通す (終端はするが中身は見ない)。
+	inspect func(InspectRequest) error
+	// inspectLimit は 1 リクエストで点検のために読む本文の上限 (バイト)。
+	inspectLimit int
+	// upstreamRoots は張り直す先の証明書を検証するルート。nil なら system。
+	upstreamRoots *x509.CertPool
+	// dial は子 netns の中に外向き接続を張る。既定は dialInNetns (テストで差し替える)。
+	dial func(network, addr string, mark int) (net.Conn, error)
 }
 
 const (
@@ -51,7 +66,10 @@ const (
 
 func newWebProxy(holderPid int, allowed func(name string) bool, blocked func(reason string)) *webProxy {
 	return &webProxy{holderPid: holderPid, allowed: allowed, blocked: blocked,
-		sem: make(chan struct{}, proxyMaxConns)}
+		sem: make(chan struct{}, proxyMaxConns),
+		dial: func(network, addr string, mark int) (net.Conn, error) {
+			return dialInNetns(holderPid, network, addr, mark)
+		}}
 }
 
 // serve は listener で受けた接続を点検する。tls なら 443 の接続として SNI を、
@@ -83,37 +101,85 @@ func (p *webProxy) handle(c net.Conn, tls bool) {
 		log.Printf("web: 元の宛先を取得できない: %v", err)
 		return
 	}
-	// 点検で読んだ分 (ClientHello / ヘッダ) を覚えておき、そのまま転送する。
-	cr := &captureReader{r: c}
-	var name string
 	if tls {
-		name, err = readSNI(cr)
-	} else {
-		name, err = readHost(bufio.NewReader(cr))
+		p.handleTLS(c, dst)
+		return
 	}
+	p.handleHTTP(c, dst)
+}
+
+// handleTLS は 443 の接続を扱う。SNI が許可名に一致することを確かめ、TLS 終端が
+// 有効なら中身を点検してから転送する。
+func (p *webProxy) handleTLS(c net.Conn, dst string) {
+	// 点検で読んだ分 (ClientHello) を覚えておき、そのまま転送できるようにする。
+	cr := &captureReader{r: c}
+	name, err := readSNI(cr)
 	if err != nil {
-		p.block(fmt.Sprintf("%s %s (%v)", protoName(tls), dst, err))
+		p.block(fmt.Sprintf("SNI %s (%v)", dst, err))
 		return
 	}
 	if !p.allowed(name) {
-		p.block(fmt.Sprintf("%s %s", protoName(tls), name))
+		p.block("SNI " + name)
 		return
 	}
+	if p.mitm != nil {
+		// ClientHello で読んだ分を戻してから終端し、平文の HTTP を点検する。
+		_ = c.SetDeadline(time.Time{})
+		p.terminate(&replayConn{Conn: c, r: io.MultiReader(bytes.NewReader(cr.buf), c)}, dst, name)
+		return
+	}
+	p.pipe(c, dst, name, io.MultiReader(bytes.NewReader(cr.buf), c))
+}
+
+// handleHTTP は 80 の接続を扱う。点検が有効なら Host を確かめたうえで中身も
+// 点検する (点検が無いときは従来どおり Host だけ確かめて素通しする)。80 を点検
+// しないと、許可した行き先へ平文で持ち出す経路が残る。
+func (p *webProxy) handleHTTP(c net.Conn, dst string) {
+	if p.inspect != nil {
+		_ = c.SetDeadline(time.Time{})
+		p.serveInspect(c, bufio.NewReader(c), dst, "", false)
+		return
+	}
+	// 点検で読んだ分 (リクエストヘッダ) を覚えておき、そのまま転送する。
+	cr := &captureReader{r: c}
+	name, err := readHost(bufio.NewReader(cr))
+	if err != nil {
+		p.block(fmt.Sprintf("Host %s (%v)", dst, err))
+		return
+	}
+	if !p.allowed(name) {
+		p.block("Host " + name)
+		return
+	}
+	p.pipe(c, dst, name, io.MultiReader(bytes.NewReader(cr.buf), c))
+}
+
+// pipe は点検せず、上流へそのまま流す (SNI/Host の確認だけ済ませた接続)。
+func (p *webProxy) pipe(c net.Conn, dst, name string, client io.Reader) {
 	// 元の宛先へ、子 netns の中から (mark を付けて) 張り直す。mark が無いと
 	// nft がこの転送をまた redirect してしまう。
-	up, err := dialInNetns(p.holderPid, "tcp4", dst, proxyMark)
+	up, err := p.dial("tcp4", dst, proxyMark)
 	if err != nil {
 		log.Printf("web: %s への転送に失敗: %v", name, err)
 		return
 	}
 	defer up.Close()
-	// 点検で読んだ分も含めてそのまま流す。
 	_ = c.SetDeadline(time.Time{})
 	errc := make(chan error, 2)
-	go func() { _, err := io.Copy(up, io.MultiReader(bytes.NewReader(cr.buf), c)); errc <- err }()
+	go func() { _, err := io.Copy(up, client); errc <- err }()
 	go func() { _, err := io.Copy(c, up); errc <- err }()
 	<-errc
 }
+
+// replayConn は先に読んだバイト列を Read で返してから、元の接続に続きを読む
+// net.Conn。ClientHello を点検で読んだあと、そのまま TLS のハンドシェイクに
+// 渡し直すために使う。
+type replayConn struct {
+	net.Conn
+	r io.Reader
+}
+
+func (rc *replayConn) Read(p []byte) (int, error) { return rc.r.Read(p) }
 
 // captureReader は点検で読んだバイトを覚え、点検後にそのまま転送できるようにする。
 type captureReader struct {
@@ -133,13 +199,6 @@ func (p *webProxy) block(reason string) {
 	if p.blocked != nil {
 		p.blocked(reason)
 	}
-}
-
-func protoName(tls bool) string {
-	if tls {
-		return "SNI"
-	}
-	return "Host"
 }
 
 // originalDst は nft の redirect で書き換えられる前の宛先 (SO_ORIGINAL_DST) を返す。

@@ -27,6 +27,7 @@ import (
 	"github.com/nananek/quagent/internal/netns"
 	"github.com/nananek/quagent/internal/paths"
 	"github.com/nananek/quagent/internal/pr"
+	"github.com/nananek/quagent/internal/tlsmitm"
 	"github.com/nananek/quagent/internal/vm"
 )
 
@@ -57,11 +58,47 @@ func logf(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, "\033[1;34m[quagent]\033[0m "+format+"\n", a...)
 }
 
+// caGuestPath は TLS 終端に使う使い捨て CA を guest の信頼ストアへ入れる場所。
+const caGuestPath = "/usr/local/share/ca-certificates/quagent-mitm.crt"
+
+// caEnv は、システムの信頼ストアを使わず自前の束 (certifi など) を見る実装にも
+// 使い捨て CA を教える。Node / Bun は NODE_EXTRA_CA_CERTS を見る。curl や git など
+// システムの束を見るものは update-ca-certificates が更新した束で足りる。
+const caEnv = `export NODE_EXTRA_CA_CERTS=` + caGuestPath
+
+// injectCA はエージェントの entrypoint に使い捨て CA を教える export を差し込み、
+// cloud-init の write_files に足す CA の断片と、信頼ストアを更新する runcmd の断片を
+// 返す。shebang は先頭に残す。caCert が空なら何も変えない。
+func injectCA(entrypoint, caCert string) (newEntrypoint, writeFile, runCmd string) {
+	if caCert == "" {
+		return entrypoint, "", ""
+	}
+	head, rest, _ := strings.Cut(entrypoint, "\n")
+	if rest == "" {
+		// 1 行しかない entrypoint でも export が shebang の次に来るようにする。
+		return entrypoint + "\n" + caEnv, caWriteFile(caCert), caRunCmd
+	}
+	return head + "\n" + caEnv + "\n" + rest, caWriteFile(caCert), caRunCmd
+}
+
+// caRunCmd は書き込んだ CA を信頼ストアに反映する runcmd の行。
+const caRunCmd = "  - [update-ca-certificates]\n"
+
+// caWriteFile は CA の証明書を guest に置く write_files の断片 (YAML のリスト項目)。
+func caWriteFile(caCert string) string {
+	return fmt.Sprintf("  - path: %s\n    permissions: '0644'\n    content: |\n%s",
+		caGuestPath, indentBlock(caCert, "      "))
+}
+
 func run(o runOpts) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
+	if cfg.Guard.InspectHTTPS && !cfg.Guard.Enabled {
+		return fmt.Errorf("guard.inspect_https を使うには guard.enabled を true にする")
+	}
+	inspectHTTPS := cfg.Guard.Enabled && cfg.Guard.InspectHTTPS
 	if o.Agent == "" {
 		o.Agent = DefaultAgent
 	}
@@ -148,6 +185,18 @@ func run(o runOpts) error {
 		}
 		logf("内容ガード: %s で LLM プロキシのリクエストを点検する", contentGuard)
 	}
+	// HTTPS も終端して点検するなら、run ごとの使い捨て CA を 1 つ作る。証明書は
+	// guest の信頼ストアに入れ、秘密鍵は host の作業ディレクトリ (0700) から出さない。
+	var ca *tlsmitm.CA
+	var caCert string
+	if inspectHTTPS {
+		ca, err = tlsmitm.NewCA()
+		if err != nil {
+			return fmt.Errorf("TLS 終端の CA を作れない: %w", err)
+		}
+		caCert = string(ca.CertPEM())
+		logf("HTTPS の中身も点検する (使い捨て CA で TLS を終端。証明書を固定するクライアントは使えない)")
+	}
 	providers, err := authproxy.Register(svc.Mux, cfg.Providers, logger, func(s string) {
 		select {
 		case llmDenied <- s:
@@ -171,6 +220,15 @@ func run(o runOpts) error {
 	if tmpDir != "" {
 		tmpCmd = tmpRuncmd(strconv.Itoa(vm.GuestUID))
 	}
+	// HTTPS を終端するときは、使い捨て CA を guest の信頼ストアに入れ、自前の
+	// 証明書束を見る実装 (Node / Bun など) にも環境変数で教える。信頼を入れてから
+	// エージェントを起動する (runcmd の先頭で update-ca-certificates)。
+	entrypoint := ag.entrypoint
+	extraFiles := ""
+	trustCmd := ""
+	if caCert != "" {
+		entrypoint, extraFiles, trustCmd = injectCA(entrypoint, caCert)
+	}
 	userData := fmt.Sprintf(`#cloud-config
 write_files:
   # エージェントの起動はここにまとめる (↑ で呼び戻せる)
@@ -178,15 +236,16 @@ write_files:
     permissions: '0755'
     content: |
 %s
+%s
 bootcmd:
   - echo '127.0.0.1 %s' >> /etc/hosts
   # 外へは出られないので NTP は使えない (時計は KVM が合わせる)。拒否の記録が並ぶだけなので止める
   - [sh, -c, "systemctl mask --now systemd-timesyncd.service 2>/dev/null; true"]
   - [sh, -c, "%s"]
 runcmd:
-%s  - [sh, -c, "mkdir -p /run/quagent-seed && mount -o ro /dev/disk/by-label/cidata /run/quagent-seed && install -m 755 /run/quagent-seed/quagent-guest /usr/local/bin/quagent-guest && umount /run/quagent-seed"]
+%s%s  - [sh, -c, "mkdir -p /run/quagent-seed && mount -o ro /dev/disk/by-label/cidata /run/quagent-seed && install -m 755 /run/quagent-seed/quagent-guest /usr/local/bin/quagent-guest && umount /run/quagent-seed"]
   - [systemd-run, --unit=quagent-guest, --uid=%s, -p, Restart=always, /usr/local/bin/quagent-guest, %s, "%d"]
-`, indentBlock(ag.entrypoint, "      "), hostsvc.GuestHost, maskCmd(sshUnits(o.SSH)), tmpCmd, vm.GuestUser, guestCommand, svc.Port)
+`, indentBlock(entrypoint, "      "), extraFiles, hostsvc.GuestHost, maskCmd(sshUnits(o.SSH)), trustCmd, tmpCmd, vm.GuestUser, guestCommand, svc.Port)
 	// 時刻の表示 (承認の期限やコミットの日時) を host とそろえる
 	if tz := hostTimezone(); tz != "" {
 		userData += "timezone: " + tz + "\n"
@@ -229,9 +288,17 @@ runcmd:
 		Netdev:     netdev, VsockCID: g.cid, DataDisks: disks, NestedVirt: o.NestedVirt,
 	})
 	logf("VM を起動 (base=%s, allow=%v)", filepath.Base(base), o.Allow)
-	l, err := netns.Start(netns.Spec{
-		WorkDir: work, SSHPort: sshPort, DNS: dns, Allow: o.Allow, QemuArgv: qemu,
-	})
+	spec := netns.Spec{WorkDir: work, SSHPort: sshPort, DNS: dns, Allow: o.Allow, QemuArgv: qemu}
+	if inspectHTTPS {
+		keyPEM, err := ca.KeyPEM()
+		if err != nil {
+			return fmt.Errorf("TLS 終端の CA の鍵を書き出せない: %w", err)
+		}
+		spec.InspectHTTPS = true
+		spec.CACertPEM, spec.CAKeyPEM = caCert, string(keyPEM)
+		spec.InspectLimit = contentGuard.InspectLimit()
+	}
+	l, err := netns.Start(spec)
 	if err != nil {
 		return err
 	}
@@ -270,6 +337,22 @@ runcmd:
 		})
 		// 最初の本番リクエストがモデルの読み込み待ちで時間切れにならないよう先に載せる
 		go contentGuard.Warm(context.Background())
+	}
+	if inspectHTTPS {
+		// 子が TLS 終端して取り出した HTTPS のリクエストを、同じ内容ガードにかける。
+		// 認証プロキシと同じ Guard を使うので、拒否した該当箇所の記憶も共有される。
+		l.SetInspector(func(req netns.InspectRequest) error {
+			return contentGuard.Check(context.Background(), guard.Request{
+				Provider:      req.Provider,
+				Method:        req.Method,
+				Host:          req.Host,
+				Path:          req.Path,
+				Query:         req.Query,
+				Headers:       req.Headers,
+				Body:          req.Body,
+				BodyTruncated: req.Truncated,
+			})
+		})
 	}
 	go relayDenied(l, con)
 	go relayBlocked(l, con)
