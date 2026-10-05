@@ -284,6 +284,10 @@ func Build(r Recipe, o BuildOpts, progress io.Writer) (Image, error) {
 func fetchCloudImage(r Recipe, refresh bool, progress io.Writer) (string, error) {
 	dst := filepath.Join(paths.CacheDir(), r.Name+"-"+filepath.Base(r.CloudImageURL))
 	if _, err := os.Stat(dst); err == nil && !refresh {
+		// キャッシュも毎回検証する (置き場のファイルが後から書き換わっていても使わない)
+		if err := verifyFile(r, dst); err != nil {
+			return "", fmt.Errorf("キャッシュしたイメージを検証できない (%w)。--refresh で取り直す", err)
+		}
 		return dst, nil
 	}
 	if err := os.MkdirAll(paths.CacheDir(), 0o755); err != nil {
@@ -342,6 +346,20 @@ func fetchSmall(url string, max int64) ([]byte, error) {
 		return nil, fmt.Errorf("%s が大きすぎる", url)
 	}
 	return b, nil
+}
+
+// verifyFile は path の中身を配布元のチェックサム一覧と照合する (キャッシュの検証用)。
+func verifyFile(r Recipe, path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h256, h512 := sha256.New(), sha512.New()
+	if _, err := io.Copy(io.MultiWriter(h256, h512), f); err != nil {
+		return err
+	}
+	return verifyChecksum(r, hex.EncodeToString(h256.Sum(nil)), hex.EncodeToString(h512.Sum(nil)))
 }
 
 // verifyChecksum は配布元のチェックサムの一覧から、イメージのファイル名の行を探して照合する。
