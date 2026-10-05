@@ -31,3 +31,18 @@ func TestEgressPortsNoPrivilegedOrExtra(t *testing.T) {
 		}
 	}
 }
+
+// 許可した行き先への Web 接続は透明プロキシ (SNI/Host 点検) を通すこと。
+func TestEgressRulesRedirectWebPorts(t *testing.T) {
+	rules := egressRules()
+	if !strings.Contains(rules, "ip daddr @allow4 tcp dport 443 redirect to :8443") {
+		t.Fatalf("443 が透明プロキシへ回らない:\n%s", rules)
+	}
+	if !strings.Contains(rules, "ip daddr @allow4 tcp dport 80 redirect to :8080") {
+		t.Fatalf("80 が透明プロキシへ回らない:\n%s", rules)
+	}
+	// プロキシ自身の外向き接続 (mark) を redirect しないこと (転送の無限ループ防止)。
+	if !strings.Contains(rules, "meta mark 1 return") {
+		t.Fatalf("プロキシ自身の接続を redirect から除外していない:\n%s", rules)
+	}
+}

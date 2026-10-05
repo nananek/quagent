@@ -47,6 +47,8 @@ type Launcher struct {
 
 	// Denied には許可外として名前解決を拒否したドメインが流れる (取りこぼしは捨てる)。
 	Denied chan string
+	// Blocked には透明プロキシが許可外の名前 (SNI/Host) で止めた Web 接続が流れる。
+	Blocked chan string
 
 	mu      sync.Mutex
 	seq     int
@@ -92,7 +94,7 @@ func Start(spec Spec) (*Launcher, error) {
 	}
 	l := &Launcher{
 		spec: spec, cmd: cmd, stdin: stdin, done: make(chan error, 1),
-		Denied: make(chan string, 64), waiters: map[int]chan struct{}{},
+		Denied: make(chan string, 64), Blocked: make(chan string, 64), waiters: map[int]chan struct{}{},
 	}
 	evDone := make(chan struct{})
 	go func() {
@@ -125,6 +127,12 @@ func (l *Launcher) handleEvent(ev Event) {
 	if ev.Denied != "" {
 		select {
 		case l.Denied <- ev.Denied:
+		default:
+		}
+	}
+	if ev.Blocked != "" {
+		select {
+		case l.Blocked <- ev.Blocked:
 		default:
 		}
 	}

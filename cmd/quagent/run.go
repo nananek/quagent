@@ -272,6 +272,7 @@ runcmd:
 		go contentGuard.Warm(context.Background())
 	}
 	go relayDenied(l, con)
+	go relayBlocked(l, con)
 	go func() {
 		// 連打で承認コンソールを埋めないよう 1 分に 10 件まで (残りは host.log にある)
 		var window time.Time
@@ -503,17 +504,27 @@ func newCID() uint32 {
 	return 3 + uint32(rand.Int64N(1<<31-3))
 }
 
-// relayDenied は DNS で拒否したドメインを承認コンソールに流す (同じ名前は 1 分に 1 回、
-// 全体でも 1 分に 10 件まで)。
+// relayDenied は DNS で拒否したドメインを承認コンソールに流す。
 func relayDenied(l *netns.Launcher, con *console.Server) {
+	relayNames(l.Denied, con, "DNS で拒否: ")
+}
+
+// relayBlocked は透明プロキシが許可外の名前 (SNI/Host) で止めた Web 接続を流す。
+func relayBlocked(l *netns.Launcher, con *console.Server) {
+	relayNames(l.Blocked, con, "Web で拒否: ")
+}
+
+// relayNames は名前の連打を抑えて承認コンソールに流す (同じ名前は 1 分に 1 回、
+// 全体でも 1 分に 10 件まで)。
+func relayNames(ch <-chan string, con *console.Server, prefix string) {
 	last := map[string]time.Time{}
 	var window time.Time
 	var shown, dropped int
-	for name := range l.Denied {
+	for name := range ch {
 		now := time.Now()
 		if now.Sub(window) >= time.Minute {
 			if dropped > 0 {
-				con.Log(fmt.Sprintf("DNS で拒否: ほか %d 件 (多すぎるので省略)", dropped))
+				con.Log(fmt.Sprintf("%sほか %d 件 (多すぎるので省略)", prefix, dropped))
 			}
 			window, shown, dropped = now, 0, 0
 			// 覚えている名前も 1 分ごとに捨てる (ランダムな名前で膨らませない)
@@ -528,7 +539,7 @@ func relayDenied(l *netns.Launcher, con *console.Server) {
 			continue
 		}
 		shown++
-		con.Log("DNS で拒否: " + name)
+		con.Log(prefix + name)
 	}
 }
 
