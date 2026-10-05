@@ -92,16 +92,24 @@ func (c *child) nft(script string) error {
 var egressPorts = []int{80, 443}
 
 // egressRules は子 netns に張る nftables のルールを返す。qemu を起動する前に
-// 張るので、guest は最初から閉じた網で起きる。出てよいのは loopback (自前 DNS) と、
-// 許可ドメインの応答で見た IP への TCP 80/443 だけ (確立済みの接続は切らない)。
-// 80/443 は nat で透明プロキシへ回し、接続先が言ってきた名前 (SNI/Host) が許可名と
-// 一致するかを確かめる。プロキシ自身の外向き接続は mark で redirect から除く。
+// 張るので、guest は最初から閉じた網で起きる。出てよいのは loopback (自前 DNS と
+// 透明プロキシ) と、許可ドメインの応答で見た IP への TCP 80/443 だけ (確立済みの
+// 接続は切らない)。80/443 は nat で透明プロキシへ回し、接続先が言ってきた名前
+// (SNI/Host) が許可名と一致するかを確かめる。プロキシ自身の外向き接続は mark で
+// redirect から除く。
+//
+// nat の redirect は宛先を 127.0.0.1:プロキシポートへ書き換えるが、output の
+// oif は uplink (tap0) のままなので、oifname "lo" では拾えない。書き換え後の宛先
+// (loopback のプロキシポート) を明示的に通す。これが無いと、許可した IP への
+// Web 接続がプロキシに届く前に filter の reject (tcp reset) で切られる。
 func egressRules() string {
 	ports := make([]string, 0, len(egressPorts))
 	redirects := make([]string, 0, len(egressPorts))
+	proxyPorts := make([]string, 0, len(egressPorts))
 	for _, p := range egressPorts {
 		ports = append(ports, strconv.Itoa(p))
 		redirects = append(redirects, fmt.Sprintf("    ip daddr @allow4 tcp dport %d redirect to :%d", p, proxyListenPort(p)))
+		proxyPorts = append(proxyPorts, strconv.Itoa(proxyListenPort(p)))
 	}
 	return fmt.Sprintf(`table inet quagent {
   set allow4 { type ipv4_addr; }
@@ -110,6 +118,7 @@ func egressRules() string {
     oifname "lo" accept
     ct state established,related accept
     ip daddr @allow4 tcp dport { %s } accept
+    ip daddr 127.0.0.1 tcp dport { %s } accept
     meta l4proto tcp counter reject with tcp reset
     counter reject
   }
@@ -119,7 +128,7 @@ func egressRules() string {
 %s
   }
 }
-`, strings.Join(ports, ", "), proxyMark, strings.Join(redirects, "\n"))
+`, strings.Join(ports, ", "), strings.Join(proxyPorts, ", "), proxyMark, strings.Join(redirects, "\n"))
 }
 
 // proxyListenPort は宛先ポートに対応する透明プロキシの待ち受けポートを返す。
