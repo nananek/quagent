@@ -1,6 +1,7 @@
 package guard
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -390,8 +391,12 @@ func TestSplitChunksOverlapKeepsSecret(t *testing.T) {
 // 分割数と、塊ごとに点検していることを確かめる。
 func TestInspectSplitsBodyIntoChunks(t *testing.T) {
 	g, fake := newTest(t, config.Guard{MaxBytes: 8, MaxChunks: 4}, `{"action":"allow","reason":"ok"}`, nil)
-	body := strings.Repeat("A", 100)
-	if _, err := g.Inspect(context.Background(), Request{Body: []byte(body)}); err != nil {
+	// 塊ごとに内容が違うようにする (同じ内容の塊は 1 回にまとめられるため)
+	body := make([]byte, 100)
+	for i := range body {
+		body[i] = byte('a' + i%26)
+	}
+	if _, err := g.Inspect(context.Background(), Request{Body: body}); err != nil {
 		t.Fatal(err)
 	}
 	if fake.count() != 4 {
@@ -399,5 +404,92 @@ func TestInspectSplitsBodyIntoChunks(t *testing.T) {
 	}
 	if !strings.Contains(fake.firstUser(), "part: 1/4") {
 		t.Errorf("塊の番号がプロンプトに出ていない")
+	}
+}
+
+// 一度許可した該当箇所 (LLM が機密だと思った部分) は、本文が伸びても二度は訊かない。
+func TestCheckReusesDecisionByEvidence(t *testing.T) {
+	g, fake := newTest(t, config.Guard{Mode: "ask"},
+		`{"action":"deny","reason":"メールが漏れる","evidence":"me@example.com","categories":["pii"]}`, nil)
+	reviews := 0
+	g.SetReviewer(func(_ context.Context, _ Request, _ string) error { reviews++; return nil })
+	base := "連絡先は me@example.com です"
+	if err := g.Check(context.Background(), Request{Provider: "p", Method: "POST", Host: "h", Path: "/p", Body: []byte(base)}); err != nil {
+		t.Fatalf("承認されたのに止めた: %v", err)
+	}
+	// 会話履歴が伸びた本文。同じ該当箇所を含む。
+	grown := base + " その後のやり取り。"
+	if err := g.Check(context.Background(), Request{Provider: "p", Method: "POST", Host: "h", Path: "/p", Body: []byte(grown)}); err != nil {
+		t.Fatalf("承認済みの該当箇所なのに止めた: %v", err)
+	}
+	if reviews != 1 {
+		t.Errorf("同じ該当箇所を %d 回訊いた (一度でよい)", reviews)
+	}
+	if fake.count() < 2 {
+		t.Errorf("本文が違うので点検はやり直すはず: %d 回", fake.count())
+	}
+}
+
+// 一度止めた該当箇所は、本文が変わっても訊き直さずに止める。
+func TestCheckReusesDenialByEvidence(t *testing.T) {
+	g, _ := newTest(t, config.Guard{Mode: "ask"},
+		`{"action":"deny","reason":"だめ","evidence":"secret-token-123"}`, nil)
+	reviews := 0
+	g.SetReviewer(func(context.Context, Request, string) error { reviews++; return errors.New("拒否") })
+	req := Request{Provider: "p", Method: "POST", Host: "h", Path: "/p", Body: []byte("x secret-token-123")}
+	if err := g.Check(context.Background(), req); err == nil {
+		t.Fatal("拒否したのに通した")
+	}
+	req.Body = []byte("x secret-token-123 追記")
+	if err := g.Check(context.Background(), req); err == nil {
+		t.Fatal("止めた該当箇所なのに通した")
+	}
+	if reviews != 1 {
+		t.Errorf("一度止めた該当箇所を %d 回訊いた", reviews)
+	}
+}
+
+// 承認コンソールには本文全体ではなく、該当箇所の周辺だけを見せる。
+func TestCheckShowsEvidenceWindow(t *testing.T) {
+	evidence := "me@example.com"
+	body := []byte(strings.Repeat("A", 5000) + evidence + strings.Repeat("B", 5000))
+	g, _ := newTest(t, config.Guard{},
+		`{"action":"deny","reason":"メール","evidence":"me@example.com"}`, nil)
+	var shown []byte
+	g.SetReviewer(func(_ context.Context, req Request, _ string) error {
+		shown = append([]byte(nil), req.Body...)
+		return nil
+	})
+	if err := g.Check(context.Background(), Request{Provider: "p", Method: "POST", Host: "h", Path: "/p", Body: body}); err != nil {
+		t.Fatalf("承認されたのに止めた: %v", err)
+	}
+	if !strings.Contains(string(shown), evidence) {
+		t.Error("該当箇所が承認者に見えていない")
+	}
+	if len(shown) >= len(body) {
+		t.Errorf("本文全体が承認者に渡っている: %d >= %d", len(shown), len(body))
+	}
+	if !bytes.Contains(shown, []byte("AAAAA")) || !bytes.Contains(shown, []byte("BBBBB")) {
+		t.Error("該当箇所の前後の文脈が無い")
+	}
+}
+
+// 会話履歴のように本文が伸びても、一度点検した塊はローカル LLM に送り直さない。
+func TestInspectReusesInspectedChunks(t *testing.T) {
+	g, fake := newTest(t, config.Guard{MaxBytes: 8, MaxChunks: 64}, `{"action":"allow","reason":"ok"}`, nil)
+	body1 := []byte("abcdefghijklmnopqrst") // 20 バイト
+	if _, err := g.Inspect(context.Background(), Request{Body: body1}); err != nil {
+		t.Fatal(err)
+	}
+	first := fake.count()
+	if first != 4 {
+		t.Fatalf("初回の点検回数 = %d, want 4", first)
+	}
+	body2 := append(append([]byte(nil), body1...), "uvwx"...)
+	if _, err := g.Inspect(context.Background(), Request{Body: body2}); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.count() - first; got != 1 {
+		t.Errorf("伸びた本文で %d 塊を点検した (新しい 1 塊だけのはず)", got)
 	}
 }

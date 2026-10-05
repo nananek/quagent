@@ -9,6 +9,10 @@
 // 判定は追加の一枚であって、許可制や承認コンソールの代わりではない。ローカル LLM は
 // 間違えるので、疑わしいと判定したときは (既定で) その理由と中身を承認コンソールに
 // 出し、人間が通すか止めるかを決める。点検できなかったときの扱いも OnError で選べる。
+//
+// LLM チャットは会話履歴を丸ごと毎回送るので、点検済みの塊は再点検しない。人間の判断は
+// ローカル LLM が指摘した該当箇所 (機密だと思った部分) を単位に覚え、同じ情報を何度も
+// 訊き直さない。承認コンソールには本文全体ではなくその周辺だけを見せる。
 package guard
 
 import (
@@ -330,13 +334,23 @@ func (g *Guard) Check(ctx context.Context, req Request) error {
 	if v.Action != Deny {
 		return nil
 	}
-	// 疑わしいと判定した塊と、LLM が指摘した該当箇所を承認コンソールに見せる
-	// (本文全体だと、どこが問題か分からないため)。鍵は変えない。
-	if len(v.chunk) > 0 {
-		req.Body, req.BodyTruncated = v.chunk, true
+	// 人間の判断は、LLM が指摘した「機密だと思った箇所」(evidence) を単位に覚える。
+	// 会話履歴のように同じ情報 (メールアドレスなど) が何度も送られても、一度決めた
+	// 内容を毎回訊き直さないため。該当箇所が無いときだけリクエスト全体で覚える。
+	dkey := evidenceKey(v.Evidence)
+	if dkey == "" {
+		dkey = key
 	}
+	if allow, reason, ok := g.decision(dkey); ok {
+		if allow {
+			return nil
+		}
+		return fmt.Errorf("%s", reason)
+	}
+	// 承認コンソールには本文全体ではなく、LLM が指摘した該当箇所の周辺だけを見せる。
+	req.Body, req.BodyTruncated = evidenceWindow(v.chunk, v.Evidence)
 	req.Evidence = v.Evidence
-	return g.onSuspect(ctx, key, req, verdictReason(v))
+	return g.onSuspect(ctx, dkey, req, verdictReason(v))
 }
 
 // Inspect は点検の判定だけを返す (Reviewer / Mode / OnError は適用しない)。CLI 用。
@@ -361,10 +375,21 @@ func (g *Guard) inspect(ctx context.Context, key string, req Request) (Verdict, 
 		return Verdict{}, ctx.Err()
 	}
 	for i, chunk := range chunks {
+		// 本文を読み切れていない (more) のは最後の塊にだけ関係する
+		truncated := req.BodyTruncated || (more && i == len(chunks)-1)
+		// 会話履歴のように毎回同じ塊が送られてくるので、一度点検した塊は再点検
+		// しない (前回と同じ判定を使う)。行き先とヘッダも鍵に含める。
+		ckey := g.chunkKey(req, chunk, truncated)
+		if v, ok := g.cachedVerdict(ckey); ok {
+			if v.Action == Deny {
+				v.chunk = chunk
+				return v, nil
+			}
+			continue
+		}
 		part := req
 		part.Body = chunk
-		// 本文を読み切れていない (more) のは最後の塊にだけ関係する
-		part.BodyTruncated = req.BodyTruncated || (more && i == len(chunks)-1)
+		part.BodyTruncated = truncated
 		system, user := buildPrompt(part, i, len(chunks))
 		cctx, ccancel := context.WithTimeout(ctx, g.s.timeout)
 		out, err := g.complete.Complete(cctx, system, user)
@@ -376,9 +401,15 @@ func (g *Guard) inspect(ctx context.Context, key string, req Request) (Verdict, 
 		if err != nil {
 			return Verdict{}, err
 		}
+		// 塊そのものの判定を覚える (本文への参照は残さない)。
+		remember := v
+		remember.chunk = nil
+		g.rememberVerdict(ckey, remember)
 		if v.Action == Deny {
+			// 塊の判定は覚えたので、次回はここで LLM を呼ばずに同じ塊を返す。
+			// リクエスト全体の鍵では覚えない (塊を持ち回らず、該当箇所の周辺を
+			// 承認コンソールに見せられるようにするため)。
 			v.chunk = chunk
-			g.rememberVerdict(key, v)
 			return v, nil
 		}
 	}
@@ -521,28 +552,77 @@ func (g *Guard) logf(format string, a ...any) {
 	}
 }
 
-// cacheKey は点検対象の同一性を表すハッシュを返す。LLM に見せる本文は先頭
-// maxBytes だけだが、人間の判断を後ろの見えない部分に流用しないよう、鍵には
-// 渡ってきた本文 (PeekBody の上限まで) とヘッダを丸ごと含める。
-func (g *Guard) cacheKey(req Request) string {
-	h := sha256.New()
-	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00", req.Provider, req.Method, req.Host, req.Path, req.Query)
+// writeRequestContext は点検対象の同一性のうち、本文によらない部分 (行き先・
+// メソッド・ヘッダ) を w に書く。鍵を組む各所で共通に使う。
+func writeRequestContext(w io.Writer, req Request) {
+	fmt.Fprintf(w, "%s\x00%s\x00%s\x00%s\x00%s\x00", req.Provider, req.Method, req.Host, req.Path, req.Query)
 	names := make([]string, 0, len(req.Headers))
 	for name := range req.Headers {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		fmt.Fprintf(h, "%s:", name)
+		fmt.Fprintf(w, "%s:", name)
 		for _, v := range req.Headers[name] {
-			fmt.Fprintf(h, "%s\x1f", v)
+			fmt.Fprintf(w, "%s\x1f", v)
 		}
-		fmt.Fprint(h, "\x1e")
+		fmt.Fprint(w, "\x1e")
 	}
+}
+
+// cacheKey はリクエスト全体の点検結果を覚えるためのハッシュを返す。LLM に見せる
+// 本文は先頭 maxBytes だけだが、見えていない後ろが違うのに同じ判定を流用しないよう、
+// 鍵には渡ってきた本文 (PeekBody の上限まで) とヘッダを丸ごと含める。
+func (g *Guard) cacheKey(req Request) string {
+	h := sha256.New()
+	writeRequestContext(h, req)
 	fmt.Fprintf(h, "\x1d%t", req.BodyTruncated)
 	h.Write([]byte{0})
 	h.Write(req.Body)
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// chunkKey は本文の塊 1 つと、その周辺 (行き先・ヘッダ、読み切れていないか) から
+// 鍵を作る。会話履歴のように毎回同じ塊が送られてきても、点検済みの塊をローカル
+// LLM に送り直さないため。本文中の位置は含めない (同じ内容なら判定は同じでよい)。
+func (g *Guard) chunkKey(req Request, chunk []byte, truncated bool) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "chunk\x00%t\x00", truncated)
+	writeRequestContext(h, req)
+	h.Write([]byte{0})
+	h.Write(chunk)
+	return "c:" + hex.EncodeToString(h.Sum(nil))
+}
+
+// evidenceKey は LLM が指摘した該当箇所 (機密だと思った部分) から、人間の判断を
+// 覚える鍵を作る。同じ箇所が会話履歴に何度も現れても、一度決めたら訊き直さない
+// ようにするため。文字列そのもので引く (大文字小文字や空白は変えない)。
+func evidenceKey(evidence string) string {
+	evidence = strings.TrimSpace(evidence)
+	if evidence == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(evidence))
+	return "e:" + hex.EncodeToString(sum[:])
+}
+
+// evidenceWindowBytes は承認コンソールに該当箇所の前後どれだけを見せるか。
+const evidenceWindowBytes = 2048
+
+// evidenceWindow は点検した塊のうち、LLM が指摘した該当箇所の周辺だけを返す。
+// 承認者に本文全体を読ませず、どこを見ればよいか分かるようにするため。該当箇所が
+// 見つからないときは塊をそのまま返す。2 つ目の戻り値は前後を切ったかどうか。
+func evidenceWindow(chunk []byte, evidence string) ([]byte, bool) {
+	if evidence == "" || len(chunk) == 0 {
+		return chunk, true
+	}
+	i := bytes.Index(chunk, []byte(evidence))
+	if i < 0 {
+		return chunk, true
+	}
+	start := max(0, i-evidenceWindowBytes)
+	end := min(len(chunk), i+len(evidence)+evidenceWindowBytes)
+	return chunk[start:end:end], start > 0 || end < len(chunk)
 }
 
 func (g *Guard) cachedVerdict(key string) (Verdict, bool) {
