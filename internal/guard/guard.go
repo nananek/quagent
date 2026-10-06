@@ -34,6 +34,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/nananek/quagent/internal/config"
@@ -57,6 +58,22 @@ type Verdict struct {
 	Categories []string
 	// chunk は疑わしいと判定した本文の塊 (承認コンソールに見せる)。内部用。
 	chunk []byte
+	// flags は deny のとき、指摘された該当箇所とその塊を全部持つ。点検した塊の
+	// どれか 1 つでも deny なら、残りの塊も点検してここに集める (途中で打ち切らない)。
+	// 途中で打ち切ると、後ろの塊がモデルにも人間にも見えないまま本文全体が
+	// 転送されてしまう。
+	flags []flag
+}
+
+// flag は LLM が機密だと指摘した 1 つの塊。
+type flag struct {
+	evidence   string
+	reason     string
+	categories []string
+	chunk      []byte
+	// usable は evidence が実際にその塊に現れているか。現れていない引用 (幻覚や
+	// プロンプト注入) を人間の判断の鍵に使わないために見る。
+	usable bool
 }
 
 // Request は点検・承認に渡すリクエストの写し (本文は点検した範囲の抜粋)。
@@ -382,26 +399,42 @@ func (g *Guard) Check(ctx context.Context, req Request) error {
 	if err != nil {
 		return g.onError(ctx, key, req, err)
 	}
-	if v.Action != Deny {
+	if v.Action != Deny || len(v.flags) == 0 {
 		return nil
 	}
 	// 人間の判断は、LLM が指摘した「機密だと思った箇所」(evidence) を単位に覚える。
 	// 会話履歴のように同じ情報 (メールアドレスなど) が何度も送られても、一度決めた
-	// 内容を毎回訊き直さないため。該当箇所が無いときだけリクエスト全体で覚える。
-	dkey := evidenceKey(v.Evidence)
-	if dkey == "" {
-		dkey = key
-	}
-	if allow, reason, ok := g.decision(dkey); ok {
-		if allow {
-			return nil
+	// 内容を毎回訊き直さないため。ただし次の 2 つは守る:
+	//   - 本文に実在しない evidence は鍵にしない (幻覚やプロンプト注入で判断を
+	//     汚染させない)
+	//   - 指摘が複数あるときは全部について判断済みのときだけ流用する (承認済みの
+	//     該当箇所を 1 つ混ぜて、新しく指摘された箇所の確認を素通りさせない)
+	var unknown []flag
+	for _, f := range v.flags {
+		ek := ""
+		if f.usable {
+			ek = evidenceKey(f.evidence)
 		}
-		return fmt.Errorf("%s", reason)
+		if ek == "" {
+			unknown = append(unknown, f)
+			continue
+		}
+		if allow, reason, ok := g.decision(ek); ok {
+			if allow {
+				continue
+			}
+			return fmt.Errorf("%s", reason)
+		}
+		unknown = append(unknown, f)
 	}
-	// 承認コンソールには本文全体ではなく、LLM が指摘した該当箇所の周辺だけを見せる。
-	req.Body, req.BodyTruncated = evidenceWindow(v.chunk, v.Evidence)
-	req.Evidence = v.Evidence
-	return g.onSuspect(ctx, dkey, req, verdictReason(v))
+	if len(unknown) == 0 {
+		return nil
+	}
+	// 承認コンソールには本文全体ではなく、指摘された全ての箇所の周辺を見せる。
+	// 1 つの塊だけを見せると、その塊で deny を起こして後ろの塊を隠す攻撃が通る。
+	req.Body, req.BodyTruncated = reviewerBody(v.flags)
+	req.Evidence = joinEvidence(v.flags)
+	return g.onSuspect(ctx, key, unknown, req, verdictReason(v))
 }
 
 // Inspect は点検の判定だけを返す (Reviewer / Mode / OnError は適用しない)。CLI 用。
@@ -415,8 +448,10 @@ func (g *Guard) inspect(ctx context.Context, key string, req Request) (Verdict, 
 	}
 	// 本文を maxBytes ごとの塊に分けて点検する。塊はオーバーラップさせてあるので、
 	// 境目にまたがる秘密 (chunkOverlap 以下の長さ) もどれかの塊に丸ごと入る。
-	// 1 つでも evidence 付きの deny があれば止める側にする。点検に渡す前に JSON は字下げしておく
-	// (minify されたままでは小さなモデルにどこに何があるか分かりにくい)。
+	// deny が出てもそこで打ち切らず、最後の塊まで点検する。途中で止めると、後ろの
+	// 塊がモデルにも人間にも見えないまま、承認 (本文全体の転送) が通ってしまう。
+	// 点検に渡す前に JSON は字下げしておく (minify されたままでは小さなモデルに
+	// どこに何があるか分かりにくい)。
 	body := presentBody(req)
 	chunks, more := splitChunks(body, g.s.maxBytes, g.s.maxChunks)
 	ctx, cancel := context.WithTimeout(ctx, g.inspectTimeout(len(chunks)))
@@ -427,6 +462,7 @@ func (g *Guard) inspect(ctx context.Context, key string, req Request) (Verdict, 
 	case <-ctx.Done():
 		return Verdict{}, ctx.Err()
 	}
+	var flags []flag
 	for i, chunk := range chunks {
 		// 本文を読み切れていない (more) のは最後の塊にだけ関係する
 		truncated := req.BodyTruncated || (more && i == len(chunks)-1)
@@ -435,8 +471,7 @@ func (g *Guard) inspect(ctx context.Context, key string, req Request) (Verdict, 
 		ckey := g.chunkKey(req, chunk, truncated)
 		if v, ok := g.cachedVerdict(ckey); ok {
 			if v.Action == Deny {
-				v.chunk = chunk
-				return v, nil
+				flags = append(flags, makeFlag(v, chunk))
 			}
 			continue
 		}
@@ -465,16 +500,69 @@ func (g *Guard) inspect(ctx context.Context, key string, req Request) (Verdict, 
 		remember.chunk = nil
 		g.rememberVerdict(ckey, remember)
 		if v.Action == Deny {
-			// 塊の判定は覚えたので、次回はここで LLM を呼ばずに同じ塊を返す。
-			// リクエスト全体の鍵では覚えない (塊を持ち回らず、該当箇所の周辺を
-			// 承認コンソールに見せられるようにするため)。
-			v.chunk = chunk
-			return v, nil
+			flags = append(flags, makeFlag(v, chunk))
 		}
+	}
+	if len(flags) > 0 {
+		return denyVerdict(flags), nil
 	}
 	v := Verdict{Action: Allow}
 	g.rememberVerdict(key, v)
 	return v, nil
+}
+
+// makeFlag は塊 1 つの deny 判定から、人間に見せるための flag を作る。evidence が
+// 実際にその塊に現れていなければ usable=false (判断の鍵には使わない)。
+func makeFlag(v Verdict, chunk []byte) flag {
+	return flag{
+		evidence:   v.Evidence,
+		reason:     v.Reason,
+		categories: v.Categories,
+		chunk:      chunk,
+		usable:     evidencePresent(chunk, v.Evidence),
+	}
+}
+
+// denyVerdict は deny した塊をまとめて 1 つの判定にする。先頭を代表として
+// Evidence / Reason / Categories / chunk にも入れる (CLI などの表示用)。
+func denyVerdict(flags []flag) Verdict {
+	v := Verdict{Action: Deny, flags: flags}
+	v.Evidence = flags[0].evidence
+	v.Reason = flags[0].reason
+	v.Categories = flags[0].categories
+	v.chunk = flags[0].chunk
+	return v
+}
+
+// evidencePresent は evidence が chunk に現れているかを返す。制御文字を落として
+// 改行を空白にした引用 (cleanEvidence) でも、字下げした本文の改行を空白にまとめれば
+// 一致するよう、空白の連続を 1 つに畳んでから比べる。
+func evidencePresent(chunk []byte, evidence string) bool {
+	if evidence == "" || len(chunk) == 0 {
+		return false
+	}
+	if bytes.Contains(chunk, []byte(evidence)) {
+		return true
+	}
+	return strings.Contains(foldSpace(string(chunk)), foldSpace(evidence))
+}
+
+// foldSpace は空白の連続を 1 つの空白にまとめ、前後の空白を落とす。
+func foldSpace(s string) string {
+	var b strings.Builder
+	space := false
+	for _, r := range s {
+		if unicode.IsSpace(r) {
+			space = true
+			continue
+		}
+		if space && b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		space = false
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // inspectTimeout は分割点検の合計時間の上限を返す (塊の数だけ伸ばし、上限で切る)。
@@ -513,14 +601,19 @@ func splitChunks(body []byte, n, limit int) (chunks [][]byte, more bool) {
 	return chunks, covered < len(body)
 }
 
-// onSuspect は「疑わしい」と判定されたリクエストの扱いを決める。
-func (g *Guard) onSuspect(ctx context.Context, key string, req Request, reason string) error {
+// onSuspect は「疑わしい」と判定されたリクエストの扱いを決める。flags は今回
+// 判断が必要な (まだ人間が決めていない) 指摘だけを渡す。
+func (g *Guard) onSuspect(ctx context.Context, key string, flags []flag, req Request, reason string) error {
 	switch g.s.mode {
 	case modeAdvisory:
 		g.logf("疑わしいが通した (advisory): %s", reason)
 		return nil
 	case modeDeny:
-		g.rememberDenied(req.Evidence, reason)
+		for _, f := range flags {
+			if f.usable {
+				g.rememberDenied(f.evidence, reason)
+			}
+		}
 		return fmt.Errorf("%s", reason)
 	}
 	if g.review == nil {
@@ -533,11 +626,21 @@ func (g *Guard) onSuspect(ctx context.Context, key string, req Request, reason s
 	}
 	if err := g.reviewWithSem(ctx, req, reason); err != nil {
 		g.rememberDecision(key, false, reason)
-		g.rememberDenied(req.Evidence, reason)
+		for _, f := range flags {
+			if f.usable {
+				g.rememberDecision(evidenceKey(f.evidence), false, reason)
+				g.rememberDenied(f.evidence, reason)
+			}
+		}
 		return fmt.Errorf("承認されなかったので止めた: %s", reason)
 	}
 	g.logf("承認者が通した: %s", reason)
 	g.rememberDecision(key, true, reason)
+	for _, f := range flags {
+		if f.usable {
+			g.rememberDecision(evidenceKey(f.evidence), true, reason)
+		}
+	}
 	return nil
 }
 
@@ -686,6 +789,34 @@ func evidenceWindow(chunk []byte, evidence string) ([]byte, bool) {
 	start := max(0, i-evidenceWindowBytes)
 	end := min(len(chunk), i+len(evidence)+evidenceWindowBytes)
 	return chunk[start:end:end], start > 0 || end < len(chunk)
+}
+
+// reviewerBody は deny した全ての塊について、該当箇所の周辺をつないで承認者に見せる。
+// 1 つの塊だけを見せると、そこにデコイを置いて後ろの塊を隠す攻撃が通ってしまう。
+func reviewerBody(flags []flag) ([]byte, bool) {
+	if len(flags) == 1 {
+		return evidenceWindow(flags[0].chunk, flags[0].evidence)
+	}
+	var b bytes.Buffer
+	for i, f := range flags {
+		if i > 0 {
+			b.WriteString("\n---\n")
+		}
+		w, _ := evidenceWindow(f.chunk, f.evidence)
+		b.Write(w)
+	}
+	return b.Bytes(), true
+}
+
+// joinEvidence は指摘された該当箇所を 1 行にまとめる (承認コンソールの「該当箇所」欄)。
+func joinEvidence(flags []flag) string {
+	var parts []string
+	for _, f := range flags {
+		if e := strings.TrimSpace(f.evidence); e != "" {
+			parts = append(parts, e)
+		}
+	}
+	return strings.Join(parts, " / ")
 }
 
 func (g *Guard) cachedVerdict(key string) (Verdict, bool) {
@@ -974,14 +1105,27 @@ func concreteVerdict(v Verdict) Verdict {
 	return v
 }
 
-// verdictReason は判定を表示・HTTP 本文に出せる 1 行の理由にする。
+// verdictReason は判定を表示・HTTP 本文に出せる 1 行の理由にする。指摘が複数
+// あるときは全部の理由を並べる。
 func verdictReason(v Verdict) string {
-	reason := cleanReason(v.Reason)
+	if len(v.flags) > 1 {
+		parts := make([]string, 0, len(v.flags))
+		for _, f := range v.flags {
+			parts = append(parts, flagReason(f))
+		}
+		return strings.Join(parts, " / ")
+	}
+	return flagReason(flag{reason: v.Reason, categories: v.Categories})
+}
+
+// flagReason は 1 つの指摘の理由を表示できる形にする。
+func flagReason(f flag) string {
+	reason := cleanReason(f.reason)
 	if reason == "" {
 		reason = "機密情報の持ち出しが疑われる内容"
 	}
-	if len(v.Categories) > 0 {
-		reason += " [" + strings.Join(v.Categories, ", ") + "]"
+	if len(f.categories) > 0 {
+		reason += " [" + strings.Join(f.categories, ", ") + "]"
 	}
 	return reason
 }

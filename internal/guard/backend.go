@@ -12,12 +12,15 @@ import (
 )
 
 // verdictSchema はローカル LLM に強制する出力の形。Ollama の structured outputs と、
-// OpenAI 互換サーバーの json_schema 応答形式の両方で使う。
+// OpenAI 互換サーバーの json_schema 応答形式の両方で使う。evidence を載せ忘れると、
+// strict な structured output ではモデルが引用を返せず、deny が必ず allow に落ちる
+// (concreteVerdict は evidence の無い deny を通すため)。
 var verdictSchema = map[string]any{
 	"type": "object",
 	"properties": map[string]any{
 		"action":     map[string]any{"type": "string", "enum": []string{"allow", "deny"}},
 		"reason":     map[string]any{"type": "string"},
+		"evidence":   map[string]any{"type": "string"},
 		"categories": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 	},
 	"required": []string{"action", "reason"},
