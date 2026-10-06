@@ -127,7 +127,7 @@ func QemuArgv(o QemuOpts) ([]string, error) {
 		"-smp", strconv.Itoa(o.CPUs), "-m", strconv.Itoa(o.MemMiB),
 		"-nographic", "-serial", "file:" + o.ConsoleLog, "-monitor", "none",
 		// 追加のディスクがあっても起動はこのディスクから
-		"-drive", "file=" + o.Disk + ",if=none,id=root,format=qcow2",
+		"-drive", "file=" + o.Disk + ",if=none,id=root,format=qcow2,discard=unmap",
 		"-device", "virtio-blk-pci,drive=root,bootindex=0",
 		"-drive", "file=" + o.Seed + ",if=virtio,format=raw,readonly=on",
 		"-netdev", netdev,

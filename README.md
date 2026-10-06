@@ -69,7 +69,9 @@ TUI を使わずに直接操作することもできる:
 
 ```sh
 quagent image recipes          # 使えるレシピ (OS) の一覧
-quagent image build [--refresh] arch   # ベースイメージを焼く (--refresh でクラウドイメージも取り直す)
+quagent image build [--refresh|--incremental] arch   # ベースイメージを焼く / 差分更新する
+                               #   --refresh: クラウドイメージも取り直す
+                               #   --incremental: 前回のイメージから更新 (カーネルは更新があるときだけ)
 quagent image ls / rm IMAGE    # 焼いたイメージの一覧・削除
 quagent guard check "本文"      # ローカル LLM による内容点検を 1 件試す (下記)
 quagent run --image arch       # VM を起動 (--ssh: 人が ssh で入れる、--mount-tmp: .tmp を受け渡す)
@@ -78,7 +80,8 @@ quagent run --image arch       # VM を起動 (--ssh: 人が ssh で入れる、
 焼き込みは起動画面では行わない。まだ 1 つも焼いていない初回は、メニューではなく
 管理画面 (ベースイメージの管理) を開いて焼き込みへ誘導する。起動画面で選んだ OS の
 イメージが無いときも、そこへ案内する。焼き込みの前に、焼き込み VM の CPU とメモリを
-指定できる (前回の値が既定。カーネルを作り直すレシピはコアが多いほど速い)。管理画面
+指定できる (前回の値が既定。カーネルを作り直すレシピはコアが多いほど速い)。前回の
+イメージがあるときは「差分更新」と「焼き直し」を選べる (差分更新は下記)。管理画面
 からは OS ごとの焼き込み・更新のほか、イメージの個別削除 (各 OS の最新も消せる) と、
 古いものを残さない prune ができる。
 
@@ -244,7 +247,9 @@ cloud-init)。今は `debian`・`arch`・`gentoo`。`recipe.json` の `descripti
 オプション (GRUB) にも硬化を入れる。配布イメージは UEFI 専用 (BIOS のブートコードが
 無い) なので `firmware` を `uefi` にする (ホストに OVMF が要る)。カーネルを作り直す
 ので、他のレシピより時間がかかる (上限は `recipe.json` の `build_timeout_minutes`、
-既定 45 分)。
+既定 45 分)。焼き込みの最後にビルドのキャッシュ (Portage の作業場・distfiles・
+binhost) を消し、fstrim で qcow2 からも解放するので、できたイメージには残らない
+(イメージが小さい)。
 
 Gentoo の cloud image はファイル名にタイムスタンプが入り URL が固定できない。そこで
 `latest_url` に「今のファイル名を載せた小さなテキスト」を指定し、`cloud_image_url` /
@@ -271,6 +276,14 @@ issue を立てる。
 `uefi` にすると OVMF で起動する (配布イメージが UEFI 専用のとき。ホストに OVMF が
 要る)。焼いたイメージには起動方法を付帯情報 (`base-*.json`) として残すので、run は
 レシピを後から変えてもイメージに合った方法で起動する。
+
+`--incremental` (TUI では「差分更新」) は、前回焼いたイメージを出発点にして、
+イメージで使うパッケージ (slirp4netns・fuse-overlayfs) を更新し、カーネルは新しい版が
+入ったときだけ作り直す (`emerge --update` が何もしなければ数秒で終わる)。ベース
+システム全体 (@world) は更新しない。配布イメージの base はリリースエンジニアリングが
+焼いた古い stage で、更新すると Rust/clang/LLVM のような大きなビルドを呼ぶことが
+あるため (数時間かかる)。base ごと更新したくなったら `--refresh` でクラウドイメージ
+から焼き直す。
 
 ## LLM API の認証プロキシ
 
