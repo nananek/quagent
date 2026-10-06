@@ -80,6 +80,7 @@ write_files:
       CONFIG_HIBERNATION=n
       CONFIG_UEVENT_HELPER=n
       CONFIG_FW_LOADER_USER_HELPER=n
+      CONFIG_IO_URING=n
 
       # 土台の配布カーネル設定に頼らず、硬化をここで明示する。
       CONFIG_HARDENED_USERCOPY=y
@@ -88,10 +89,13 @@ write_files:
       CONFIG_STACKPROTECTOR_STRONG=y
       CONFIG_SLAB_FREELIST_RANDOM=y
       CONFIG_SLAB_FREELIST_HARDENED=y
+      CONFIG_RANDOM_KMALLOC_CACHES=y
       CONFIG_SHUFFLE_PAGE_ALLOCATOR=y
+      CONFIG_LIST_HARDENED=y
       CONFIG_X86_KERNEL_IBT=y
       CONFIG_SECURITY_LANDLOCK=y
       CONFIG_SECURITY_YAMA=y
+      CONFIG_BPF_LSM=y
 
       # モジュール署名 (ビルドが鍵を生成し、署名の無いモジュールを拒否する)
       CONFIG_MODULE_SIG=y
@@ -106,7 +110,7 @@ write_files:
       CONFIG_LOCK_DOWN_KERNEL_FORCE_CONFIDENTIALITY=y
       CONFIG_SECURITY_DMESG_RESTRICT=y
       CONFIG_SECURITY_SAFESETID=y
-      CONFIG_LSM="landlock,yama,bpf,lockdown"
+      CONFIG_LSM="landlock,yama,safesetid,bpf,lockdown"
 
       # 硬化の前提が崩れたら止める
       CONFIG_BUG_ON_DATA_CORRUPTION=y
@@ -119,14 +123,17 @@ write_files:
       kernel.kptr_restrict=2
       kernel.dmesg_restrict=1
       kernel.yama.ptrace_scope=2
-      kernel.unprivileged_bpf_disabled=1
+      kernel.unprivileged_bpf_disabled=2
       kernel.perf_event_paranoid=3
+      kernel.sysrq=0
       net.core.bpf_jit_harden=2
       vm.unprivileged_userfaultfd=0
+      fs.suid_dumpable=0
       fs.protected_hardlinks=1
       fs.protected_symlinks=1
       fs.protected_fifos=2
       fs.protected_regular=2
+      dev.tty.ldisc_autoload=0
   # slirp4netns (rootless docker のネットワーク) が使う。ip_tables は
   # rootless docker が iptables (legacy) を使うため。
   - path: /etc/modules-load.d/quagent.conf
@@ -150,8 +157,9 @@ write_files:
       # 焼き込みのあいだだけ ptrace を許す。git 2.52 以降の Rust 部品 (USE=rust、
       # 既定で有効) は cargo が PTRACE_TRACEME を使うが、硬化設定の
       # kernel.yama.ptrace_scope=2 はこれを拒否してビルドが落ちる。sysctl.d の
-      # 設定自体は触らないので、起動し直したイメージでは 2 に戻る。
-      echo 1 > /proc/sys/kernel/yama/ptrace_scope
+      # 設定自体は触らないので、起動し直したイメージでは 2 に戻る。土台に yama が
+      # 無ければ書けないが、そのときの既定は 0 なので緩める必要も無い。
+      echo 1 > /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || true
 
       # クラウドイメージには Portage ツリーが入っていない (make.profile は
       # /var/db/repos/gentoo を指しているだけ)。ツリーを取ってから切り替える。
@@ -219,9 +227,13 @@ write_files:
       # 硬化が効かないカーネルを焼いてしまう。書いた行と config を 1 行ずつ突き合わせ、
       # ずれがあれば焼き込みを失敗させる。config fragment を直すときは、ここも通る
       # ように (実在するシンボルと値にする) する。
-      KCONFIG=/usr/src/linux/.config
-      [ -r "$KCONFIG" ] || KCONFIG=$(ls -1 /usr/src/linux-*/.config 2>/dev/null | sort -V | tail -1 || true)
+      # 今ビルドしたカーネルの config を照合する。バージョン付きの置き場を
+      # 新しい順に選び、無ければ symlink に落とす。土台の config を掴んで
+      # いないか分かるよう、使ったパスを残す。
+      KCONFIG=$(ls -1 /usr/src/linux-*/.config 2>/dev/null | sort -V | tail -1 || true)
+      [ -r "$KCONFIG" ] || KCONFIG=/usr/src/linux/.config
       test -r "$KCONFIG" || { echo "quagent-build: カーネル config ($KCONFIG) が見つからない"; exit 1; }
+      echo "quagent-build: 硬化 CONFIG を ${KCONFIG} と突き合わせる"
       verify_config() {
         local sym want got
         while IFS= read -r line; do
