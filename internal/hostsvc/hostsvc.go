@@ -45,6 +45,13 @@ type AuditEvent struct {
 	Took   time.Duration
 }
 
+// LogLine は監査イベントを host.log の 1 行にする。Method / Path は VM が決められる
+// ので %q で書く (改行や制御文字で別のログ行を偽装させない)。
+func (e AuditEvent) LogLine() string {
+	return fmt.Sprintf("audit: %q %q -> %d (%d bytes, %s)",
+		e.Method, e.Path, e.Status, e.Bytes, e.Took.Round(time.Millisecond))
+}
+
 // Server は窓口の HTTP サーバー。
 type Server struct {
 	Mux *http.ServeMux

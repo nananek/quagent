@@ -195,6 +195,8 @@ Landlock (書き込み先の制限) をかけ、それから本来のコマン�
   `perf_event_open` / `process_vm_readv` なども拒否する。rootless docker のデーモンは
   agent のプロセス木の外 (systemd) にいるので通常は影響しないが、agent が直接
   `unshare` / `bwrap` / io_uring を使う作業はできなくなる。
+  別 ABI からの同じ番号の syscall (32bit の `int 0x80`、x32) は、arch や番号を
+  偽っても拒否する (プロセスを殺す)。64bit 以外のバイナリは動かせない。
 - **Landlock** (`landlock: true`、既定 off): 書き込み・作成・削除・rename を
   `read_write_paths` (既定: ホーム・`/work`・`/tmp`・`/var/tmp`・`/run/user/<uid>`・
   `/dev/shm`) の下だけに限る。読み取りは制限しない。カーネルが Landlock に未対応なら

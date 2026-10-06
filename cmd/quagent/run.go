@@ -211,7 +211,7 @@ func run(o runOpts) error {
 	// 窓口 (vsock) へのリクエストを host 信頼で記録する。VM が何を host に求めたかは
 	// VM の中の記録と違い改変されない (host.log に残る)。
 	svc.Audit = func(e hostsvc.AuditEvent) {
-		logger.Printf("audit: %s %s -> %d (%d bytes, %s)", e.Method, e.Path, e.Status, e.Bytes, e.Took.Round(time.Millisecond))
+		logger.Print(e.LogLine())
 	}
 	// 許可していない LLM API の操作は、承認コンソールができてからそこに出す
 	llmDenied := make(chan string, 16)
