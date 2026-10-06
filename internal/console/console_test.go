@@ -143,7 +143,7 @@ func TestCompactExcerpt(t *testing.T) {
 	}
 }
 
-// AskGuard は内容ガードの確認を承認コンソールに流し、y/n で決着する。
+// AskGuard はコンテンツガードの確認を承認コンソールに流し、y/n で決着する。
 func TestAskGuard(t *testing.T) {
 	sock := filepath.Join(t.TempDir(), "console.sock")
 	m, err := access.NewManager(noApply{}, filepath.Join(t.TempDir(), "always.json"))

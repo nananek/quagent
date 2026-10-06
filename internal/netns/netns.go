@@ -169,7 +169,7 @@ func (l *Launcher) runInspect(req *InspectRequest, id int) {
 	l.mu.Unlock()
 	var err error
 	if fn == nil {
-		err = fmt.Errorf("内容ガードが設定されていない")
+		err = fmt.Errorf("コンテンツガードが設定されていない")
 	} else {
 		err = fn(*req)
 	}

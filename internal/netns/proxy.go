@@ -35,7 +35,7 @@ type webProxy struct {
 	sem chan struct{}
 
 	// mitm が nil でなければ、許可した TLS 接続を終端し、中身を点検してから
-	// 本来のサーバーへ張り直す (内部 HTTPS の内容ガード)。
+	// 本来のサーバーへ張り直す (内部 HTTPS のコンテンツガード)。
 	mitm *tlsmitm.CA
 	// inspect は終端した HTTPS リクエストを点検する。通すなら nil、止めるなら理由。
 	// nil なら点検せず通す (終端はするが中身は見ない)。

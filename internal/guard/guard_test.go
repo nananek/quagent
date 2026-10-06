@@ -229,9 +229,9 @@ func TestCheckDenyAsksReviewerAndCachesDecision(t *testing.T) {
 }
 
 func TestCheckReviewerRejects(t *testing.T) {
-	g, _ := newTest(t, config.Guard{Mode: "ask"}, `{"action":"deny","reason":"だめ"}`, nil)
+	g, _ := newTest(t, config.Guard{Mode: "ask"}, `{"action":"deny","reason":"だめ","evidence":"secret-1"}`, nil)
 	g.SetReviewer(func(context.Context, Request, string) error { return errors.New("拒否") })
-	err := g.Check(context.Background(), Request{Body: []byte("x")})
+	err := g.Check(context.Background(), Request{Body: []byte("x secret-1")})
 	if err == nil || !strings.Contains(err.Error(), "承認されなかった") {
 		t.Fatalf("止まらなかった: %v", err)
 	}
@@ -239,23 +239,44 @@ func TestCheckReviewerRejects(t *testing.T) {
 
 func TestCheckModes(t *testing.T) {
 	// deny: 人間に聞かずに止める
-	g, _ := newTest(t, config.Guard{Mode: "deny"}, `{"action":"deny","reason":"だめ"}`, nil)
+	g, _ := newTest(t, config.Guard{Mode: "deny"}, `{"action":"deny","reason":"だめ","evidence":"secret-1"}`, nil)
 	asked := false
 	g.SetReviewer(func(context.Context, Request, string) error { asked = true; return nil })
-	if err := g.Check(context.Background(), Request{Body: []byte("x")}); err == nil {
+	if err := g.Check(context.Background(), Request{Body: []byte("x secret-1")}); err == nil {
 		t.Error("deny モードで止まらなかった")
 	}
 	if asked {
 		t.Error("deny モードなのに承認者に聞いた")
 	}
 	// advisory: 通すがモデルは呼ぶ
-	g, fake := newTest(t, config.Guard{Mode: "advisory"}, `{"action":"deny","reason":"だめ"}`, nil)
-	if err := g.Check(context.Background(), Request{Body: []byte("x")}); err != nil {
+	g, fake := newTest(t, config.Guard{Mode: "advisory"}, `{"action":"deny","reason":"だめ","evidence":"secret-1"}`, nil)
+	if err := g.Check(context.Background(), Request{Body: []byte("x secret-1")}); err != nil {
 		t.Errorf("advisory で止めた: %v", err)
 	}
 	if fake.count() != 1 {
 		t.Error("advisory でモデルを呼んでいない")
 	}
+}
+
+// 具体的な該当箇所 (evidence) を指せない deny は漠然とした疑いにすぎないので通す。
+// 承認者にも出さない (素の VM では秘密はまれなので、止めるのは引用できたときだけ)。
+func TestCheckIgnoresDenyWithoutEvidence(t *testing.T) {
+	t.Run("ask", func(t *testing.T) {
+		g, _ := newTest(t, config.Guard{Mode: "ask"}, `{"action":"deny","reason":"なにか怪しい"}`, nil)
+		g.SetReviewer(func(context.Context, Request, string) error {
+			t.Error("具体的な該当箇所が無いのに承認者に聞いた")
+			return nil
+		})
+		if err := g.Check(context.Background(), Request{Body: []byte("hello")}); err != nil {
+			t.Fatalf("具体的な指摘が無いのに止めた: %v", err)
+		}
+	})
+	t.Run("deny", func(t *testing.T) {
+		g, _ := newTest(t, config.Guard{Mode: "deny"}, `{"action":"deny","reason":"なにか怪しい"}`, nil)
+		if err := g.Check(context.Background(), Request{Body: []byte("hello")}); err != nil {
+			t.Fatalf("evidence の無い deny で止めた: %v", err)
+		}
+	})
 }
 
 func TestCheckOnError(t *testing.T) {

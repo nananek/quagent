@@ -176,14 +176,14 @@ func run(o runOpts) error {
 	}
 	// 許可していない LLM API の操作は、承認コンソールができてからそこに出す
 	llmDenied := make(chan string, 16)
-	// 内容ガード (ローカル LLM)。承認コンソールはこの後で作るので、Reviewer は後から差す。
+	// コンテンツガード (ローカル LLM)。承認コンソールはこの後で作るので、Reviewer は後から差す。
 	var contentGuard *guard.Guard
 	if cfg.Guard.Enabled {
 		contentGuard, err = guard.New(cfg.Guard, logger)
 		if err != nil {
-			return fmt.Errorf("内容ガードを作れない: %w", err)
+			return fmt.Errorf("コンテンツガードを作れない: %w", err)
 		}
-		logf("内容ガード: %s で LLM プロキシのリクエストを点検する", contentGuard)
+		logf("コンテンツガード: %s で LLM プロキシのリクエストを点検する", contentGuard)
 	}
 	// HTTPS も終端して点検するなら、run ごとの使い捨て CA を 1 つ作る。証明書は
 	// guest の信頼ストアに入れ、秘密鍵は host の作業ディレクトリ (0700) から出さない。
@@ -339,7 +339,7 @@ runcmd:
 		go contentGuard.Warm(context.Background())
 	}
 	if inspectHTTPS {
-		// 子が TLS 終端して取り出した HTTPS のリクエストを、同じ内容ガードにかける。
+		// 子が TLS 終端して取り出した HTTPS のリクエストを、同じコンテンツガードにかける。
 		// 認証プロキシと同じ Guard を使うので、拒否した該当箇所の記憶も共有される。
 		l.SetInspector(func(req netns.InspectRequest) error {
 			return contentGuard.Check(context.Background(), guard.Request{

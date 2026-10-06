@@ -103,10 +103,10 @@ func describe(r access.Result) resultOut {
 	return out
 }
 
-// guardPR は PR のタイトル・本文を内容ガードに通す。LLM プロキシと同じ判定を
+// guardPR は PR のタイトル・本文をコンテンツガードに通す。LLM プロキシと同じ判定を
 // 使うので、疑わしければ承認コンソールで人間が決める。g が nil なら何もしない。
 // PR は host の gh (host のネットワーク) に出るので、ここを通さないと egress の
-// 許可制も内容ガードもすり抜けて任意のテキストを持ち出せてしまう。
+// 許可制もコンテンツガードもすり抜けて任意のテキストを持ち出せてしまう。
 func guardPR(ctx context.Context, g *guard.Guard, in prIn) error {
 	if g == nil {
 		return nil
@@ -138,7 +138,7 @@ type PRPublisher interface {
 }
 
 // Handler は MCP サーバーの HTTP ハンドラを返す。g が nil でなければ、PR の
-// タイトル・本文も LLM プロキシと同じ内容ガードに通す。
+// タイトル・本文も LLM プロキシと同じコンテンツガードに通す。
 func Handler(m *access.Manager, pub PRPublisher, g *guard.Guard, logf func(string)) http.Handler {
 	s := mcp.NewServer(&mcp.Implementation{Name: "quagent", Version: "0.1.0"},
 		&mcp.ServerOptions{Instructions: instructions})
@@ -207,7 +207,7 @@ func Handler(m *access.Manager, pub PRPublisher, g *guard.Guard, logf func(strin
 			"Call again with the same branch after adding commits to update the PR. Do not rewrite already-published commits.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in prIn) (*mcp.CallToolResult, pr.Result, error) {
 		if err := guardPR(ctx, g, in); err != nil {
-			logf("PR の内容が内容ガードで止まった (" + in.Branch + "): " + err.Error())
+			logf("PR の内容がコンテンツガードで止まった (" + in.Branch + "): " + err.Error())
 			return nil, pr.Result{}, err
 		}
 		res, err := pub.Publish(pr.Request{Branch: in.Branch, Title: in.Title, Body: in.Body, Base: in.Base})

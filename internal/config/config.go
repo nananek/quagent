@@ -53,13 +53,13 @@ type Guard struct {
 	MaxChunks int `json:"max_chunks,omitempty"`
 	// Concurrency は同時に点検する件数。GPU 1 枚なら 1 (既定)。
 	Concurrency int `json:"concurrency,omitempty"`
-	// Mode は疑わしいときの扱い。"ask" (既定。承認コンソールが通すか止めるか決める)、
+	// Mode は LLM が evidence を引用して deny したときの扱い。"ask" (既定。承認コンソールが通すか止めるか決める)、
 	// "deny" (確認せず止める)、"advisory" (ログに残して通す) のどれか。
 	Mode string `json:"mode,omitempty"`
 	// OnError は点検できなかったときの扱い。"ask" (既定)、"deny"、"allow" のどれか。
 	OnError string `json:"on_error,omitempty"`
 	// InspectHTTPS は、許可した行き先への HTTPS を host 側で TLS 終端し、平文に
-	// なったリクエストも同じ内容ガードにかける。使い捨ての CA を作って guest の
+	// なったリクエストも同じコンテンツガードにかける。使い捨ての CA を作って guest の
 	// 信頼ストアに入れるので、証明書を固定 (pinning) するクライアントとは相性が悪い。
 	// Enabled が true のときだけ使える。
 	InspectHTTPS bool `json:"inspect_https,omitempty"`

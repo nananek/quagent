@@ -15,7 +15,7 @@ import (
 )
 
 // InspectRequest は透明プロキシが終端して取り出した HTTP リクエストの点検依頼。
-// 子プロセスが親へ送り、親が内容ガード (ローカル LLM) にかけて可否を返す。
+// 子プロセスが親へ送り、親がコンテンツガード (ローカル LLM) にかけて可否を返す。
 type InspectRequest struct {
 	// Provider は点検の表示に使う区分 (直接の "https" / "http")。
 	Provider string      `json:"provider"`
@@ -193,7 +193,7 @@ func (p *webProxy) dialUpstream(dst, sni string) (net.Conn, error) {
 	return tc, nil
 }
 
-// check は 1 リクエストを内容ガードにかける。点検する本文は先頭の一部だけを読み、
+// check は 1 リクエストをコンテンツガードにかける。点検する本文は先頭の一部だけを読み、
 // 残りはそのまま転送できるように req.Body を差し替える。
 func (p *webProxy) check(req *http.Request, host string) error {
 	if p.inspect == nil {
@@ -285,7 +285,7 @@ func peekBody(req *http.Request, n int) (body []byte, truncated bool, err error)
 	}
 }
 
-// writeBlocked は内容ガードが止めたことをクライアントに 403 で返す。
+// writeBlocked はコンテンツガードが止めたことをクライアントに 403 で返す。
 func writeBlocked(w io.Writer, cause error) {
 	body := "quagent: blocked by the request content guard: " + cause.Error() + "\n"
 	resp := &http.Response{

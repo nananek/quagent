@@ -177,11 +177,11 @@ func (u *clientUI) onMsg(m Msg) {
 			case want == "guardrequest":
 				switch m.Status {
 				case access.Approved:
-					fmt.Printf("内容ガード #%d: 通した\n", m.ID)
+					fmt.Printf("コンテンツガード #%d: 通した\n", m.ID)
 				case access.TimedOut:
-					fmt.Printf("内容ガード #%d: 時間切れ (止めた)\n", m.ID)
+					fmt.Printf("コンテンツガード #%d: 時間切れ (止めた)\n", m.ID)
 				default:
-					fmt.Printf("内容ガード #%d: 止めた\n", m.ID)
+					fmt.Printf("コンテンツガード #%d: 止めた\n", m.ID)
 				}
 			default:
 				text := statusText[m.Status]
@@ -222,7 +222,7 @@ func (u *clientUI) show() {
 		u.focus()
 		return
 	case "guardrequest":
-		fmt.Printf("\n"+bold+cyan+"━━ 内容ガードの確認 #%d ━━"+reset+"\n", r.ID)
+		fmt.Printf("\n"+bold+cyan+"━━ コンテンツガードの確認 #%d ━━"+reset+"\n", r.ID)
 		fmt.Printf(bold+"リクエスト:"+reset+" %s %s (%s)\n", Sanitize(r.Method), Sanitize(r.URL), Sanitize(r.Provider))
 		if len(r.Headers) > 0 {
 			fmt.Print(bold + "ヘッダ:" + reset + "\n")
@@ -266,7 +266,7 @@ func truncateRunes(s string, n int) string {
 	return string(r[:n]) + "…"
 }
 
-// 内容ガードの確認に出す本文の抜粋の大きさ。承認コンソールの画面に収まるよう、
+// コンテンツガードの確認に出す本文の抜粋の大きさ。承認コンソールの画面に収まるよう、
 // 該当箇所の前後を少しだけ見せ、行が長ければ横にも切る。
 const (
 	guardExcerptLines = 10
