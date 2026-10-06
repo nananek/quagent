@@ -23,6 +23,7 @@ import (
 	"github.com/nananek/quagent/internal/hostsvc"
 	"github.com/nananek/quagent/internal/image"
 	"github.com/nananek/quagent/internal/netns"
+	"github.com/nananek/quagent/internal/sandbox"
 	"github.com/nananek/quagent/internal/tui"
 )
 
@@ -78,6 +79,8 @@ func dispatch(args []string) error {
 		return guest.Serve(hostsvc.GuestPort, uint32(port))
 	case execCommand:
 		return cmdExec(args[1:])
+	case sandbox.LauncherCommand:
+		return sandbox.Run(args[1:])
 	case attachCommand:
 		return cmdAttach(args[1:])
 	case consoleCommand:
