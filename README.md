@@ -247,7 +247,8 @@ cloud-init)。今は `debian`・`arch`・`gentoo`。`recipe.json` の `descripti
 オプション (GRUB) にも硬化を入れる。配布イメージは UEFI 専用 (BIOS のブートコードが
 無い) なので `firmware` を `uefi` にする (ホストに OVMF が要る)。カーネルを作り直す
 ので、他のレシピより時間がかかる (上限は `recipe.json` の `build_timeout_minutes`、
-既定 45 分)。
+既定 45 分)。焼き込みの最後にビルドのキャッシュ (Portage の作業場・distfiles・
+binhost) を消すので、できたイメージには残らない。
 
 Gentoo の cloud image はファイル名にタイムスタンプが入り URL が固定できない。そこで
 `latest_url` に「今のファイル名を載せた小さなテキスト」を指定し、`cloud_image_url` /

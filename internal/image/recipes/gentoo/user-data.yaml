@@ -203,6 +203,11 @@ write_files:
       fi
       grub-mkconfig -o /boot/grub/grub.cfg
 
+      # ビルドに使ったキャッシュをイメージに残さない (Portage の作業場・
+      # distfiles・binhost のバイナリ)。次は必要になった分だけ取り直す。
+      rm -rf /var/tmp/portage /var/tmp/emerge-webrsync.*
+      rm -rf /var/cache/distfiles /var/cache/binhost
+
       echo {{.Marker}} > /dev/ttyS0
 runcmd:
   - [/usr/local/sbin/quagent-build.sh]
