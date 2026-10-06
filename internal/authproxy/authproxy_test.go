@@ -73,13 +73,13 @@ func TestRegisterRejectsBadAllow(t *testing.T) {
 	}
 }
 
-// 内容ガードが拒否すれば upstream へ届かず、通せば本文を保ったまま届く。
+// コンテンツガードが拒否すれば upstream へ届かず、通せば本文を保ったまま届く。
 func TestGateContentGuard(t *testing.T) {
 	action := "deny"
 	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"choices": []map[string]any{{"message": map[string]string{
-				"content": `{"action":"` + action + `","reason":"秘密が漏れる"}`,
+				"content": `{"action":"` + action + `","reason":"秘密が漏れる","evidence":"hello"}`,
 			}}},
 		})
 	}))

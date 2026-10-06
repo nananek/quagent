@@ -13,13 +13,13 @@ import (
 	"github.com/nananek/quagent/internal/guard"
 )
 
-// newGuard は action を返す偽のローカル LLM を使う内容ガードを作る。
+// newGuard は action を返す偽のローカル LLM を使うコンテンツガードを作る。
 func newGuard(t *testing.T, action string) *guard.Guard {
 	t.Helper()
 	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"choices": []map[string]any{{"message": map[string]string{
-				"content": `{"action":"` + action + `","reason":"理由"}`,
+				"content": `{"action":"` + action + `","reason":"理由","evidence":"秘密"}`,
 			}}},
 		})
 	}))
@@ -32,7 +32,7 @@ func newGuard(t *testing.T, action string) *guard.Guard {
 	return g
 }
 
-// PR のタイトル・本文も内容ガードに通る (deny なら止まる、allow なら通る)。
+// PR のタイトル・本文もコンテンツガードに通る (deny なら止まる、allow なら通る)。
 func TestGuardPR(t *testing.T) {
 	in := prIn{Branch: "feature", Title: "t", Body: "秘密をここに書く"}
 	if err := guardPR(context.Background(), newGuard(t, "deny"), in); err == nil {

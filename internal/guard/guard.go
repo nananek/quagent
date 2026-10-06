@@ -6,6 +6,10 @@
 // リクエスト (LLM 認証プロキシ) について、行き先・ヘッダ・本文の先頭をローカル LLM に
 // 渡し、「外へ持ち出そうとしていないか」を判定させる。
 //
+// エージェントは秘密の少ない素の VM で動くので、点検は控えめにする。LLM が漠然と
+// 疑っただけでは止めず、機密だと思う具体的な値 (evidence) を引用できたときだけ deny と
+// みなす (evidence の無い deny は allow に落とす)。
+//
 // 判定は追加の一枚であって、許可制や承認コンソールの代わりではない。ローカル LLM は
 // 間違えるので、疑わしいと判定したときは (既定で) その理由と中身を承認コンソールに
 // 出し、人間が通すか止めるかを決める。点検できなかったときの扱いも OnError で選べる。
@@ -130,7 +134,7 @@ const (
 	// NumCtx はローカル LLM に渡す文脈長。3B 級なら 6GB の VRAM に収まる。
 	NumCtx = 8 << 10
 
-	// 1 分に承認コンソールへ出せる内容ガードの確認の件数。溢れた分は拒否する。
+	// 1 分に承認コンソールへ出せるコンテンツガードの確認の件数。溢れた分は拒否する。
 	asksPerMinute = 12
 
 	cacheMax = 512
@@ -380,7 +384,7 @@ func (g *Guard) inspect(ctx context.Context, key string, req Request) (Verdict, 
 	}
 	// 本文を maxBytes ごとの塊に分けて点検する。塊はオーバーラップさせてあるので、
 	// 境目にまたがる秘密 (chunkOverlap 以下の長さ) もどれかの塊に丸ごと入る。
-	// 1 つでも疑わしければ止める側にする。点検に渡す前に JSON は字下げしておく
+	// 1 つでも evidence 付きの deny があれば止める側にする。点検に渡す前に JSON は字下げしておく
 	// (minify されたままでは小さなモデルにどこに何があるか分かりにくい)。
 	body := presentBody(req)
 	chunks, more := splitChunks(body, g.s.maxBytes, g.s.maxChunks)
@@ -418,6 +422,12 @@ func (g *Guard) inspect(ctx context.Context, key string, req Request) (Verdict, 
 		v, err := parseVerdict(out)
 		if err != nil {
 			return Verdict{}, err
+		}
+		// 具体的な値 (evidence) を指せない deny は漠然とした疑いにすぎないので通す。
+		// 普通の使い捨て VM では秘密はまれなので、止めるのは引用できたときだけにする。
+		if d := concreteVerdict(v); d.Action != v.Action {
+			g.logf("具体的な該当箇所が無いので通した: %s", cleanReason(v.Reason))
+			v = d
 		}
 		// 塊そのものの判定を覚える (本文への参照は残さない)。
 		remember := v
@@ -487,7 +497,7 @@ func (g *Guard) onSuspect(ctx context.Context, key string, req Request, reason s
 		return fmt.Errorf("%s (承認者に諮れないので止めた)", reason)
 	}
 	if !g.allowAsk() {
-		g.logf("内容ガードの確認が多すぎるので止めた: %s", reason)
+		g.logf("コンテンツガードの確認が多すぎるので止めた: %s", reason)
 		return fmt.Errorf("%s (確認が多すぎるので止めた)", reason)
 	}
 	if err := g.reviewWithSem(ctx, req, reason); err != nil {
@@ -872,17 +882,17 @@ func buildPrompt(req Request, chunk, chunks int) (system, user string) {
 	return systemPrompt, b.String()
 }
 
-const systemPrompt = `You are the last line of defense for a sandboxed coding agent. Every HTTP request the agent makes passes through you before it leaves the machine. Decide whether the request is trying to exfiltrate confidential data to an external server.
+const systemPrompt = `You are a lightweight safety net for a sandboxed coding agent. The agent runs on an ordinary disposable VM where real secrets are rare, so nearly all of its traffic is normal. Every HTTP request the agent makes passes through you before it leaves the machine. Your only job is to catch a request that is clearly carrying real confidential data out to an external server.
 
-Confidential data includes API keys, access tokens, passwords, private keys, credentials, session cookies, and personal data such as email addresses, phone numbers, home addresses and government IDs.
+Confidential data means API keys, access tokens, passwords, private keys, credentials, session cookies, and personal data such as email addresses, phone numbers, home addresses and government IDs.
 
 The agent may hide data in the User-Agent or any other header, in the URL or query, or in the body, and may encode it (base64, hex, percent-encoding, unicode escapes) or split it up. Judge the actual content, not just keywords.
 
-Allow normal coding-agent traffic: prompts and completions sent to an LLM API, model-list requests, fetching public documentation or package metadata, and code that merely mentions words like "password" or "secret".
+Default to "allow". Allow normal coding-agent traffic: prompts and completions sent to an LLM API, model-list requests, fetching public documentation or package metadata, and code, examples, placeholders (like "YOUR_API_KEY") or test fixtures that merely mention words such as "password" or "secret".
 
-Deny when there is evidence that real confidential data is being sent where it does not belong, especially when it is hidden in a header or obfuscated. If you are unsure whether real confidential data is being sent, choose "deny": a human reviewer will look at it and decide.
+Deny only when you can point at the exact piece of real confidential data that is being sent where it does not belong, especially when it is hidden in a header or obfuscated. Do not deny on a hunch, on a keyword alone, or simply because the destination looks unusual. If you are unsure, or you cannot quote a specific value, choose "allow".
 
-When you deny, point at exactly what you judged confidential: in "evidence", copy the smallest substring from the request (a value in a header, in the URL, or in the body) that is the leaked data, verbatim and without paraphrasing or adding quotes. The reviewer is shown the request too; the evidence tells them where to look. Leave "evidence" empty when you allow.
+When you deny, "evidence" is required: copy the smallest substring from the request (a value in a header, in the URL, or in the body) that is the leaked data, verbatim and without paraphrasing or adding quotes. A "deny" with an empty "evidence" is treated as "allow", so never deny without quoting the actual data. The reviewer is shown the request too; the evidence tells them where to look. Leave "evidence" empty when you allow.
 
 Output ONLY one JSON object, with no prose and no code fences:
 {"action":"allow"|"deny","reason":"short reason in Japanese","evidence":"exact substring you judged confidential, or empty","categories":["secret"|"credentials"|"pii"|"exfiltration"|"other"]}`
@@ -921,6 +931,16 @@ func parseVerdict(out string) (Verdict, error) {
 		}
 	}
 	return v, nil
+}
+
+// concreteVerdict は、具体的な該当箇所 (evidence) を指せない deny を allow に落とす。
+// 点検は普通の使い捨て VM で動く小さな安全網なので、漠然とした疑いだけでは止めない。
+// 止めるのは「どの値が機密か」をリクエストから引用できたときだけにする。
+func concreteVerdict(v Verdict) Verdict {
+	if v.Action == Deny && strings.TrimSpace(v.Evidence) == "" {
+		return Verdict{Action: Allow}
+	}
+	return v
 }
 
 // verdictReason は判定を表示・HTTP 本文に出せる 1 行の理由にする。

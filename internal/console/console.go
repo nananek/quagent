@@ -45,7 +45,7 @@ type Msg struct {
 	Title  string `json:"title,omitempty"`
 	Body   string `json:"body,omitempty"`
 
-	// 内容ガードの確認 (guardrequest / guardsettled) の内容。
+	// コンテンツガードの確認 (guardrequest / guardsettled) の内容。
 	Provider string   `json:"provider,omitempty"`
 	Method   string   `json:"method,omitempty"`
 	URL      string   `json:"url,omitempty"`
@@ -86,7 +86,7 @@ type Server struct {
 	prNextID  int
 	prPending []*prRequest
 
-	// 内容ガードの確認。同じくこの Server が直接待つ。
+	// コンテンツガードの確認。同じくこの Server が直接待つ。
 	guardMu      sync.Mutex
 	guardNextID  int
 	guardPending []*guardRequest
@@ -109,7 +109,7 @@ type prRequest struct {
 	approved bool
 }
 
-// GuardInfo は内容ガードが承認コンソールに諮るリクエストの要約。
+// GuardInfo はコンテンツガードが承認コンソールに諮るリクエストの要約。
 type GuardInfo struct {
 	Provider string
 	Method   string
@@ -318,7 +318,7 @@ func prRequestMsg(r *prRequest) Msg {
 		Deadline: r.created.Add(access.DecisionTimeout).Format("15:04:05")}
 }
 
-// AskGuard は内容ガードが疑わしいと判定したリクエストを承認コンソールに諮り、
+// AskGuard はコンテンツガードが疑わしいと判定したリクエストを承認コンソールに諮り、
 // 通すか止めるかを待つ。通すなら nil、止める (拒否・時間切れ・終了・ctx 終了) なら理由を返す。
 func (s *Server) AskGuard(ctx context.Context, info GuardInfo) error {
 	req := &guardRequest{info: info, created: time.Now(), done: make(chan struct{})}
@@ -352,7 +352,7 @@ func (s *Server) AskGuard(ctx context.Context, info GuardInfo) error {
 	return fmt.Errorf("通さないと決めた")
 }
 
-// settleGuard は承認待ちの内容ガードの確認を決着させ、UI に知らせる。既に決着していれば何もしない。
+// settleGuard は承認待ちのコンテンツガードの確認を決着させ、UI に知らせる。既に決着していれば何もしない。
 func (s *Server) settleGuard(id int, status access.Status) {
 	s.guardMu.Lock()
 	idx := -1

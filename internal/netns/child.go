@@ -96,7 +96,7 @@ func (c *child) nft(script string) error {
 }
 
 // egressPorts は許可した行き先へ張ってよい新規接続の宛先ポート (TCP)。HTTP/HTTPS
-// 以外は通さない。任意ポートへ届く経路を残すと、内容ガードの外で持ち出せるうえ、
+// 以外は通さない。任意ポートへ届く経路を残すと、コンテンツガードの外で持ち出せるうえ、
 // IP 単位の許可 (共有 CDN の同じ IP を指す別のホスト) で穴が広がるため。
 var egressPorts = []int{80, 443}
 
@@ -210,7 +210,7 @@ func (c *child) run() error {
 
 	// 3.5 透明プロキシ: 許可した IP への Web 接続の SNI/Host を確かめる。nft の
 	// redirect 先が無いと接続が弾かれるので、qemu を起動する前に待ち受ける。
-	// InspectHTTPS なら TLS を終端し、平文の HTTP を親の内容ガードにかける。
+	// InspectHTTPS なら TLS を終端し、平文の HTTP を親のコンテンツガードにかける。
 	web := newWebProxy(c.holder.Process.Pid, eg.allowed, eg.webBlocked)
 	if c.spec.InspectHTTPS {
 		ca, err := tlsmitm.FromPEM([]byte(c.spec.CACertPEM), []byte(c.spec.CAKeyPEM))

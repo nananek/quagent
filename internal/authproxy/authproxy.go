@@ -131,7 +131,7 @@ func gate(id, upstreamHost string, rules []rule, next http.Handler, logger *log.
 				req.Headers.Del(h)
 			}
 			if err := g.Check(r.Context(), req); err != nil {
-				logger.Printf("llm %s 内容ガードが止めた %s %q: %v", id, r.Method, rest, err)
+				logger.Printf("llm %s コンテンツガードが止めた %s %q: %v", id, r.Method, rest, err)
 				if denied != nil {
 					denied(fmt.Sprintf("%s %s %q: %v", id, r.Method, rest, err))
 				}

@@ -25,7 +25,7 @@ func (c *child) inspect(req InspectRequest) error {
 	r := <-ch
 	if !r.allow {
 		if r.reason == "" {
-			r.reason = "内容ガードが止めた"
+			r.reason = "コンテンツガードが止めた"
 		}
 		return errors.New(r.reason)
 	}
