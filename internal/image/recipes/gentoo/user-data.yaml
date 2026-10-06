@@ -115,19 +115,29 @@ write_files:
       fs.protected_symlinks=1
       fs.protected_fifos=2
       fs.protected_regular=2
-  # slirp4netns (rootless docker のネットワーク) が使う。
+  # slirp4netns (rootless docker のネットワーク) が使う。ip_tables は
+  # rootless docker が iptables (legacy) を使うため。
   - path: /etc/modules-load.d/quagent.conf
     permissions: '0644'
     content: |
       tun
       overlay
+      ip_tables
   - path: /usr/local/sbin/quagent-build.sh
     permissions: '0755'
     content: |
       #!/bin/bash
       set -euxo pipefail
+      # 焼き込みの出力を serial (コンソールログ) にも流し、失敗したときはどの行で
+      # 落ちたかを残す (電源が切れる前に流れるよう、少し待ってから終わる)。
+      exec &> >(tee /dev/ttyS0)
+      trap 'rc=$?; set +e; echo "quagent-build: 失敗 (rc=$rc, line=$LINENO)"; sleep 10; exit $rc' ERR
       U={{.User}}
       UID_=$(id -u "$U")
+
+      # クラウドイメージには Portage ツリーが入っていない (make.profile は
+      # /var/db/repos/gentoo を指しているだけ)。ツリーを取ってから切り替える。
+      emerge-webrsync -q
 
       # hardened プロファイル (no-multilib/systemd のまま硬化)。USE=hardened が入り、
       # 以降に建てるものとカーネルが硬化される。
@@ -137,16 +147,19 @@ write_files:
       emerge --oneshot --autounmask-continue app-containers/slirp4netns sys-fs/fuse-overlayfs
 
       # rootless docker (公式の rootless インストーラー)。rootful デーモンは入れない。
+      # インストーラーは iptables (legacy) のモジュールが読み込まれているか確認する。
+      # agent には sudo が無いので、root のここで先に読み込んでおく。
+      modprobe ip_tables
       loginctl enable-linger "$U"
       for _ in $(seq 1 60); do [ -S "/run/user/$UID_/bus" ] && break; sleep 1; done
       runuser -u "$U" -- env HOME="/home/$U" XDG_RUNTIME_DIR="/run/user/$UID_" \
         DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$UID_/bus" \
-        sh -c 'curl -fsSL https://get.docker.com/rootless | sh' 2>&1 | tee /dev/ttyS0
+        sh -c 'curl -fsSL https://get.docker.com/rootless | sh'
       echo 'export PATH="$HOME/bin:$PATH"' >> "/home/$U/.bash_profile"
       echo "DOCKER_HOST=unix:///run/user/$UID_/docker.sock" >> /etc/environment
       runuser -u "$U" -- env XDG_RUNTIME_DIR="/run/user/$UID_" \
         DOCKER_HOST="unix:///run/user/$UID_/docker.sock" \
-        "/home/$U/bin/docker" info --format '{{"{{"}}.SecurityOptions{{"}}"}}' | grep -q rootless
+        "/home/$U/bin/docker" info --format '{{"{{"}}.SecurityOptions{{"}}"}}' | grep rootless > /dev/null
 
       # opencode (v2)
       runuser -l "$U" -c 'curl -fsSL https://opencode.ai/v2/install | bash'
