@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/nananek/quagent/internal/tlsmitm"
+	"golang.org/x/net/http2"
 )
 
 // testUpstream は TLS の上流サーバーを 127.0.0.1 に立てる。証明書は渡した CA が
@@ -31,6 +32,24 @@ func testUpstream(t *testing.T, ca *tlsmitm.CA, servername string, handler http.
 	}
 	srv := &http.Server{Handler: handler}
 	go srv.Serve(tls.NewListener(ln, &tls.Config{Certificates: []tls.Certificate{cert}}))
+	t.Cleanup(func() { _ = srv.Close() })
+	return ln.Addr().String(), poolFor(t, ca)
+}
+
+// testUpstreamH2 は h2 を話す TLS の上流サーバーを 127.0.0.1 に立てる。
+func testUpstreamH2(t *testing.T, ca *tlsmitm.CA, servername string, handler http.Handler) (string, *x509.CertPool) {
+	t.Helper()
+	cert, err := ca.Leaf(servername)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ServeTLS は既定で h2 を有効にする (NextProtos に h2 を足す)。
+	srv := &http.Server{Handler: handler, TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}}}
+	go srv.ServeTLS(ln, "", "")
 	t.Cleanup(func() { _ = srv.Close() })
 	return ln.Addr().String(), poolFor(t, ca)
 }
@@ -465,5 +484,88 @@ func TestMITMUpgradeTunnel(t *testing.T) {
 	}
 	if string(buf) != "ping" {
 		t.Fatalf("トンネルの往復 = %q", buf)
+	}
+}
+
+// dialProxyH2 は proxyAddr 経由で h2 を話す HTTP クライアントの Transport を作る。
+// SNI は allowed.example に固定する。
+func dialProxyH2(t *testing.T, proxyAddr string, proxyCA *tlsmitm.CA) *http2.Transport {
+	t.Helper()
+	roots := poolFor(t, proxyCA)
+	return &http2.Transport{
+		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+			c, err := net.Dial("tcp", proxyAddr)
+			if err != nil {
+				return nil, err
+			}
+			tc := tls.Client(c, &tls.Config{RootCAs: roots, ServerName: "allowed.example", NextProtos: []string{"h2"}})
+			if err := tc.HandshakeContext(ctx); err != nil {
+				c.Close()
+				return nil, err
+			}
+			return tc, nil
+		},
+	}
+}
+
+func TestMITMHTTP2ForwardsAndInspects(t *testing.T) {
+	upCA, _ := tlsmitm.NewCA()
+	addr, roots := testUpstreamH2(t, upCA, "allowed.example", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		fmt.Fprintf(w, "%s %s body=%s", r.Method, r.URL.RequestURI(), body)
+	}))
+	proxyCA, _ := tlsmitm.NewCA()
+
+	var mu sync.Mutex
+	var got []InspectRequest
+	proxyAddr := testProxy(t, proxyCA, addr, roots, func(req InspectRequest) error {
+		mu.Lock()
+		got = append(got, req)
+		mu.Unlock()
+		return nil
+	}, 1<<20)
+
+	client := &http.Client{Timeout: 10 * time.Second, Transport: dialProxyH2(t, proxyAddr, proxyCA)}
+	resp, err := client.Get("https://allowed.example/path?q=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.ProtoMajor != 2 {
+		t.Fatalf("クライアント側のプロトコル = %s, want HTTP/2", resp.Proto)
+	}
+	if resp.StatusCode != 200 || !strings.Contains(string(body), "GET /path?q=1") {
+		t.Fatalf("応答 = %d %q", resp.StatusCode, body)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 1 {
+		t.Fatalf("点検回数 = %d, want 1", len(got))
+	}
+	if got[0].Path != "/path" || got[0].Query != "q=1" || got[0].Host != "allowed.example" {
+		t.Fatalf("点検内容 = %+v", got[0])
+	}
+}
+
+func TestMITMHTTP2Blocks(t *testing.T) {
+	upCA, _ := tlsmitm.NewCA()
+	addr, roots := testUpstreamH2(t, upCA, "allowed.example", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "should not reach")
+	}))
+	proxyCA, _ := tlsmitm.NewCA()
+	proxyAddr := testProxy(t, proxyCA, addr, roots, func(req InspectRequest) error {
+		return fmt.Errorf("秘密の持ち出し")
+	}, 1<<20)
+
+	client := &http.Client{Timeout: 10 * time.Second, Transport: dialProxyH2(t, proxyAddr, proxyCA)}
+	resp, err := client.Get("https://allowed.example/secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 403 || !strings.Contains(string(body), "blocked") {
+		t.Fatalf("応答 = %d %q", resp.StatusCode, body)
 	}
 }

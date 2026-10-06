@@ -27,7 +27,9 @@ var verdictSchema = map[string]any{
 type Ollama struct {
 	Endpoint string
 	Model    string
-	HTTP     *http.Client
+	// NumCtx は文脈長 (トークン)。0 なら既定値。
+	NumCtx int
+	HTTP   *http.Client
 }
 
 func (o *Ollama) client() *http.Client {
@@ -38,6 +40,10 @@ func (o *Ollama) client() *http.Client {
 }
 
 func (o *Ollama) Complete(ctx context.Context, system, user string) (string, error) {
+	numCtx := o.NumCtx
+	if numCtx <= 0 {
+		numCtx = defaultNumCtx
+	}
 	body, err := json.Marshal(map[string]any{
 		"model":  o.Model,
 		"stream": false,
@@ -45,7 +51,7 @@ func (o *Ollama) Complete(ctx context.Context, system, user string) (string, err
 		"options": map[string]any{
 			"temperature": 0,
 			"num_predict": 200,
-			"num_ctx":     NumCtx,
+			"num_ctx":     numCtx,
 		},
 		"messages": []map[string]string{
 			{"role": "system", "content": system},

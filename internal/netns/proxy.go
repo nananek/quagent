@@ -37,6 +37,10 @@ type webProxy struct {
 	// mitm が nil でなければ、許可した TLS 接続を終端し、中身を点検してから
 	// 本来のサーバーへ張り直す (内部 HTTPS のコンテンツガード)。
 	mitm *tlsmitm.CA
+	// passthrough は TLS 終端せず素通しする行き先のパターン ("example.com" か
+	// "*.example.com")。証明書を固定 (pinning) するクライアント向けで、SNI/Host の
+	// 確認だけは続ける。mitm が nil のときは使わない。
+	passthrough []string
 	// inspect は終端した HTTPS リクエストを点検する。通すなら nil、止めるなら理由。
 	// nil なら点検せず通す (終端はするが中身は見ない)。
 	inspect func(InspectRequest) error
@@ -122,13 +126,24 @@ func (p *webProxy) handleTLS(c net.Conn, dst string) {
 		p.block("SNI " + name)
 		return
 	}
-	if p.mitm != nil {
+	if p.mitm != nil && !p.terminates(name) {
 		// ClientHello で読んだ分を戻してから終端し、平文の HTTP を点検する。
 		_ = c.SetDeadline(time.Time{})
 		p.terminate(&replayConn{Conn: c, r: io.MultiReader(bytes.NewReader(cr.buf), c)}, dst, name)
 		return
 	}
 	p.pipe(c, dst, name, io.MultiReader(bytes.NewReader(cr.buf), c))
+}
+
+// terminates は name への TLS を終端すべきかを返す。passthrough に挙げた行き先は
+// 終端せず素通しする (証明書を固定するクライアントでも使えるようにする)。
+func (p *webProxy) terminates(name string) bool {
+	for _, pattern := range p.passthrough {
+		if Matches(pattern, name) {
+			return false
+		}
+	}
+	return true
 }
 
 // handleHTTP は 80 の接続を扱う。点検が有効なら Host を確かめたうえで中身も

@@ -87,6 +87,9 @@ func TestResolveDefaults(t *testing.T) {
 	if s.maxChunks != defaultMaxChunks {
 		t.Fatalf("max_chunks の既定が違う: %d", s.maxChunks)
 	}
+	if s.numCtx != defaultNumCtx {
+		t.Fatalf("num_ctx の既定が違う: %d", s.numCtx)
+	}
 	if s, err := resolve(config.Guard{Backend: "ollama"}); err != nil || s.endpoint != defaultOllamaEndpoint {
 		t.Errorf("ollama の既定 endpoint が違う: %+v, %v", s, err)
 	}
@@ -99,11 +102,30 @@ func TestResolveDefaults(t *testing.T) {
 	if _, err := resolve(config.Guard{OnError: "nope"}); err == nil {
 		t.Error("不明な on_error を受け付けた")
 	}
-	if s, _ := resolve(config.Guard{MaxBytes: 1 << 20}); s.maxBytes != MaxChunkBytes {
+	if s, _ := resolve(config.Guard{MaxBytes: 1 << 20, NumCtx: MaxNumCtx}); s.maxBytes != MaxChunkBytes {
 		t.Errorf("max_bytes が上限で切られていない: %d", s.maxBytes)
 	}
 	if s, _ := resolve(config.Guard{MaxChunks: 1 << 20}); s.maxChunks != MaxChunks {
 		t.Errorf("max_chunks が上限で切られていない: %d", s.maxChunks)
+	}
+}
+
+// 文脈長に収まらない max_bytes は切り下げる (LLM 側で黙って切られて点検漏れになるのを
+// 防ぐ)。文脈が広ければ上限 (MaxChunkBytes) まで使える。
+func TestResolveClampsMaxBytesToContext(t *testing.T) {
+	s, err := resolve(config.Guard{NumCtx: MinNumCtx, MaxBytes: MaxChunkBytes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := maxBytesForCtx(MinNumCtx); s.maxBytes != want {
+		t.Fatalf("max_bytes = %d, want %d", s.maxBytes, want)
+	}
+	s, err = resolve(config.Guard{NumCtx: MaxNumCtx, MaxBytes: MaxChunkBytes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.maxBytes != MaxChunkBytes {
+		t.Fatalf("max_bytes = %d, want %d", s.maxBytes, MaxChunkBytes)
 	}
 }
 

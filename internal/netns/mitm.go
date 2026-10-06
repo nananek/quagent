@@ -3,7 +3,9 @@ package netns
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -12,6 +14,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"golang.org/x/net/http2"
 )
 
 // InspectRequest は透明プロキシが終端して取り出した HTTP リクエストの点検依頼。
@@ -32,9 +36,10 @@ type InspectRequest struct {
 // maxPeek は 1 リクエストで点検のために読む本文の上限 (親の点検上限より大きくしない)。
 const maxPeek = 2 << 20
 
-// terminate は許可済みの TLS 接続を終端し、平文になった HTTP/1.1 の中身を点検して
+// terminate は許可済みの TLS 接続を終端し、平文になった HTTP の中身を点検して
 // から、元の宛先へ TLS で張り直して転送する。クライアントには CA が署名した SNI 用の
-// 証明書を提示する。HTTP/2 は名乗らない (クライアントには 1.1 に落ちてもらう)。
+// 証明書を提示する。ALPN で h2 が選ばれれば h2 として、そうでなければ HTTP/1.1 として
+// 扱う (h2 しか使わないクライアントも点検できる)。
 func (p *webProxy) terminate(client net.Conn, dst, sni string) {
 	cert, err := p.mitm.Leaf(sni)
 	if err != nil {
@@ -43,9 +48,9 @@ func (p *webProxy) terminate(client net.Conn, dst, sni string) {
 	}
 	tc := tls.Server(client, &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		// HTTP/1.1 だけを名乗る。h2 を選ばせると中身の解析が別実装になるため、
-		// クライアントには 1.1 に落ちてもらう (h2 必須のクライアントは使えない)。
-		NextProtos: []string{"http/1.1"},
+		// h2 と 1.1 の両方を名乗り、クライアントに選ばせる。選ばれた方で中身を
+		// 解析する (h2 に対応していないクライアントは 1.1 に落ちる)。
+		NextProtos: []string{"h2", "http/1.1"},
 		MinVersion: tls.VersionTLS12,
 	})
 	defer tc.Close()
@@ -55,7 +60,60 @@ func (p *webProxy) terminate(client net.Conn, dst, sni string) {
 		return
 	}
 	_ = tc.SetDeadline(time.Time{})
+	if tc.ConnectionState().NegotiatedProtocol == "h2" {
+		p.serveHTTP2(tc, dst, sni)
+		return
+	}
 	p.serveInspect(tc, bufio.NewReader(tc), dst, sni, true)
+}
+
+// serveHTTP2 は h2 で来た 1 本の接続を、ストリームごとに点検して上流へ h2 で
+// 中継する。h2 しか使わないクライアント (gRPC など) も点検できるようにするため。
+// 上流へも h2 で張り直すので、上流が h2 を選べないときは中継できない。
+func (p *webProxy) serveHTTP2(client net.Conn, dst, name string) {
+	tr := &http2.Transport{
+		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+			return p.dialUpstreamH2(dst, name)
+		},
+	}
+	defer tr.CloseIdleConnections()
+	h2 := &http2.Server{}
+	h2.ServeConn(client, &http2.ServeConnOpts{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			p.serveH2Stream(w, r, tr, name)
+		}),
+	})
+}
+
+// serveH2Stream は h2 の 1 ストリームを点検して上流へ中継する。:authority が
+// 接続時の SNI と違うものは、張り直す先が違うことになるので通さない。
+func (p *webProxy) serveH2Stream(w http.ResponseWriter, r *http.Request, tr *http2.Transport, name string) {
+	if h, err := normalizeHost(r.Host); err != nil || h != name {
+		p.block(fmt.Sprintf("Host %s (SNI %s と一致しない)", r.Host, name))
+		writeBlockedH2(w, errors.New("SNI と Host が一致しない"))
+		return
+	}
+	normalizeRequest(r, name, true)
+	removeHopHeaders(r.Header)
+	if err := p.check(r, name); err != nil {
+		writeBlockedH2(w, err)
+		return
+	}
+	out, err := tr.RoundTrip(r)
+	if err != nil {
+		log.Printf("web: %s へ h2 で中継できない: %v", name, err)
+		http.Error(w, "quagent: upstream error", http.StatusBadGateway)
+		return
+	}
+	defer out.Body.Close()
+	removeHopHeaders(out.Header)
+	for k, vs := range out.Header {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(out.StatusCode)
+	_, _ = io.Copy(w, out.Body)
 }
 
 // serveInspect は 1 本のクライアント接続の HTTP/1.1 を、リクエストごとに点検して
@@ -193,6 +251,30 @@ func (p *webProxy) dialUpstream(dst, sni string) (net.Conn, error) {
 	return tc, nil
 }
 
+// dialUpstreamH2 は元の IP (dst) へ h2 で張り直す。証明書は system のルートで
+// 検証し、上流が h2 を選ばなければエラーにする。
+func (p *webProxy) dialUpstreamH2(dst, sni string) (net.Conn, error) {
+	raw, err := p.dial("tcp4", dst, proxyMark)
+	if err != nil {
+		return nil, err
+	}
+	tc := tls.Client(raw, &tls.Config{
+		ServerName: sni,
+		NextProtos: []string{"h2"},
+		MinVersion: tls.VersionTLS12,
+		RootCAs:    p.upstreamRoots,
+	})
+	if err := tc.Handshake(); err != nil {
+		raw.Close()
+		return nil, err
+	}
+	if tc.ConnectionState().NegotiatedProtocol != "h2" {
+		tc.Close()
+		return nil, fmt.Errorf("上流 %s は h2 を選ばない", sni)
+	}
+	return tc, nil
+}
+
 // check は 1 リクエストをコンテンツガードにかける。点検する本文は先頭の一部だけを読み、
 // 残りはそのまま転送できるように req.Body を差し替える。
 func (p *webProxy) check(req *http.Request, host string) error {
@@ -299,6 +381,13 @@ func writeBlocked(w io.Writer, cause error) {
 		ContentLength: int64(len(body)),
 	}
 	_ = resp.Write(w)
+}
+
+// writeBlockedH2 はコンテンツガードが止めたことを、h2 のストリームに 403 で返す。
+func writeBlockedH2(w http.ResponseWriter, cause error) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusForbidden)
+	_, _ = io.WriteString(w, "quagent: blocked by the request content guard: "+cause.Error()+"\n")
 }
 
 // isUpgrade はリクエストがプロトコルの昇格 (WebSocket など) を求めるかを返す。

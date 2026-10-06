@@ -90,6 +90,15 @@ func caWriteFile(caCert string) string {
 		caGuestPath, indentBlock(caCert, "      "))
 }
 
+// normalizePassthrough は TLS 終端しない行き先のパターンを検証・正規化する
+// ("example.com" か "*.example.com")。空なら nil を返す。
+func normalizePassthrough(in []string) ([]string, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	return access.NormalizeDomains(in)
+}
+
 func run(o runOpts) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -99,6 +108,15 @@ func run(o runOpts) error {
 		return fmt.Errorf("guard.inspect_https を使うには guard.enabled を true にする")
 	}
 	inspectHTTPS := cfg.Guard.Enabled && cfg.Guard.InspectHTTPS
+	// 証明書を固定 (pinning) するクライアント向けに、TLS 終端しない行き先を名前ごとに
+	// 選べる。指定した行き先は SNI/Host の確認だけ続けて素通しする。
+	passthrough, err := normalizePassthrough(cfg.Guard.PassthroughHTTPS)
+	if err != nil {
+		return err
+	}
+	if len(passthrough) > 0 && !inspectHTTPS {
+		return fmt.Errorf("guard.passthrough_https を使うには guard.inspect_https を true にする")
+	}
 	if o.Agent == "" {
 		o.Agent = DefaultAgent
 	}
@@ -195,7 +213,11 @@ func run(o runOpts) error {
 			return fmt.Errorf("TLS 終端の CA を作れない: %w", err)
 		}
 		caCert = string(ca.CertPEM())
-		logf("HTTPS の中身も点検する (使い捨て CA で TLS を終端。証明書を固定するクライアントは使えない)")
+		if len(passthrough) > 0 {
+			logf("HTTPS の中身も点検する (使い捨て CA で TLS を終端。%s は終端せず素通し)", strings.Join(passthrough, ", "))
+		} else {
+			logf("HTTPS の中身も点検する (使い捨て CA で TLS を終端。証明書を固定するクライアントは passthrough_https で除外する)")
+		}
 	}
 	providers, err := authproxy.Register(svc.Mux, cfg.Providers, logger, func(s string) {
 		select {
@@ -297,6 +319,10 @@ runcmd:
 		spec.InspectHTTPS = true
 		spec.CACertPEM, spec.CAKeyPEM = caCert, string(keyPEM)
 		spec.InspectLimit = contentGuard.InspectLimit()
+		spec.PassthroughHTTPS = passthrough
+		if len(passthrough) > 0 {
+			logf("TLS 終端しない行き先: %s (SNI/Host の確認だけ続けて素通しする)", strings.Join(passthrough, ", "))
+		}
 	}
 	l, err := netns.Start(spec)
 	if err != nil {

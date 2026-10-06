@@ -143,3 +143,24 @@ func TestProxyNameDecision(t *testing.T) {
 		}
 	}
 }
+
+// passthrough に挙げた行き先は TLS 終端しない (証明書を固定するクライアント向け)。
+// "*.example.com" はサブドメインのみで、apex は一致しない。
+func TestProxyTerminates(t *testing.T) {
+	p := &webProxy{passthrough: []string{"pinned.example", "*.cdn.example"}}
+	for name, want := range map[string]bool{
+		"pinned.example":   false,
+		"other.example":    true,
+		"a.cdn.example":    false,
+		"cdn.example":      true,
+		"x.pinned.example": true,
+	} {
+		if got := p.terminates(name); got != want {
+			t.Errorf("terminates(%q) = %v, want %v", name, got, want)
+		}
+	}
+	// passthrough が無ければ常に終端する。
+	if !(&webProxy{}).terminates("anything.example") {
+		t.Error("passthrough 無しで終端しないと判定した")
+	}
+}

@@ -39,6 +39,9 @@ type Spec struct {
 	InspectHTTPS bool   `json:"inspect_https,omitempty"`
 	CACertPEM    string `json:"ca_cert_pem,omitempty"`
 	CAKeyPEM     string `json:"ca_key_pem,omitempty"`
+	// PassthroughHTTPS は TLS 終端せず素通しする行き先のパターン (証明書を固定する
+	// クライアント向け)。SNI/Host の確認だけは続ける。InspectHTTPS のときだけ使う。
+	PassthroughHTTPS []string `json:"passthrough_https,omitempty"`
 	// InspectLimit は 1 リクエストで点検のために読む本文の上限 (バイト)。
 	InspectLimit int `json:"inspect_limit,omitempty"`
 	// QemuArgv は子 netns 内で実行する qemu のコマンドライン。

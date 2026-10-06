@@ -47,11 +47,17 @@ type Guard struct {
 	// TimeoutSeconds は 1 リクエストの点検の上限。既定 30。
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
 	// MaxBytes は LLM に見せる本文の塊 1 つの先頭バイト数。既定 8192、上限 32768。
+	// NumCtx (文脈長) に収まらない大きさは切り下げる。
 	MaxBytes int `json:"max_bytes,omitempty"`
 	// MaxChunks は 1 リクエストの本文を何個の塊に分けて点検するか。既定 8、上限 64。
 	// 塊は少し重ねてあり、境目にまたがる短い秘密もどれかの塊に丸ごと入る。
 	MaxChunks int `json:"max_chunks,omitempty"`
-	// Concurrency は同時に点検する件数。GPU 1 枚なら 1 (既定)。
+	// NumCtx はローカル LLM の文脈長 (トークン)。既定 8192。llama.cpp では起動時の
+	// num_ctx と合わせる (リクエストごとには変えられない)。Ollama にはこの値を渡す。
+	// MaxBytes がこの文脈に収まるよう切り下げられる。
+	NumCtx int `json:"num_ctx,omitempty"`
+	// Concurrency は同時に点検する件数。GPU 1 枚なら 1 (既定)。llama.cpp を並列
+	// (--parallel) で動かすときはその数まで上げられる。
 	Concurrency int `json:"concurrency,omitempty"`
 	// Mode は LLM が evidence を引用して deny したときの扱い。"ask" (既定。承認コンソールが通すか止めるか決める)、
 	// "deny" (確認せず止める)、"advisory" (ログに残して通す) のどれか。
@@ -63,6 +69,12 @@ type Guard struct {
 	// 信頼ストアに入れるので、証明書を固定 (pinning) するクライアントとは相性が悪い。
 	// Enabled が true のときだけ使える。
 	InspectHTTPS bool `json:"inspect_https,omitempty"`
+	// PassthroughHTTPS は TLS 終端せず素通しする行き先のパターン。証明書を固定
+	// (pinning) するクライアントの行き先をここに挙げる。SNI/Host が許可名に一致する
+	// ことの確認だけは続けるので、点検はできないが素通しにはならない。"example.com"
+	// (完全一致) か "*.example.com" (サブドメイン)。InspectHTTPS が true のときだけ
+	// 意味がある。
+	PassthroughHTTPS []string `json:"passthrough_https,omitempty"`
 }
 
 // Clipboard はクリップボードへの入れ方。
