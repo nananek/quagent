@@ -38,9 +38,29 @@ func TestSandboxHelper(t *testing.T) {
 		os.Exit(0) // exec に成功すれば戻らない
 	case "landlock":
 		checkLandlock()
+	case "landlock-missing":
+		checkLandlockMissing("")
+	case "landlock-mixed":
+		checkLandlockMissing(os.Getenv("QUAGENT_LANDLOCK_GOOD"))
 	case "x32":
 		checkX32Rejected(&Policy{Mode: "compat"})
 	}
+}
+
+// checkLandlockMissing は、明示した書き込み先が無いときに Apply がエラーになり、
+// 黙って全書き込み拒否の ruleset をかけて起動しないことを確かめる。good が空でなければ
+// それも混ぜ、「有効なパスとタイポが混在」でもエラーになることを見る。
+func checkLandlockMissing(good string) {
+	var paths []string
+	if good != "" {
+		paths = append(paths, good)
+	}
+	paths = append(paths, os.Getenv("QUAGENT_LANDLOCK_MISSING"))
+	if err := (&Policy{Landlock: true, ReadWritePaths: paths}).Apply(); err == nil {
+		fmt.Fprintln(os.Stderr, "無い書き込み先を指定してもエラーにならなかった")
+		os.Exit(4)
+	}
+	os.Exit(0)
 }
 
 // checkX32Rejected は x32 ABI の syscall 自体が拒否されることを確かめる。deny 一覧に
@@ -174,14 +194,40 @@ func TestLauncherAppliesPolicy(t *testing.T) {
 }
 
 func TestLandlockConfinesWrites(t *testing.T) {
-	abi, err := landlockABI()
-	if err != nil || abi < 1 {
-		t.Skip("Landlock が使えない")
-	}
+	skipIfNoLandlock(t)
 	runHelper(t, map[string]string{
 		"QUAGENT_SANDBOX_HELPER": "landlock",
 		"QUAGENT_LANDLOCK_BASE":  t.TempDir(),
 	})
+}
+
+// TestLandlockMissingExplicitPathIsError は、明示した書き込み先が 1 つも無いときに
+// エラーになることを確かめる (修正前は全書き込み拒否のまま黙って起動する)。
+func TestLandlockMissingExplicitPathIsError(t *testing.T) {
+	skipIfNoLandlock(t)
+	runHelper(t, map[string]string{
+		"QUAGENT_SANDBOX_HELPER":   "landlock-missing",
+		"QUAGENT_LANDLOCK_MISSING": filepath.Join(t.TempDir(), "nope"),
+	})
+}
+
+// TestLandlockMixedMissingPathIsError は、有効なパスに紛れたタイポも黙って落とさず
+// エラーにすることを確かめる。
+func TestLandlockMixedMissingPathIsError(t *testing.T) {
+	skipIfNoLandlock(t)
+	base := t.TempDir()
+	runHelper(t, map[string]string{
+		"QUAGENT_SANDBOX_HELPER":   "landlock-mixed",
+		"QUAGENT_LANDLOCK_GOOD":    base,
+		"QUAGENT_LANDLOCK_MISSING": filepath.Join(base, "nope"),
+	})
+}
+
+func skipIfNoLandlock(t *testing.T) {
+	t.Helper()
+	if abi, err := landlockABI(); err != nil || abi < 1 {
+		t.Skip("Landlock が使えない")
+	}
 }
 
 func TestWrap(t *testing.T) {
