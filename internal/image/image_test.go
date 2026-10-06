@@ -78,6 +78,46 @@ func TestGentooRecipeIsUEFI(t *testing.T) {
 	}
 }
 
+// gentoo の焼き込みは、要求した硬化 CONFIG が実際に効いたかを検証してから成功と
+// する (シンボルの改名・廃止で黙って効かなくなるのを防ぐ)。改名済み・廃止済みの
+// シンボルに戻っていないことも確かめる。
+func TestGentooVerifiesHardeningConfig(t *testing.T) {
+	r, err := FindRecipe("gentoo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"verify_config /etc/kernel/config.d/50-quagent-docker.config",
+		"verify_config /etc/kernel/config.d/90-quagent-hardening.config",
+		"CONFIG_MITIGATION_PAGE_TABLE_ISOLATION=y",
+		"CONFIG_MITIGATION_RETPOLINE=y",
+	} {
+		if !strings.Contains(r.userData, want) {
+			t.Errorf("gentoo の user-data に %q が無い", want)
+		}
+	}
+	// 6.8 で MITIGATION_ 接頭辞に改名された古い名前や、廃止されたシンボルを残さない
+	// (書いても無視され、硬化が静かに効かなくなる)。注釈ではなく設定行だけを見る。
+	for _, line := range strings.Split(r.userData, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "CONFIG_") {
+			continue
+		}
+		for _, stale := range []string{
+			"CONFIG_PAGE_TABLE_ISOLATION=",
+			"CONFIG_RETPOLINE=",
+			"CONFIG_BPF_JIT_HARDEN=",
+			"CONFIG_DEVKMEM",
+			"CONFIG_ACPI_CUSTOM_METHOD",
+			"CONFIG_X86_X32=",
+		} {
+			if strings.HasPrefix(line, stale) {
+				t.Errorf("gentoo の user-data に廃止・改名された設定行が残っている: %q", line)
+			}
+		}
+	}
+}
+
 // 差分更新なのに前回のイメージが無ければ、何も焼かずにエラーにする。
 func TestBuildIncrementalNeedsPrevious(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
