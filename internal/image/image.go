@@ -272,23 +272,44 @@ type BuildOpts struct {
 	MemMiB int
 	// Refresh はクラウドイメージを取り直す (OS の更新を取り込む)。
 	Refresh bool
+	// Incremental は前回焼いたイメージを出発点にして差分更新する。パッケージを
+	// 更新し、カーネルは更新があるときだけ作り直す (毎日カーネルを建て直さない)。
+	// 前回のイメージが無ければエラー。Refresh とは同時に使えない。
+	Incremental bool
 }
 
 // Build はレシピからベースイメージを新しく焼き、そのイメージを返す。
 func Build(r Recipe, o BuildOpts, progress io.Writer) (Image, error) {
-	if err := r.resolveLatest(progress); err != nil {
-		return Image{}, err
+	// 出発点と起動ファームウェアを決める。差分更新は前回焼いたイメージから始める
+	// ので、レシピのクラウドイメージは取りに行かない (カーネルの作り直しを避ける)。
+	var src, firmware string
+	if o.Incremental {
+		prev, err := Latest(r.Name)
+		if err != nil {
+			return Image{}, fmt.Errorf("差分更新には前回のイメージが要る (%w)", err)
+		}
+		src, firmware = prev.Path, prev.Firmware
+		fmt.Fprintf(progress, "前回のイメージから差分更新: %s\n", filepath.Base(src))
+	} else {
+		if err := r.resolveLatest(progress); err != nil {
+			return Image{}, err
+		}
+		cloud, err := fetchCloudImage(r, o.Refresh, progress)
+		if err != nil {
+			return Image{}, err
+		}
+		src, firmware = cloud, r.Firmware
 	}
 	var ud bytes.Buffer
 	tmpl, err := template.New("user-data").Parse(r.userData)
 	if err != nil {
 		return Image{}, fmt.Errorf("%s の user-data.yaml: %w", r.Name, err)
 	}
-	if err := tmpl.Execute(&ud, map[string]string{"User": vm.GuestUser, "Marker": buildOKMarker}); err != nil {
-		return Image{}, err
+	inc := ""
+	if o.Incremental {
+		inc = "1"
 	}
-	cloud, err := fetchCloudImage(r, o.Refresh, progress)
-	if err != nil {
+	if err := tmpl.Execute(&ud, map[string]string{"User": vm.GuestUser, "Marker": buildOKMarker, "Incremental": inc}); err != nil {
 		return Image{}, err
 	}
 	if err := os.MkdirAll(paths.ImagesDir(), 0o755); err != nil {
@@ -301,7 +322,7 @@ func Build(r Recipe, o BuildOpts, progress io.Writer) (Image, error) {
 	defer os.RemoveAll(work)
 
 	disk := filepath.Join(work, "disk.qcow2")
-	if out, err := exec.Command("qemu-img", "convert", "-O", "qcow2", cloud, disk).CombinedOutput(); err != nil {
+	if out, err := exec.Command("qemu-img", "convert", "-O", "qcow2", src, disk).CombinedOutput(); err != nil {
 		return Image{}, fmt.Errorf("イメージの複製に失敗: %v: %s", err, out)
 	}
 	if out, err := exec.Command("qemu-img", "resize", "-q", disk, diskSize).CombinedOutput(); err != nil {
@@ -316,7 +337,7 @@ func Build(r Recipe, o BuildOpts, progress io.Writer) (Image, error) {
 	console := filepath.Join(work, "console.log")
 	argv, err := vm.QemuArgv(vm.QemuOpts{
 		Disk: disk, Seed: seed, CPUs: o.CPUs, MemMiB: o.MemMiB, ConsoleLog: console,
-		UEFI: r.Firmware == "uefi",
+		UEFI: firmware == "uefi",
 	})
 	if err != nil {
 		return Image{}, err
@@ -340,13 +361,13 @@ func Build(r Recipe, o BuildOpts, progress io.Writer) (Image, error) {
 		return Image{}, fmt.Errorf("イメージの書き出しに失敗: %v: %s", err, b)
 	}
 	// 起動ファームウェアを残す (run はこれを見て BIOS / UEFI を選ぶ)
-	if err := writeMeta(out, imageMeta{Firmware: r.Firmware}); err != nil {
+	if err := writeMeta(out, imageMeta{Firmware: firmware}); err != nil {
 		_ = os.Remove(out)
 		return Image{}, fmt.Errorf("イメージの付帯情報を書けない: %w", err)
 	}
 	built, _ := time.ParseInLocation("20060102-150405", stamp, time.Local)
 	info, _ := os.Stat(out)
-	img := Image{Recipe: r.Name, Path: out, Built: built, Firmware: r.Firmware}
+	img := Image{Recipe: r.Name, Path: out, Built: built, Firmware: firmware}
 	if info != nil {
 		img.Size = info.Size()
 	}

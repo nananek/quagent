@@ -137,14 +137,21 @@ write_files:
 
       # クラウドイメージには Portage ツリーが入っていない (make.profile は
       # /var/db/repos/gentoo を指しているだけ)。ツリーを取ってから切り替える。
+      # 差分更新のときは、ここでツリーが最新になる。
       emerge-webrsync -q
 
       # hardened プロファイル (no-multilib/systemd のまま硬化)。USE=hardened が入り、
       # 以降に建てるものとカーネルが硬化される。
       eselect profile set default/linux/amd64/23.0/no-multilib/hardened/systemd
 
+      {{if .Incremental}}
+      # 前回のイメージからの差分更新: 入っているパッケージを更新する (USE の
+      # 変わりによる作り直しはしない。カーネルは下で更新があるときだけ作る)。
+      emerge --update --deep @world
+      {{end}}
+
       # rootless docker の部品。Gentoo では ~amd64 なので鍵を自動で足す。
-      emerge --oneshot --autounmask-continue app-containers/slirp4netns sys-fs/fuse-overlayfs
+      emerge --update --oneshot --autounmask-continue app-containers/slirp4netns sys-fs/fuse-overlayfs
 
       # rootless docker (公式の rootless インストーラー)。rootful デーモンは入れない。
       # インストーラーは iptables (legacy) のモジュールが読み込まれているか確認する。
@@ -155,8 +162,12 @@ write_files:
       runuser -u "$U" -- env HOME="/home/$U" XDG_RUNTIME_DIR="/run/user/$UID_" \
         DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$UID_/bus" \
         sh -c 'curl -fsSL https://get.docker.com/rootless | sh'
-      echo 'export PATH="$HOME/bin:$PATH"' >> "/home/$U/.bash_profile"
-      echo "DOCKER_HOST=unix:///run/user/$UID_/docker.sock" >> /etc/environment
+      if ! grep -qF 'export PATH="$HOME/bin:$PATH"' "/home/$U/.bash_profile"; then
+        echo 'export PATH="$HOME/bin:$PATH"' >> "/home/$U/.bash_profile"
+      fi
+      if ! grep -qF 'DOCKER_HOST=unix:///run/user/' /etc/environment; then
+        echo "DOCKER_HOST=unix:///run/user/$UID_/docker.sock" >> /etc/environment
+      fi
       runuser -u "$U" -- env XDG_RUNTIME_DIR="/run/user/$UID_" \
         DOCKER_HOST="unix:///run/user/$UID_/docker.sock" \
         "/home/$U/bin/docker" info --format '{{"{{"}}.SecurityOptions{{"}}"}}' | grep rootless > /dev/null
@@ -164,25 +175,32 @@ write_files:
       # opencode (v2)
       runuser -l "$U" -c 'curl -fsSL https://opencode.ai/v2/install | bash'
       test -x "/home/$U/.opencode/bin/opencode"
-      echo 'export PATH="$HOME/.opencode/bin:$PATH"' >> "/home/$U/.bash_profile"
+      if ! grep -qF 'export PATH="$HOME/.opencode/bin:$PATH"' "/home/$U/.bash_profile"; then
+        echo 'export PATH="$HOME/.opencode/bin:$PATH"' >> "/home/$U/.bash_profile"
+      fi
 
       # Claude Code (公式のネイティブインストーラー)
       runuser -l "$U" -c 'curl -fsSL https://claude.ai/install.sh | bash'
       test -x "/home/$U/.local/bin/claude"
-      echo 'export PATH="$HOME/.local/bin:$PATH"' >> "/home/$U/.bash_profile"
+      if ! grep -qF 'export PATH="$HOME/.local/bin:$PATH"' "/home/$U/.bash_profile"; then
+        echo 'export PATH="$HOME/.local/bin:$PATH"' >> "/home/$U/.bash_profile"
+      fi
 
       # 作業ディレクトリ
       install -d -o "$U" -g "$U" /work
 
       # カーネルを硬化 CONFIG で作り直す (ここまで網が要るので最後に行う)。
-      # 動いている版と同じ版を USE=hardened で建て直す。
-      emerge --oneshot --newuse --autounmask-continue sys-kernel/gentoo-kernel
+      # 差分更新のときは、新しい版が入ったときだけ建て直される (それ以外は数秒)。
+      emerge --update --oneshot --newuse --autounmask-continue sys-kernel/gentoo-kernel
 
-      # 起動オプションの硬化 (既存の値を消さずに追記する)。起動時に上書きできない
-      # ものは CONFIG 側 (lockdown・モジュール署名) で強制している。
-      cat >> /etc/default/grub <<'GRUBEOF'
+      # 起動オプションの硬化 (既存の値を消さずに追記する。差分更新で二重に
+      # 追記しないよう、入っていれば何もしない)。起動時に上書きできないものは
+      # CONFIG 側 (lockdown・モジュール署名) で強制している。
+      if ! grep -q 'slab_nomerge' /etc/default/grub; then
+        cat >> /etc/default/grub <<'GRUBEOF'
       GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX} slab_nomerge init_on_alloc=1 init_on_free=1 page_alloc.shuffle=1 randomize_kstack_offset=on vsyscall=none debugfs=off pti=on oops=panic"
       GRUBEOF
+      fi
       grub-mkconfig -o /boot/grub/grub.cfg
 
       echo {{.Marker}} > /dev/ttyS0

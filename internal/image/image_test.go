@@ -1,6 +1,7 @@
 package image
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"text/template"
 
 	"github.com/nananek/quagent/internal/paths"
 )
@@ -73,6 +75,40 @@ func TestGentooRecipeIsUEFI(t *testing.T) {
 	}
 	if r.Firmware != "uefi" {
 		t.Fatalf("got %q", r.Firmware)
+	}
+}
+
+// 差分更新なのに前回のイメージが無ければ、何も焼かずにエラーにする。
+func TestBuildIncrementalNeedsPrevious(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	r := Recipe{Name: "gentoo", CloudImageURL: "https://example.invalid/x.qcow2",
+		ChecksumURL: "https://example.invalid/x.qcow2.sha256"}
+	if _, err := Build(r, BuildOpts{CPUs: 1, MemMiB: 256, Incremental: true}, io.Discard); err == nil {
+		t.Fatal("前回のイメージが無いのに成功した")
+	}
+}
+
+// user-data は差分更新の有無どちらでも描ける。gentoo は差分更新のときだけ
+// パッケージを更新する (@world)。
+func TestUserDataTemplate(t *testing.T) {
+	r, err := FindRecipe("gentoo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := template.New("user-data").Parse(r.userData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, inc := range []string{"", "1"} {
+		var b bytes.Buffer
+		err := tmpl.Execute(&b, map[string]string{"User": "agent", "Marker": "M", "Incremental": inc})
+		if err != nil {
+			t.Fatalf("Incremental=%q: %v", inc, err)
+		}
+		got := strings.Contains(b.String(), "emerge --update --deep @world")
+		if want := inc == "1"; got != want {
+			t.Fatalf("Incremental=%q: @world の行が got=%v want=%v", inc, got, want)
+		}
 	}
 }
 

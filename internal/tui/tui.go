@@ -302,7 +302,7 @@ func imagesMenu() error {
 		var opts []huh.Option[string]
 		for _, r := range rs {
 			opts = append(opts,
-				huh.NewOption(r.Name+" を焼く / 更新する (OS の更新を取り込む)", "build:"+r.Name))
+				huh.NewOption(r.Name+" を焼く / 更新する", "build:"+r.Name))
 		}
 		opts = append(opts,
 			huh.NewOption("イメージを個別に消す (最新も消せる)", "delete"),
@@ -317,7 +317,7 @@ func imagesMenu() error {
 		}
 		switch {
 		case strings.HasPrefix(choice, "build:"):
-			if err := buildImage(strings.TrimPrefix(choice, "build:"), true); err != nil {
+			if err := buildImage(strings.TrimPrefix(choice, "build:")); err != nil {
 				fmt.Fprintln(os.Stderr, "失敗:", err)
 			}
 			pause()
@@ -396,29 +396,41 @@ func deleteImagesMenu() error {
 	return errBack
 }
 
-func buildImage(name string, refresh bool) error {
+func buildImage(name string) error {
 	r, err := image.FindRecipe(name)
 	if err != nil {
 		return err
 	}
-	// 焼き込み VM の CPU とメモリは管理画面で決める (前回の値を既定にする)。
-	// カーネルを作り直すレシピはコアが多いほど速い。
+	// 焼き方 (差分更新 / 焼き直し) と、焼き込み VM の CPU・メモリを決める。
+	// 前回のイメージがあれば差分更新を既定にする (カーネルの作り直しを避ける)。
+	mode := "fresh"
+	var fields []huh.Field
+	if _, err := image.Latest(name); err == nil {
+		mode = "incremental"
+		fields = append(fields, huh.NewSelect[string]().Title("焼き方").Options(
+			huh.NewOption("差分更新 (前回のイメージから。カーネルは更新があるときだけ)", "incremental"),
+			huh.NewOption("焼き直し (クラウドイメージから)", "fresh"),
+		).Value(&mode))
+	}
 	s := loadBuildSettings()
 	cpus, mem := strconv.Itoa(s.CPUs), strconv.Itoa(s.MemMiB)
 	ok := true
-	err = newForm(huh.NewGroup(
+	fields = append(fields,
 		huh.NewInput().Title("CPU (焼き込み VM)").Description("ホストの範囲で。多いほどカーネルの作り直しが速い").
 			Value(&cpus).Validate(positiveInt),
 		huh.NewInput().Title("メモリ MiB (焼き込み VM)").Value(&mem).Validate(positiveInt),
 		huh.NewConfirm().Title(name+" を焼く / 更新する?").Affirmative("焼く").Negative("戻る").Value(&ok),
-	)).Run()
-	if err != nil || !ok {
+	)
+	if err := newForm(huh.NewGroup(fields...)).Run(); err != nil || !ok {
 		return nil
 	}
 	s.CPUs, _ = strconv.Atoi(cpus)
 	s.MemMiB, _ = strconv.Atoi(mem)
 	saveBuildSettings(s)
-	img, err := image.Build(r, image.BuildOpts{CPUs: s.CPUs, MemMiB: s.MemMiB, Refresh: refresh}, os.Stdout)
+	img, err := image.Build(r, image.BuildOpts{
+		CPUs: s.CPUs, MemMiB: s.MemMiB,
+		Refresh: mode == "fresh", Incremental: mode == "incremental",
+	}, os.Stdout)
 	if err != nil {
 		return err
 	}

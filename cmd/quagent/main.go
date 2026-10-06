@@ -30,7 +30,7 @@ import (
 const usage = `usage:
   quagent                                      TUI (VM の起動設定とベースイメージの管理)
   quagent image recipes                        使えるレシピ (OS) の一覧
-  quagent image build [--refresh] [RECIPE]     ベースイメージを焼く (既定: debian)
+  quagent image build [--refresh|--incremental] [RECIPE]  ベースイメージを焼く/差分更新する (既定: debian)
   quagent image ls                             焼いたベースイメージの一覧
   quagent image rm IMAGE                       ベースイメージを消す
   quagent always ls | rm DOMAIN...              「以後確認しない」ドメインの一覧・取り消し
@@ -122,16 +122,20 @@ func cmdImage(args []string) error {
 		cpus := fs.Int("cpus", 4, "焼き込み VM の CPU 数")
 		mem := fs.Int("mem", 4096, "焼き込み VM のメモリ (MiB)")
 		refresh := fs.Bool("refresh", false, "クラウドイメージを取り直す")
+		incremental := fs.Bool("incremental", false, "前回のイメージから差分更新する (カーネルは更新があるときだけ作り直す)")
 		_ = fs.Parse(args[1:])
 		name := image.DefaultRecipe
 		if fs.NArg() > 0 {
 			name = fs.Arg(0)
 		}
+		if *refresh && *incremental {
+			return fmt.Errorf("--refresh と --incremental は同時に使えない")
+		}
 		r, err := image.FindRecipe(name)
 		if err != nil {
 			return err
 		}
-		img, err := image.Build(r, image.BuildOpts{CPUs: *cpus, MemMiB: *mem, Refresh: *refresh}, os.Stderr)
+		img, err := image.Build(r, image.BuildOpts{CPUs: *cpus, MemMiB: *mem, Refresh: *refresh, Incremental: *incremental}, os.Stderr)
 		if err != nil {
 			return err
 		}
