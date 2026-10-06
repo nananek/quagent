@@ -266,11 +266,12 @@ README に載っている鍵) で検証する。gentoo は Release Engineering �
 同梱の鍵の期限は GitHub Actions (`signing-keys`) が毎週確かめ、60 日以内に切れるなら
 issue を立てる。
 
-レシピの約束: ユーザー `{{.User}}` を uid 1000 で作り、rootless docker と opencode を入れ、
-`/work` をそのユーザーの所有で作り、成功したら `{{.Marker}}` を `/dev/ttyS0` に
-出して電源を切る。マーカーが出なければ焼き込みは失敗扱いになる。実行時の VM は
-外向き通信がほぼ無いので、起動時にネットワーク (NTP など) を待つサービスは
-止めておくこと (Arch では `systemd-time-wait-sync` が起動を止めていた)。
+レシピの約束: ユーザー `{{.User}}` を uid 1000 で作り、rootless docker と opencode、
+git を入れ (`git` は repo の取り込みと PR の fetch が使う)、`/work` をそのユーザーの
+所有で作り、成功したら `{{.Marker}}` を `/dev/ttyS0` に出して電源を切る。マーカーが
+出なければ焼き込みは失敗扱いになる。実行時の VM は外向き通信がほぼ無いので、
+起動時にネットワーク (NTP など) を待つサービスは止めておくこと (Arch では
+`systemd-time-wait-sync` が起動を止めていた)。
 
 `recipe.json` の `firmware` は焼く VM の起動ファームウェア。既定は `bios` (SeaBIOS) で、
 `uefi` にすると OVMF で起動する (配布イメージが UEFI 専用のとき。ホストに OVMF が
