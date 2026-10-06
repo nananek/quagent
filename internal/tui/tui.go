@@ -159,6 +159,10 @@ func gitTop(dir string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// unbuiltStyle は、まだ焼いていないレシピの行をグレーにする。16 色パレットの
+// 8 (明るい黒) なので、明るい背景でも暗い背景でも控えめな灰色になる。
+var unbuiltStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+
 func recipeOptions() ([]huh.Option[string], error) {
 	rs, err := image.Recipes()
 	if err != nil {
@@ -170,7 +174,9 @@ func recipeOptions() ([]huh.Option[string], error) {
 		if img, err := image.Latest(r.Name); err == nil {
 			label += "  [" + img.Built.Format("2006-01-02") + " に作成]"
 		} else {
-			label += "  [未作成: 管理画面で焼く]"
+			// 未ビルドのディストロは起動できないので、グレーにして見て分かるようにする
+			// (選ぶと管理画面へ誘導する)。
+			label = unbuiltStyle.Render(label + "  [未作成: 管理画面で焼く]")
 		}
 		opts = append(opts, huh.NewOption(label, r.Name))
 	}

@@ -44,6 +44,23 @@ func TestBuiltinRecipesAreVerifiable(t *testing.T) {
 	}
 }
 
+// 一覧は硬化を一番強くできる Gentoo を先頭に、Gentoo/Arch/Debian の順で出す。
+func TestRecipesOrder(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // 利用者のレシピを混ぜない
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	rs, err := Recipes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, r := range rs {
+		names = append(names, r.Name)
+	}
+	if got := strings.Join(names, ","); got != "gentoo,arch,debian" {
+		t.Fatalf("並び: got %q", got)
+	}
+}
+
 // firmware は uefi / bios だけ受け付ける (既定は bios)。
 func TestRecipeFirmware(t *testing.T) {
 	fsys := func(firmware string) fstest.MapFS {

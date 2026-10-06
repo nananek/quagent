@@ -113,7 +113,21 @@ func readRecipe(fsys fs.FS, name, source string) (Recipe, error) {
 	return r, nil
 }
 
-// Recipes は使えるレシピを名前順に返す。
+// recipeOrder は一覧に出すときの優先順。Gentoo はビルドが重いが、その分だけ
+// 硬化を一番強くできるので先頭に出す。ここに無いものは後ろに名前順で並べる。
+var recipeOrder = []string{"gentoo", "arch", "debian"}
+
+// recipeRank は一覧の並び順 (小さいほど前)。recipeOrder に無ければ同じ扱いにする。
+func recipeRank(name string) int {
+	for i, n := range recipeOrder {
+		if n == name {
+			return i
+		}
+	}
+	return len(recipeOrder)
+}
+
+// Recipes は使えるレシピを、優先順 (Gentoo/Arch/Debian、その他は名前順) で返す。
 func Recipes() ([]Recipe, error) {
 	byName := map[string]Recipe{}
 	entries, err := fs.ReadDir(builtin, "recipes")
@@ -147,7 +161,12 @@ func Recipes() ([]Recipe, error) {
 	for _, r := range byName {
 		out = append(out, r)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	sort.Slice(out, func(i, j int) bool {
+		if ri, rj := recipeRank(out[i].Name), recipeRank(out[j].Name); ri != rj {
+			return ri < rj
+		}
+		return out[i].Name < out[j].Name
+	})
 	return out, nil
 }
 
