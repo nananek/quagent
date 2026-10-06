@@ -12,8 +12,11 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
+
+	"github.com/nananek/quagent/internal/tlsmitm"
 )
 
 // RunChild は `unshare -Urm` の内側 (userns root・独自 mount ns) で動く本体。
@@ -43,7 +46,8 @@ func RunChild(specPath string) error {
 		return fmt.Errorf("resolv.conf の bind mount に失敗: %w", err)
 	}
 
-	c := &child{spec: spec, events: &eventWriter{enc: json.NewEncoder(os.Stdout)}}
+	c := &child{spec: spec, events: &eventWriter{enc: json.NewEncoder(os.Stdout)},
+		inspectWait: map[int]chan inspectResult{}}
 	defer c.cleanup()
 	return c.run()
 }
@@ -54,6 +58,11 @@ type child struct {
 	holder *exec.Cmd
 	slirp  *exec.Cmd
 	qemu   *exec.Cmd
+
+	// TLS 終端した HTTPS の点検依頼と、その返答待ち。
+	inspectMu   sync.Mutex
+	inspectNext int
+	inspectWait map[int]chan inspectResult
 }
 
 func (c *child) cleanup() {
@@ -173,6 +182,23 @@ func (c *child) run() error {
 	}
 	eg := newEgress(c.nft, c.events, initial)
 
+	// 親からの指示 (許可の差し替えと、点検依頼への返答) を早くから受ける。点検の
+	// 返答は透明プロキシが待つので、プロキシが動き出す前に読み手を用意する。
+	stdinClosed := make(chan error, 1)
+	go func() {
+		err := readControl(os.Stdin, func(ctl control) {
+			if ctl.InspectID != 0 {
+				c.deliverInspect(ctl.InspectID, ctl.Allow, ctl.Reason)
+				return
+			}
+			eg.setGrants(ctl.Grants)
+			c.events.send(Event{Applied: ctl.Seq})
+		})
+		// 親が消えたら、待っている点検を止める側で起こす (接続を握ったままにしない)。
+		c.failInspects()
+		stdinClosed <- err
+	}()
+
 	// 3. 子 netns 内の DNS サーバー (上流へは host の網から出る)
 	pc, tl, err := listenInNetns(c.holder.Process.Pid, "127.0.0.1:53")
 	if err != nil {
@@ -184,7 +210,17 @@ func (c *child) run() error {
 
 	// 3.5 透明プロキシ: 許可した IP への Web 接続の SNI/Host を確かめる。nft の
 	// redirect 先が無いと接続が弾かれるので、qemu を起動する前に待ち受ける。
+	// InspectHTTPS なら TLS を終端し、平文の HTTP を親の内容ガードにかける。
 	web := newWebProxy(c.holder.Process.Pid, eg.allowed, eg.webBlocked)
+	if c.spec.InspectHTTPS {
+		ca, err := tlsmitm.FromPEM([]byte(c.spec.CACertPEM), []byte(c.spec.CAKeyPEM))
+		if err != nil {
+			return fmt.Errorf("TLS 終端の CA を読めない: %w", err)
+		}
+		web.mitm = ca
+		web.inspect = c.inspect
+		web.inspectLimit = c.spec.InspectLimit
+	}
 	for _, lp := range []struct {
 		port int
 		tls  bool
@@ -243,13 +279,6 @@ func (c *child) run() error {
 	// 7. 終了待ち: qemu 終了 / 親が stdin を閉じる / シグナル。その間、許可の更新を受ける
 	qemuDone := make(chan error, 1)
 	go func() { qemuDone <- c.qemu.Wait() }()
-	stdinClosed := make(chan error, 1)
-	go func() {
-		stdinClosed <- readControl(os.Stdin, func(ctl control) {
-			eg.setGrants(ctl.Grants)
-			c.events.send(Event{Applied: ctl.Seq})
-		})
-	}()
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
 	tick := time.NewTicker(time.Second)
