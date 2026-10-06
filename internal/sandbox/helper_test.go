@@ -1,14 +1,20 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
 )
+
+// x32ABIBit は amd64 で x32 ABI の syscall 番号に立つビット。
+const x32ABIBit = 0x40000000
 
 // TestSandboxHelper はサブプロセスとしてだけ動く。seccomp / Landlock は一度
 // かけると戻せないので、親のテストプロセスでは試せない。
@@ -32,7 +38,54 @@ func TestSandboxHelper(t *testing.T) {
 		os.Exit(0) // exec に成功すれば戻らない
 	case "landlock":
 		checkLandlock()
+	case "x32":
+		checkX32Rejected(&Policy{Mode: "compat"})
 	}
+}
+
+// checkX32Rejected は x32 ABI の syscall 自体が拒否されることを確かめる。deny 一覧に
+// 無い getppid を x32 で呼ぶ。拒否されればここには戻らない (SIGSYS)。戻ってきたら
+// os.Exit(0) で「素通り」を親に伝える (x32 非対応のカーネルは ENOSYS で 3)。
+func checkX32Rejected(p *Policy) {
+	if err := p.Apply(); err != nil {
+		fmt.Fprintln(os.Stderr, "Apply:", err)
+		os.Exit(2)
+	}
+	_, _, errno := unix.Syscall(uintptr(x32ABIBit|unix.SYS_GETPPID), 0, 0, 0)
+	if errno == unix.ENOSYS {
+		os.Exit(3) // カーネルが x32 ABI を持たない
+	}
+	os.Exit(0) // 素通り = 失敗 (親が検知する)
+}
+
+// TestSeccompRejectsX32 は、x32 ABI が arch を偽装して deny 一覧をすり抜けるのを
+// 塞げているかを確かめる。修正前は素通りしてヘルパーが 0 で終わる。
+func TestSeccompRejectsX32(t *testing.T) {
+	if runtime.GOARCH != "amd64" {
+		t.Skip("x32 ABI は amd64 のみ")
+	}
+	runX32Helper(t)
+}
+
+// runX32Helper はヘルパーを起動し、SIGSYS で殺される (拒否) か、x32 非対応の
+// 3 で終わる (skip) ことを確かめる。素通り (終了コード 0) なら失敗。
+func runX32Helper(t *testing.T) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestSandboxHelper$")
+	cmd.Env = append(os.Environ(), "QUAGENT_SANDBOX_HELPER=x32")
+	out, err := cmd.CombinedOutput()
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		if ws, ok := ee.Sys().(syscall.WaitStatus); ok {
+			if ws.Signaled() && ws.Signal() == syscall.SIGSYS {
+				return
+			}
+			if ws.Exited() && ws.ExitStatus() == 3 {
+				t.Skip("このカーネルは x32 ABI が無効")
+			}
+		}
+	}
+	t.Fatalf("x32 syscall が拒否されなかった (arch 検査だけではすり抜ける): err=%v out=%s", err, out)
 }
 
 // checkGetppidDenied は方針をかけてから getppid を呼び、EPERM になることを確かめる。

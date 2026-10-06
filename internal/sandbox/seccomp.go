@@ -10,10 +10,16 @@ import (
 
 // classic BPF (cBPF) の命令コード。
 const (
-	bpfLD  = 0x20 // BPF_LD  | BPF_W | BPF_ABS
-	bpfJEQ = 0x15 // BPF_JMP | BPF_JEQ | BPF_K
-	bpfRET = 0x06 // BPF_RET | BPF_K
+	bpfLD   = 0x20 // BPF_LD  | BPF_W | BPF_ABS
+	bpfJEQ  = 0x15 // BPF_JMP | BPF_JEQ | BPF_K
+	bpfJSET = 0x45 // BPF_JMP | BPF_JSET | BPF_K
+	bpfRET  = 0x06 // BPF_RET | BPF_K
 )
+
+// x32SyscallBit は amd64 で x32 ABI の syscall 番号に立つビット (__X32_SYSCALL_BIT)。
+// x32 は seccomp_data.arch を x86_64 のまま名乗るので、arch 検査だけでは
+// 64bit と同じ番号の deny 一覧に当たらず、そのまま素通りしてしまう。
+const x32SyscallBit = 0x40000000
 
 // auditArch は seccomp のデータが名乗るべきアーキ。別の入口 (32bit ABI など) で
 // 同じ番号の syscall を呼ばれるのを防ぐため、一致しなければ殺す。
@@ -36,6 +42,14 @@ func buildSeccompFilter(arch uint32, errno uint32, deny []int) []unix.SockFilter
 		{Code: bpfJEQ, Jt: 1, Jf: 0, K: arch}, // 一致すれば LD nr へ、しなければ次 (KILL)
 		{Code: bpfRET, K: unix.SECCOMP_RET_KILL_PROCESS},
 		{Code: bpfLD, K: 0}, // seccomp_data.nr
+	}
+	// x32 ABI は arch が x86_64 のまま nr の bit30 が立つ。deny 一覧をすり抜けるので
+	// 別アーキ (i386 など) と同じく殺す。
+	if arch == unix.AUDIT_ARCH_X86_64 {
+		f = append(f,
+			unix.SockFilter{Code: bpfJSET, Jt: 0, Jf: 1, K: x32SyscallBit}, // nr & X32 なら次 (KILL)
+			unix.SockFilter{Code: bpfRET, K: unix.SECCOMP_RET_KILL_PROCESS},
+		)
 	}
 	for _, nr := range deny {
 		f = append(f,
