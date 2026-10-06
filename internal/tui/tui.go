@@ -63,6 +63,20 @@ func saveLast(l Launch) {
 
 // Run はメインメニューを出し、起動が選ばれたらその設定を返す。agents は選べるエージェント。
 func Run(agents []string) (Launch, error) {
+	// 初回 (まだ 1 つも焼いていない) は起動先が無いので、焼き込みへ誘導する。
+	if !hasAnyImage() {
+		if err := newForm(huh.NewGroup(huh.NewNote().
+			Title("ベースイメージがまだ無い").
+			Description("VM を起動するには、先にベースイメージを焼く必要がある。\n次に開く管理画面で焼いてから、起動する。"))).Run(); err != nil {
+			return Launch{}, ErrQuit
+		}
+		if err := imagesMenu(); err != nil && !errors.Is(err, errBack) {
+			return Launch{}, err
+		}
+		if !hasAnyImage() {
+			return Launch{}, ErrQuit
+		}
+	}
 	for {
 		var choice string
 		err := newForm(huh.NewGroup(
@@ -82,6 +96,12 @@ func Run(agents []string) (Launch, error) {
 			if errors.Is(err, errBack) {
 				continue
 			}
+			if errors.Is(err, errNoImage) {
+				if e := imagesMenu(); e != nil && !errors.Is(e, errBack) {
+					return Launch{}, e
+				}
+				continue
+			}
 			return l, err
 		case "images":
 			if err := imagesMenu(); err != nil && !errors.Is(err, errBack) {
@@ -96,6 +116,15 @@ func Run(agents []string) (Launch, error) {
 }
 
 var errBack = errors.New("back")
+
+// errNoImage は選んだレシピのベースイメージがまだ無い (管理画面へ誘導する)。
+var errNoImage = errors.New("no image")
+
+// hasAnyImage は焼いたベースイメージが 1 つ以上あるかを返す (初回起動の判定用)。
+func hasAnyImage() bool {
+	imgs, err := image.List("")
+	return err == nil && len(imgs) > 0
+}
 
 func gitTop(dir string) string {
 	out, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output()
@@ -116,7 +145,7 @@ func recipeOptions() ([]huh.Option[string], error) {
 		if img, err := image.Latest(r.Name); err == nil {
 			label += "  [" + img.Built.Format("2006-01-02") + " に作成]"
 		} else {
-			label += "  [未作成: 起動前に焼く]"
+			label += "  [未作成: 管理画面で焼く]"
 		}
 		opts = append(opts, huh.NewOption(label, r.Name))
 	}
@@ -205,16 +234,11 @@ func startForm(agents []string) (Launch, error) {
 	l.MemMiB, _ = strconv.Atoi(mem)
 	saveLast(l)
 
+	// 焼き込みは起動画面では行わない (管理画面から)。まだ無ければそこへ誘導する。
 	if _, err := image.Latest(l.Recipe); err != nil {
-		build := true
-		if err := newForm(huh.NewGroup(huh.NewConfirm().
-			Title(l.Recipe + " のベースイメージがまだ無い。今から焼く? (数分かかる)").
-			Affirmative("焼く").Negative("戻る").Value(&build))).Run(); err != nil || !build {
-			return Launch{}, errBack
-		}
-		if err := buildImage(l.Recipe, false); err != nil {
-			return Launch{}, err
-		}
+		fmt.Printf("%s のベースイメージがまだ無い。「ベースイメージの管理」で焼いてから起動する。\n", l.Recipe)
+		pause()
+		return Launch{}, errNoImage
 	}
 	return l, nil
 }
@@ -254,6 +278,7 @@ func imagesMenu() error {
 				huh.NewOption(r.Name+" を焼く / 更新する (OS の更新を取り込む)", "build:"+r.Name))
 		}
 		opts = append(opts,
+			huh.NewOption("イメージを個別に消す (最新も消せる)", "delete"),
 			huh.NewOption("古いイメージを消す (各 OS の最新だけ残す)", "prune"),
 			huh.NewOption("戻る", "back"))
 		var choice string
@@ -269,6 +294,10 @@ func imagesMenu() error {
 				fmt.Fprintln(os.Stderr, "失敗:", err)
 			}
 			pause()
+		case choice == "delete":
+			if err := deleteImagesMenu(); err != nil && !errors.Is(err, errBack) {
+				return err
+			}
 		case choice == "prune":
 			n := 0
 			for _, r := range rs {
@@ -285,6 +314,59 @@ func imagesMenu() error {
 			pause()
 		}
 	}
+}
+
+// deleteImagesMenu は焼いたイメージを一覧し、選んだものを消す (各 OS の最新も消せる)。
+func deleteImagesMenu() error {
+	imgs, err := image.List("")
+	if err != nil {
+		return err
+	}
+	if len(imgs) == 0 {
+		fmt.Println("消せるイメージが無い")
+		pause()
+		return errBack
+	}
+	seen := map[string]bool{}
+	var opts []huh.Option[string]
+	for _, img := range imgs {
+		label := fmt.Sprintf("%s  %s  %.1f GiB", img.Recipe,
+			img.Built.Format("2006-01-02 15:04"), float64(img.Size)/(1<<30))
+		if !seen[img.Recipe] {
+			label += "  (最新)"
+			seen[img.Recipe] = true
+		}
+		opts = append(opts, huh.NewOption(label, img.Path))
+	}
+	var picked []string
+	if err := newForm(huh.NewGroup(
+		huh.NewMultiSelect[string]().Title("消すイメージ (space で選択、enter で確定)").
+			Description("各 OS の最新も消せる。起動に使う最新を消すと、次は焼き直しが要る").
+			Options(opts...).Value(&picked),
+	)).Run(); err != nil || len(picked) == 0 {
+		return errBack
+	}
+	ok := false
+	if err := newForm(huh.NewGroup(huh.NewConfirm().
+		Title(fmt.Sprintf("%d 個のイメージを消す? (元に戻せない)", len(picked))).
+		Affirmative("消す").Negative("戻る").Value(&ok))).Run(); err != nil || !ok {
+		return errBack
+	}
+	n := 0
+	for _, p := range picked {
+		for _, img := range imgs {
+			if img.Path == p {
+				if err := image.Remove(img); err != nil {
+					fmt.Fprintln(os.Stderr, "削除に失敗:", err)
+					continue
+				}
+				n++
+			}
+		}
+	}
+	fmt.Printf("%d 個消した\n", n)
+	pause()
+	return errBack
 }
 
 func buildImage(name string, refresh bool) error {

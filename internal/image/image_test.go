@@ -1,6 +1,9 @@
 package image
 
 import (
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +35,62 @@ func TestBuiltinRecipesAreVerifiable(t *testing.T) {
 		if r.Source == "builtin" && r.ChecksumURL == "" {
 			t.Errorf("%s: checksum_url が無い", r.Name)
 		}
+	}
+}
+
+// latest は署名されたテキスト。clearsigned のヘッダや注釈を飛ばしてファイル名を取る。
+func TestLatestFileName(t *testing.T) {
+	const signed = `-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA256
+
+# Latest as of Tue, 06 Oct 2026 10:15:00 +0000
+# ts=1791281700
+di-amd64-cloudinit-20261004T164559Z.qcow2 1501626368
+-----BEGIN PGP SIGNATURE-----
+
+iQFPBAEBCAA5...
+-----END PGP SIGNATURE-----
+`
+	if got, err := latestFileName(signed); err != nil || got != "di-amd64-cloudinit-20261004T164559Z.qcow2" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+	if _, err := latestFileName("# comment only\nHash: SHA256\n"); err == nil {
+		t.Fatal("ファイル名が無いのに成功した")
+	}
+}
+
+// LatestURL の指すファイルから今の名前を読み、URL 中の $FILE を置き換える。
+func TestResolveLatest(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/latest.txt" {
+			io.WriteString(w, "# c\nimage-20260101.qcow2 123\n")
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	r := Recipe{
+		LatestURL:     srv.URL + "/latest.txt",
+		CloudImageURL: srv.URL + "/img/$FILE",
+		ChecksumURL:   srv.URL + "/img/$FILE.sha256",
+		SignatureURL:  srv.URL + "/img/$FILE.asc",
+	}
+	var out strings.Builder
+	if err := r.resolveLatest(&out); err != nil {
+		t.Fatal(err)
+	}
+	if r.CloudImageURL != srv.URL+"/img/image-20260101.qcow2" ||
+		r.ChecksumURL != srv.URL+"/img/image-20260101.qcow2.sha256" ||
+		r.SignatureURL != srv.URL+"/img/image-20260101.qcow2.asc" {
+		t.Fatalf("URL を置き換えていない: %+v", r)
+	}
+	if !strings.Contains(out.String(), "image-20260101.qcow2") {
+		t.Fatalf("進捗に名前が無い: %q", out.String())
+	}
+
+	bad := Recipe{LatestURL: srv.URL + "/nope"}
+	if err := bad.resolveLatest(&out); err == nil {
+		t.Fatal("latest を取得できないのに成功した")
 	}
 }
 

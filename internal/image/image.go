@@ -56,6 +56,14 @@ type Recipe struct {
 	// (レシピのディレクトリにある公開鍵のファイル名) で gpgv により検証する。
 	SignatureURL string `json:"signature_url,omitempty"`
 	SigningKey   string `json:"signing_key,omitempty"`
+	// LatestURL は「今のイメージのファイル名」を載せた小さなテキスト (Gentoo の
+	// latest-*.txt など)。設定すると CloudImageURL / ChecksumURL / SignatureURL の
+	// 中の $FILE を、そのファイルが指すファイル名に置き換える。版ごとにファイル名が
+	// 変わる配布元で URL を固定するために使う。
+	LatestURL string `json:"latest_url,omitempty"`
+	// BuildTimeoutMinutes は焼き込み VM の上限 (分)。既定 45。カーネルを作り直す
+	// など重いレシピ向け。
+	BuildTimeoutMinutes int `json:"build_timeout_minutes,omitempty"`
 	// Source は "builtin" か、利用者のレシピのディレクトリ。
 	Source     string `json:"-"`
 	userData   string
@@ -216,6 +224,9 @@ type BuildOpts struct {
 
 // Build はレシピからベースイメージを新しく焼き、そのイメージを返す。
 func Build(r Recipe, o BuildOpts, progress io.Writer) (Image, error) {
+	if err := r.resolveLatest(progress); err != nil {
+		return Image{}, err
+	}
 	var ud bytes.Buffer
 	tmpl, err := template.New("user-data").Parse(r.userData)
 	if err != nil {
@@ -256,7 +267,7 @@ func Build(r Recipe, o BuildOpts, progress io.Writer) (Image, error) {
 	})
 	fmt.Fprintf(progress, "%s を VM で焼き込み中 (数分かかる)。コンソール: %s\n", r.Name, console)
 	cmd := exec.Command(argv[0], argv[1:]...)
-	if out, err := runWithTimeout(cmd, 45*time.Minute); err != nil {
+	if out, err := runWithTimeout(cmd, r.timeout()); err != nil {
 		return Image{}, fmt.Errorf("焼き込み VM が異常終了: %v: %s", err, out)
 	}
 
@@ -279,6 +290,60 @@ func Build(r Recipe, o BuildOpts, progress io.Writer) (Image, error) {
 		img.Size = info.Size()
 	}
 	return img, nil
+}
+
+// timeout は焼き込み VM の上限。BuildTimeoutMinutes が無ければ既定 45 分。
+func (r Recipe) timeout() time.Duration {
+	if r.BuildTimeoutMinutes > 0 {
+		return time.Duration(r.BuildTimeoutMinutes) * time.Minute
+	}
+	return 45 * time.Minute
+}
+
+// resolveLatest は LatestURL の指すファイルから今のイメージ名を読み、URL 中の
+// $FILE をその名前で置き換える (版ごとにファイル名が変わる配布元向け)。
+func (r *Recipe) resolveLatest(progress io.Writer) error {
+	if r.LatestURL == "" {
+		return nil
+	}
+	b, err := fetchSmall(r.LatestURL, 64<<10)
+	if err != nil {
+		return fmt.Errorf("最新イメージの一覧 (%s) を取得できない: %w", r.LatestURL, err)
+	}
+	name, err := latestFileName(string(b))
+	if err != nil {
+		return fmt.Errorf("%s: %w", r.LatestURL, err)
+	}
+	sub := func(u string) string { return strings.ReplaceAll(u, "$FILE", name) }
+	r.CloudImageURL = sub(r.CloudImageURL)
+	r.ChecksumURL = sub(r.ChecksumURL)
+	r.SignatureURL = sub(r.SignatureURL)
+	fmt.Fprintf(progress, "今のイメージ: %s\n", name)
+	return nil
+}
+
+// latestFileName は latest の一覧 (署名されたテキスト) から最初のイメージの
+// ファイル名を取り出す。行頭 # の注釈、PGP の armor、その他の行は読み飛ばす。
+func latestFileName(list string) (string, error) {
+	for _, line := range strings.Split(list, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "-----") {
+			continue
+		}
+		// clearsigned のヘッダ (Hash: SHA256 など) はファイル名ではない
+		if strings.Contains(line, ":") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		switch filepath.Ext(fields[0]) {
+		case ".qcow2", ".qcow", ".img", ".raw":
+			return fields[0], nil
+		}
+	}
+	return "", fmt.Errorf("イメージのファイル名が見つからない")
 }
 
 func fetchCloudImage(r Recipe, refresh bool, progress io.Writer) (string, error) {
