@@ -42,6 +42,12 @@ permissions:
     resource: "free *"
     effect: allow
   - action: shell
+    resource: "date *"
+    effect: allow
+  - action: shell
+    resource: "tail *"
+    effect: allow
+  - action: shell
     resource: "go test *"
     effect: allow
   - action: shell
@@ -150,6 +156,7 @@ permissions:
   焼き直す (recipe-authoring skill のとおり)。
 - 焼き込みは重い。CPU はホストのコア数まで、メモリは空きの範囲でたっぷり指定する
   (`nproc` と `free -h` を見て `--cpus` / `--mem`)。上限はレシピの build_timeout_minutes。
+- 進行状況は、ビルドが表示するコンソールログを `tail` して見る (時刻は `date`)。
 - 失敗したら、ビルド出力に出るコンソールログ (failed-*-console.log) を読んで直す。
 - 焼き上がりの起動テストはしない (必要なときは人に確認する)。結果は作ったイメージの
   パスと所要時間だけ短く報告する。
