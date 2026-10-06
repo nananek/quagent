@@ -8,6 +8,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// getppid は拒否しても実害が無く、結果を観測しやすい (呼べば親 pid、拒否されれば
+// EPERM) のでテストで使う。production の syscall 表には入れず、テストバイナリだけが
+// 知る (設定で書けるのは実際に拒否したい syscall だけにする)。
+func init() { syscallNumbers["getppid"] = unix.SYS_GETPPID }
+
 func TestDenyNumbersModes(t *testing.T) {
 	compat, err := (&Policy{}).DenyNumbers()
 	if err != nil {

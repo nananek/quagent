@@ -1,6 +1,8 @@
 package hostsvc
 
 import (
+	"bufio"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -90,5 +92,29 @@ func TestAuditLineEscapesControlChars(t *testing.T) {
 	}
 	if !strings.Contains(line, `\n`) {
 		t.Fatalf("改行がエスケープされていない: %q", line)
+	}
+}
+
+// hijackableWriter は http.Hijacker を実装した ResponseWriter (Unwrap の確認用)。
+type hijackableWriter struct {
+	http.ResponseWriter
+	hijacked bool
+}
+
+func (w *hijackableWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	w.hijacked = true
+	return nil, nil, nil
+}
+
+// TestAuditWriterUnwrap は、包んだ auditWriter 越しでも http.ResponseController が
+// 元の ResponseWriter の追加機能 (Hijacker など) に届くことを確かめる。
+func TestAuditWriterUnwrap(t *testing.T) {
+	base := &hijackableWriter{ResponseWriter: httptest.NewRecorder()}
+	w := &auditWriter{ResponseWriter: base}
+	if _, _, err := http.NewResponseController(w).Hijack(); err != nil {
+		t.Fatalf("包み越しに元の ResponseWriter へ届かない: %v", err)
+	}
+	if !base.hijacked {
+		t.Fatal("元の ResponseWriter が呼ばれていない")
 	}
 }
