@@ -3,7 +3,9 @@ package hostsvc
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestTokenRequired(t *testing.T) {
@@ -66,5 +68,27 @@ func TestAuditRecordsAllRequests(t *testing.T) {
 	}
 	if events[1].Status != 200 || events[1].Bytes != int64(len("hello")) || events[1].Method != "POST" {
 		t.Fatalf("200 の記録が変: %+v", events[1])
+	}
+}
+
+// TestAuditLineEscapesControlChars は、VM が決められる path に改行・制御文字を
+// 混ぜて host.log に偽の行を足せないことを確かめる。
+func TestAuditLineEscapesControlChars(t *testing.T) {
+	e := AuditEvent{
+		Method: "GET",
+		Path:   "/ok\nfake audit: GET /evil -> 200",
+		Status: 200,
+		Bytes:  1,
+		Took:   1500 * time.Microsecond,
+	}
+	line := e.LogLine()
+	if !strings.HasPrefix(line, "audit: ") {
+		t.Fatalf("接頭辞が無い: %q", line)
+	}
+	if strings.ContainsAny(line, "\n\r") {
+		t.Fatalf("制御文字が生のまま出ている: %q", line)
+	}
+	if !strings.Contains(line, `\n`) {
+		t.Fatalf("改行がエスケープされていない: %q", line)
 	}
 }
