@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/nananek/quagent/internal/paths"
+	"github.com/nananek/quagent/internal/sandbox"
 )
 
 // Config はユーザー設定全体。
@@ -28,6 +29,9 @@ type Config struct {
 	Clipboard Clipboard `json:"clipboard"`
 	// Guard はローカル LLM による HTTP リクエストの内容点検の設定。
 	Guard Guard `json:"guard"`
+	// Sandbox は VM の中のコマンドにかける seccomp / Landlock の設定。
+	// 未指定なら既定 (compat で有効)。
+	Sandbox *sandbox.Policy `json:"sandbox,omitempty"`
 }
 
 // Guard はローカル LLM による HTTP リクエストの内容点検の設定。ネットワークの

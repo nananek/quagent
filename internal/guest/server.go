@@ -17,12 +17,31 @@ import (
 
 	"github.com/creack/pty"
 	"github.com/mdlayher/vsock"
+	"github.com/nananek/quagent/internal/sandbox"
 )
+
+// SandboxPolicy は VM の中でコマンドにかける一枚 (seccomp / Landlock) の方針。
+// Serve が設定ファイルから読み、handle が起動のたびに起動役へ包む。テストでは nil。
+var SandboxPolicy *sandbox.Policy
 
 // Serve は VM 内で vsock を待ち受け、host からのコマンドを実行する (`quagent __guest`)。
 // 実行するのはこのプロセスのユーザー (作業用の一般ユーザー) の権限。あわせて
 // 127.0.0.1:relayPort への接続を host の窓口 (vsock の hostPort) へ中継する。
+// SandboxPolicy が有効なら、host から来たコマンドを起動役 (`__sandbox`) 経由で起動し、
+// 本人には外せない seccomp / Landlock をかける。
 func Serve(relayPort int, hostPort uint32) error {
+	policy, err := sandbox.Load(sandbox.ConfigPath)
+	if err != nil {
+		return fmt.Errorf("sandbox の方針を読めない: %w", err)
+	}
+	SandboxPolicy = policy
+	if policy.On() {
+		deny, err := policy.DenyNumbers()
+		if err != nil {
+			return err
+		}
+		log.Printf("sandbox: 有効 mode=%s (syscall を %d 個拒否, landlock=%v)", policy.Mode, len(deny), policy.Landlock)
+	}
 	l, err := vsock.Listen(Port, nil)
 	if err != nil {
 		return err
@@ -159,7 +178,16 @@ func handle(c net.Conn, env []string) {
 		_ = fw.write(fError, []byte("不正なヘッダ"))
 		return
 	}
-	cmd := exec.Command(h.Argv[0], h.Argv[1:]...)
+	argv := h.Argv
+	if SandboxPolicy.On() {
+		self, err := os.Executable()
+		if err != nil {
+			_ = fw.write(fError, []byte("sandbox: 自分のパスを取れない: "+err.Error()))
+			return
+		}
+		argv = sandbox.Wrap(self, argv)
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = h.Dir
 	cmd.Env = env
 	if h.Dir == "" {

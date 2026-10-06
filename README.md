@@ -10,6 +10,10 @@ socket はその netns の nftables を通り、許可リスト以外への新�
 ルールは VM の外側にあるので、guest の root からは見えず改変もできない。
 すべて非 root で動く。
 
+VM の外 (host) の許可制に加えて、VM の中のコマンドにも、本人には外せない一枚
+(seccomp / Landlock) をかける (「VM の中の一枚」)。閉じ込めの本体は VM と host で、
+これは危険な syscall の入口を減らす追加の一枚。
+
 ```
 host ── vsock ──────────────────────────────────────► guest (quagent __guest)
 host ◄─ vsock (run ごとのポート、この VM の CID だけ) ◄─ guest 127.0.0.1:7070
@@ -165,9 +169,54 @@ VM の中のエージェントが host の資源や承認者を使い潰せな�
   点検済みの塊は再点検しない (会話履歴が毎回送られても送り直さない)。人間の判断は
   「ローカル LLM が指摘した該当箇所」を単位に覚え、拒否した該当箇所は内容そのものを
   覚えて再送を止める (どちらも 10 分、512 件)
+- VM の中のコマンド: seccomp で `bpf` / モジュール操作 / `kexec` / `reboot` / `ptrace` /
+  `userfaultfd` / カーネル鍵 / `open_by_handle_at` を拒否する。任意で Landlock により
+  書き込み先を限る (下記「VM の中の一枚」)
+- host の窓口 (vsock): guest からのリクエストを 1 件ずつ host 側で `host.log` に残す
+  (合言葉の無いものも含む)。VM の中の記録と違い改変できない
 
 残っているもの: VM のディスク (overlay、最大 40G) には VM が書き込めるので、host の
 ディスクを使える。LLM API の利用量 (課金) は制限していない。
+
+## VM の中の一枚 (seccomp / Landlock)
+
+VM の外 (host) の許可制に加えて、VM の中のコマンドにも、本人には外せない一枚を
+かける。host が方針を cloud-init で `/etc/quagent/sandbox.json` (root 所有 0644) に
+置き、受け口 (`quagent-guest`) が全コマンドを起動役 (`quagent-guest __sandbox`) 経由で
+起動する。起動役は `no_new_privs` を立ててから seccomp (syscall の拒否) と、任意で
+Landlock (書き込み先の制限) をかけ、それから本来のコマンドを exec する。一度かけると
+本人は緩められず、子プロセスへ継承される。VM の中の作業ユーザーは root ではないので、
+自分で外そうとしても外せない。
+
+- **seccomp** (既定 `mode: "compat"`): `bpf` / モジュール操作 (`init_module` など) /
+  `kexec` / `reboot` / `ptrace` / `userfaultfd` / カーネル鍵 (`add_key` など) /
+  `name_to_handle_at` / `open_by_handle_at` を EPERM で拒否する。`mode: "strict"` では
+  加えて `mount` / `umount2` / `unshare` / `setns` / `chroot` / `pivot_root` / io_uring /
+  `perf_event_open` / `process_vm_readv` なども拒否する。rootless docker のデーモンは
+  agent のプロセス木の外 (systemd) にいるので通常は影響しないが、agent が直接
+  `unshare` / `bwrap` / io_uring を使う作業はできなくなる。
+  別 ABI からの同じ番号の syscall (32bit の `int 0x80`、x32) は、arch や番号を
+  偽っても拒否する (プロセスを殺す)。64bit 以外のバイナリは動かせない。
+- **Landlock** (`landlock: true`、既定 off): 書き込み・作成・削除・rename を
+  `read_write_paths` (既定: ホーム・`/work`・`/tmp`・`/var/tmp`・`/run/user/<uid>`・
+  `/dev/shm`) の下だけに限る。読み取りは制限しない。カーネルが Landlock に未対応なら
+  起動役はエラーにする (黙って無効にしない)。
+
+```json
+"sandbox": {
+  "enabled": true,
+  "mode": "compat",
+  "landlock": false
+}
+```
+
+`enabled` を省略すると有効 (既定)。無効にするなら `"enabled": false`。`extra_deny` に
+拒否する syscall 名を足せる (例 `["chroot"]`)。`read_write_paths` で Landlock の
+書き込み先を指定できる。
+
+これは許可制の置き換えではない。VM という檻の中で、危険な syscall の入口を減らす
+ためのもの。作業に必要な syscall まで拒否してしまったときは `enabled: false` で外せる。
+(`__sandbox` は quagent の隠しサブコマンド。)
 
 ## ベースイメージのレシピ
 

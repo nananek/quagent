@@ -35,9 +35,28 @@ const (
 // GuestOrigin は guest から見た窓口の URL の先頭 (http://quagent.host:7070)。
 func GuestOrigin() string { return fmt.Sprintf("http://%s:%d", GuestHost, GuestPort) }
 
+// AuditEvent は guest から host の窓口への 1 リクエスト。VM が何を host に
+// 求めたかは host 信頼で記録できる (VM の中の記録とは違い改変されない)。
+type AuditEvent struct {
+	Method string
+	Path   string
+	Status int
+	Bytes  int64
+	Took   time.Duration
+}
+
+// LogLine は監査イベントを host.log の 1 行にする。Method / Path は VM が決められる
+// ので %q で書く (改行や制御文字で別のログ行を偽装させない)。
+func (e AuditEvent) LogLine() string {
+	return fmt.Sprintf("audit: %q %q -> %d (%d bytes, %s)",
+		e.Method, e.Path, e.Status, e.Bytes, e.Took.Round(time.Millisecond))
+}
+
 // Server は窓口の HTTP サーバー。
 type Server struct {
 	Mux *http.ServeMux
+	// Audit が non-nil なら、窓口へのリクエストごとに呼ぶ (host 側の監査ログ用)。
+	Audit func(AuditEvent)
 	// Token は run ごとの合言葉。エージェントの設定にだけ書き、/healthz 以外は
 	// これを持たないリクエストを拒否する (VM 内のエージェント以外のプロセスや
 	// コンテナが、プロキシ経由で鍵や MCP を使えないように)。
@@ -77,12 +96,56 @@ func (s *Server) authorized(r *http.Request) bool {
 
 func (s *Server) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/healthz" && !s.authorized(r) {
-			http.Error(w, "quagent: unauthorized", http.StatusUnauthorized)
+		if s.Audit == nil {
+			if r.URL.Path != "/healthz" && !s.authorized(r) {
+				http.Error(w, "quagent: unauthorized", http.StatusUnauthorized)
+				return
+			}
+			s.Mux.ServeHTTP(w, r)
 			return
 		}
-		s.Mux.ServeHTTP(w, r)
+		start := time.Now()
+		rec := &auditWriter{ResponseWriter: w, status: http.StatusOK}
+		if r.URL.Path != "/healthz" && !s.authorized(r) {
+			http.Error(rec, "quagent: unauthorized", http.StatusUnauthorized)
+		} else {
+			s.Mux.ServeHTTP(rec, r)
+		}
+		s.Audit(AuditEvent{
+			Method: r.Method, Path: r.URL.Path,
+			Status: rec.status, Bytes: rec.bytes, Took: time.Since(start),
+		})
 	})
+}
+
+// auditWriter はステータスと送信バイト数を数える。Flush は元の実装へ通す
+// (ストリーミングを止めない)。
+type auditWriter struct {
+	http.ResponseWriter
+	status  int
+	bytes   int64
+	written bool
+}
+
+func (w *auditWriter) WriteHeader(code int) {
+	if !w.written {
+		w.status = code
+		w.written = true
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *auditWriter) Write(p []byte) (int, error) {
+	w.written = true
+	n, err := w.ResponseWriter.Write(p)
+	w.bytes += int64(n)
+	return n, err
+}
+
+func (w *auditWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // Start は host の vsock で待ち受けを始める (ポートは空いているものを選ぶ)。

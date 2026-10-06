@@ -27,6 +27,7 @@ import (
 	"github.com/nananek/quagent/internal/netns"
 	"github.com/nananek/quagent/internal/paths"
 	"github.com/nananek/quagent/internal/pr"
+	"github.com/nananek/quagent/internal/sandbox"
 	"github.com/nananek/quagent/internal/tlsmitm"
 	"github.com/nananek/quagent/internal/vm"
 )
@@ -90,6 +91,13 @@ func caWriteFile(caCert string) string {
 		caGuestPath, indentBlock(caCert, "      "))
 }
 
+// sandboxWriteFile は sandbox の方針を guest に置く write_files の断片
+// (YAML のリスト項目)。root 所有 0644 で置くので、作業ユーザーは読めるが書き換えられない。
+func sandboxWriteFile(policy []byte) string {
+	return fmt.Sprintf("  - path: %s\n    permissions: '0644'\n    content: |\n%s",
+		sandbox.ConfigPath, indentBlock(string(policy), "      "))
+}
+
 // normalizePassthrough は TLS 終端しない行き先のパターンを検証・正規化する
 // ("example.com" か "*.example.com")。空なら nil を返す。
 func normalizePassthrough(in []string) ([]string, error) {
@@ -119,6 +127,14 @@ func run(o runOpts) error {
 	}
 	if o.Agent == "" {
 		o.Agent = DefaultAgent
+	}
+	// VM の中のコマンドにかける一枚 (seccomp / Landlock)。未指定なら既定で有効。
+	sb := cfg.Sandbox
+	if sb == nil {
+		sb = sandbox.Default()
+	}
+	if err := sb.Validate(); err != nil {
+		return err
 	}
 	ag, ok := agents[o.Agent]
 	if !ok {
@@ -192,6 +208,11 @@ func run(o runOpts) error {
 	if err != nil {
 		return err
 	}
+	// 窓口 (vsock) へのリクエストを host 信頼で記録する。VM が何を host に求めたかは
+	// VM の中の記録と違い改変されない (host.log に残る)。
+	svc.Audit = func(e hostsvc.AuditEvent) {
+		logger.Print(e.LogLine())
+	}
 	// 許可していない LLM API の操作は、承認コンソールができてからそこに出す
 	llmDenied := make(chan string, 16)
 	// コンテンツガード (ローカル LLM)。承認コンソールはこの後で作るので、Reviewer は後から差す。
@@ -251,6 +272,24 @@ func run(o runOpts) error {
 	if caCert != "" {
 		entrypoint, extraFiles, trustCmd = injectCA(entrypoint, caCert)
 	}
+	// VM の中の一枚 (seccomp / Landlock) の方針を cloud-init で置く。root 所有 0644
+	// なので、作業ユーザーは読めるが書き換えられない。受け口 (quagent-guest) が
+	// 起動時に読み、以降のコマンドを起動役経由で起動する。
+	sandboxFile := ""
+	if sb.On() {
+		sbJSON, err := sb.JSON()
+		if err != nil {
+			return err
+		}
+		sandboxFile = sandboxWriteFile(sbJSON)
+		note := ""
+		if sb.Landlock {
+			note = " + Landlock"
+		}
+		logf("sandbox: VM 内のコマンドに %s の方針をかける (seccomp%s)", sb.Mode, note)
+	} else {
+		logf("sandbox: 無効")
+	}
 	userData := fmt.Sprintf(`#cloud-config
 write_files:
   # エージェントの起動はここにまとめる (↑ で呼び戻せる)
@@ -259,7 +298,9 @@ write_files:
     content: |
 %s
 %s
+%s
 bootcmd:
+  - [mkdir, -p, /etc/quagent]
   - echo '127.0.0.1 %s' >> /etc/hosts
   # 外へは出られないので NTP は使えない (時計は KVM が合わせる)。拒否の記録が並ぶだけなので止める
   - [sh, -c, "systemctl mask --now systemd-timesyncd.service 2>/dev/null; true"]
@@ -267,7 +308,7 @@ bootcmd:
 runcmd:
 %s%s  - [sh, -c, "mkdir -p /run/quagent-seed && mount -o ro /dev/disk/by-label/cidata /run/quagent-seed && install -m 755 /run/quagent-seed/quagent-guest /usr/local/bin/quagent-guest && umount /run/quagent-seed"]
   - [systemd-run, --unit=quagent-guest, --uid=%s, -p, Restart=always, /usr/local/bin/quagent-guest, %s, "%d"]
-`, indentBlock(entrypoint, "      "), extraFiles, hostsvc.GuestHost, maskCmd(sshUnits(o.SSH)), trustCmd, tmpCmd, vm.GuestUser, guestCommand, svc.Port)
+`, indentBlock(entrypoint, "      "), extraFiles, sandboxFile, hostsvc.GuestHost, maskCmd(sshUnits(o.SSH)), trustCmd, tmpCmd, vm.GuestUser, guestCommand, svc.Port)
 	// 時刻の表示 (承認の期限やコミットの日時) を host とそろえる
 	if tz := hostTimezone(); tz != "" {
 		userData += "timezone: " + tz + "\n"
