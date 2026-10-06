@@ -135,6 +135,12 @@ write_files:
       U={{.User}}
       UID_=$(id -u "$U")
 
+      # 焼き込みのあいだだけ ptrace を許す。git 2.52 以降の Rust 部品 (USE=rust、
+      # 既定で有効) は cargo が PTRACE_TRACEME を使うが、硬化設定の
+      # kernel.yama.ptrace_scope=2 はこれを拒否してビルドが落ちる。sysctl.d の
+      # 設定自体は触らないので、起動し直したイメージでは 2 に戻る。
+      echo 1 > /proc/sys/kernel/yama/ptrace_scope
+
       # クラウドイメージには Portage ツリーが入っていない (make.profile は
       # /var/db/repos/gentoo を指しているだけ)。ツリーを取ってから切り替える。
       # 差分更新のときは、ここでツリーが最新になる。
@@ -151,7 +157,10 @@ write_files:
       # クラウドイメージから焼き直す。
 
       # rootless docker の部品。Gentoo では ~amd64 なので鍵を自動で足す。
-      emerge --update --oneshot --autounmask-continue app-containers/slirp4netns sys-fs/fuse-overlayfs
+      # git は run 時の取り込み (repo の bundle を fetch して checkout する) と、
+      # PR 化のとき host が取り込む git-upload-pack に要る。
+      emerge --update --oneshot --autounmask-continue \
+        dev-vcs/git app-containers/slirp4netns sys-fs/fuse-overlayfs
 
       # rootless docker (公式の rootless インストーラー)。rootful デーモンは入れない。
       # インストーラーは iptables (legacy) のモジュールが読み込まれているか確認する。
@@ -207,6 +216,13 @@ write_files:
       # distfiles・binhost のバイナリ)。次は必要になった分だけ取り直す。
       rm -rf /var/tmp/portage /var/tmp/emerge-webrsync.*
       rm -rf /var/cache/distfiles /var/cache/binhost
+      # 実行時には使わないビルド依存をイメージに残さない。cloud image には
+      # git や dev-util/maturin の BDEPEND として dev-lang/rust-bin (cargo /
+      # rustc、約 700MB) が入っているが、opencode も git も実行時には使わない。
+      # 次に git を建て直すときは Portage が入れ直す。
+      if ls -d /var/db/pkg/dev-lang/rust-bin-* >/dev/null 2>&1; then
+        emerge --quiet --unmerge dev-lang/rust-bin
+      fi
       # 消した分をホスト側 (qcow2) からも解放して、できたイメージを小さくする。
       # discard 非対応の環境でも焼き込みは続ける。
       fstrim -av || true
