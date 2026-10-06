@@ -1,0 +1,180 @@
+#cloud-config
+# quagent ベースイメージ (Gentoo Linux, hardened)。{{.User}} と {{.Marker}} は
+# quagent が埋める。成功したら {{.Marker}} をシリアルコンソールに出し、最後に
+# 電源を切ること。
+#
+# Gentoo は cloud image のファイル名にタイムスタンプが入るので、recipe.json の
+# latest_url で今のファイル名を解決する (URL 中の $FILE)。
+users:
+  - name: {{.User}}
+    shell: /bin/bash
+    lock_passwd: true
+# Gentoo の cloud-init は emerge を packages: で扱わないので、焼き込みはすべて
+# 自前のスクリプトで行う (rootless docker・opencode・Claude Code・カーネル硬化)。
+write_files:
+  # カーネルが rootless docker に必要な機能 (Gentoo wiki の docker スニペット)。
+  - path: /etc/kernel/config.d/50-quagent-docker.config
+    permissions: '0644'
+    content: |
+      # rootless docker 用 (Gentoo wiki より)
+      CONFIG_BRIDGE_NETFILTER=m
+      CONFIG_NETFILTER_FAMILY_BRIDGE=y
+      CONFIG_NF_NAT_REDIRECT=y
+      CONFIG_NETFILTER_XT_TARGET_REDIRECT=m
+      CONFIG_NETFILTER_XT_MATCH_IPVS=m
+      CONFIG_IP_VS=m
+      CONFIG_IP_VS_PROTO_TCP=y
+      CONFIG_IP_VS_PROTO_UDP=y
+      CONFIG_IP_VS_RR=m
+      CONFIG_IP_VS_NFCT=y
+      CONFIG_IP_NF_RAW=y
+      CONFIG_IP_NF_TARGET_MASQUERADE=m
+      CONFIG_IP_NF_TARGET_REDIRECT=m
+      CONFIG_BRIDGE_VLAN_FILTERING=y
+      CONFIG_VLAN_8021Q=m
+      CONFIG_DUMMY=m
+      CONFIG_MACVLAN=m
+      CONFIG_IPVLAN=m
+      CONFIG_VXLAN=m
+      CONFIG_NETFILTER_XT_MARK=m
+  # カーネル硬化。Gentoo の USE=hardened が入れる hardened-base.config に
+  # 上乗せする (署名・lockdown・ABI 削減・起動時オプションの前提)。
+  - path: /etc/kernel/config.d/90-quagent-hardening.config
+    permissions: '0644'
+    content: |
+      # メモリ・スタック
+      CONFIG_INIT_STACK_ALL_ZERO=y
+      CONFIG_INIT_ON_ALLOC_DEFAULT_ON=y
+      CONFIG_INIT_ON_FREE_DEFAULT_ON=y
+      CONFIG_RANDOMIZE_KSTACK_OFFSET_DEFAULT=y
+      CONFIG_ZERO_CALL_USED_REGS=y
+      CONFIG_VMAP_STACK=y
+      CONFIG_DEFAULT_MMAP_MIN_ADDR=65536
+
+      # カーネルメモリ・実行ファイルの保護
+      CONFIG_STRICT_KERNEL_RWX=y
+      CONFIG_STRICT_MODULE_RWX=y
+      CONFIG_DEBUG_WX=y
+      CONFIG_DEVMEM=n
+      CONFIG_DEVKMEM=n
+      CONFIG_PROC_KCORE=n
+      CONFIG_ACPI_CUSTOM_METHOD=n
+      CONFIG_COMPAT_BRK=n
+
+      # ランダム化と投機実行対策
+      CONFIG_RANDOMIZE_BASE=y
+      CONFIG_RANDOMIZE_MEMORY=y
+      CONFIG_PAGE_TABLE_ISOLATION=y
+      CONFIG_RETPOLINE=y
+      CONFIG_CPU_MITIGATIONS=y
+
+      # 攻撃面の削減 (32bit バイナリ・x32 は動かさない)
+      CONFIG_LEGACY_VSYSCALL_NONE=y
+      CONFIG_BPF_UNPRIV_DEFAULT_OFF=y
+      CONFIG_BPF_JIT_ALWAYS_ON=y
+      CONFIG_BPF_JIT_HARDEN=2
+      CONFIG_X86_X32_ABI=n
+      CONFIG_X86_X32=n
+      CONFIG_IA32_EMULATION=n
+      CONFIG_KEXEC=n
+      CONFIG_HIBERNATION=n
+      CONFIG_UEVENT_HELPER=n
+      CONFIG_FW_LOADER_USER_HELPER=n
+
+      # モジュール署名 (ビルドが鍵を生成し、署名の無いモジュールを拒否する)
+      CONFIG_MODULE_SIG=y
+      CONFIG_MODULE_SIG_ALL=y
+      CONFIG_MODULE_SIG_SHA512=y
+      CONFIG_MODULE_SIG_FORCE=y
+      CONFIG_MODULE_SIG_KEY="certs/signing_key.pem"
+
+      # セキュリティ層 (lockdown を常時 confidentiality で強制する)
+      CONFIG_SECURITY_LOCKDOWN_LSM=y
+      CONFIG_SECURITY_LOCKDOWN_LSM_EARLY=y
+      CONFIG_LOCK_DOWN_KERNEL_FORCE_CONFIDENTIALITY=y
+      CONFIG_SECURITY_DMESG_RESTRICT=y
+      CONFIG_SECURITY_SAFESETID=y
+      CONFIG_LSM="landlock,yama,bpf,lockdown"
+
+      # 硬化の前提が崩れたら止める
+      CONFIG_BUG_ON_DATA_CORRUPTION=y
+      CONFIG_PANIC_ON_OOPS=y
+      CONFIG_SCHED_STACK_END_CHECK=y
+  # 実行時の硬化。
+  - path: /etc/sysctl.d/90-quagent-hardening.conf
+    permissions: '0644'
+    content: |
+      kernel.kptr_restrict=2
+      kernel.dmesg_restrict=1
+      kernel.yama.ptrace_scope=2
+      kernel.unprivileged_bpf_disabled=1
+      kernel.perf_event_paranoid=3
+      net.core.bpf_jit_harden=2
+      vm.unprivileged_userfaultfd=0
+      fs.protected_hardlinks=1
+      fs.protected_symlinks=1
+      fs.protected_fifos=2
+      fs.protected_regular=2
+  # slirp4netns (rootless docker のネットワーク) が使う。
+  - path: /etc/modules-load.d/quagent.conf
+    permissions: '0644'
+    content: |
+      tun
+      overlay
+  - path: /usr/local/sbin/quagent-build.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euxo pipefail
+      U={{.User}}
+      UID_=$(id -u "$U")
+
+      # hardened プロファイル (no-multilib/systemd のまま硬化)。USE=hardened が入り、
+      # 以降に建てるものとカーネルが硬化される。
+      eselect profile set default/linux/amd64/23.0/no-multilib/hardened/systemd
+
+      # rootless docker の部品。Gentoo では ~amd64 なので鍵を自動で足す。
+      emerge --oneshot --autounmask-continue app-containers/slirp4netns sys-fs/fuse-overlayfs
+
+      # rootless docker (公式の rootless インストーラー)。rootful デーモンは入れない。
+      loginctl enable-linger "$U"
+      for _ in $(seq 1 60); do [ -S "/run/user/$UID_/bus" ] && break; sleep 1; done
+      runuser -u "$U" -- env HOME="/home/$U" XDG_RUNTIME_DIR="/run/user/$UID_" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$UID_/bus" \
+        sh -c 'curl -fsSL https://get.docker.com/rootless | sh' 2>&1 | tee /dev/ttyS0
+      echo 'export PATH="$HOME/bin:$PATH"' >> "/home/$U/.bash_profile"
+      echo "DOCKER_HOST=unix:///run/user/$UID_/docker.sock" >> /etc/environment
+      runuser -u "$U" -- env XDG_RUNTIME_DIR="/run/user/$UID_" \
+        DOCKER_HOST="unix:///run/user/$UID_/docker.sock" \
+        "/home/$U/bin/docker" info --format '{{"{{"}}.SecurityOptions{{"}}"}}' | grep -q rootless
+
+      # opencode (v2)
+      runuser -l "$U" -c 'curl -fsSL https://opencode.ai/v2/install | bash'
+      test -x "/home/$U/.opencode/bin/opencode"
+      echo 'export PATH="$HOME/.opencode/bin:$PATH"' >> "/home/$U/.bash_profile"
+
+      # Claude Code (公式のネイティブインストーラー)
+      runuser -l "$U" -c 'curl -fsSL https://claude.ai/install.sh | bash'
+      test -x "/home/$U/.local/bin/claude"
+      echo 'export PATH="$HOME/.local/bin:$PATH"' >> "/home/$U/.bash_profile"
+
+      # 作業ディレクトリ
+      install -d -o "$U" -g "$U" /work
+
+      # カーネルを硬化 CONFIG で作り直す (ここまで網が要るので最後に行う)。
+      # 動いている版と同じ版を USE=hardened で建て直す。
+      emerge --oneshot --newuse --autounmask-continue sys-kernel/gentoo-kernel
+
+      # 起動オプションの硬化 (既存の値を消さずに追記する)。起動時に上書きできない
+      # ものは CONFIG 側 (lockdown・モジュール署名) で強制している。
+      cat >> /etc/default/grub <<'GRUBEOF'
+      GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX} slab_nomerge init_on_alloc=1 init_on_free=1 page_alloc.shuffle=1 randomize_kstack_offset=on vsyscall=none debugfs=off pti=on oops=panic"
+      GRUBEOF
+      grub-mkconfig -o /boot/grub/grub.cfg
+
+      echo {{.Marker}} > /dev/ttyS0
+runcmd:
+  - [/usr/local/sbin/quagent-build.sh]
+power_state:
+  mode: poweroff
+  timeout: 60

@@ -75,6 +75,11 @@ quagent guard check "本文"      # ローカル LLM による内容点検を 1 
 quagent run --image arch       # VM を起動 (--ssh: 人が ssh で入れる、--mount-tmp: .tmp を受け渡す)
 ```
 
+焼き込みは起動画面では行わない。まだ 1 つも焼いていない初回は、メニューではなく
+管理画面 (ベースイメージの管理) を開いて焼き込みへ誘導する。起動画面で選んだ OS の
+イメージが無いときも、そこへ案内する。管理画面からは OS ごとの焼き込み・更新のほか、
+イメージの個別削除 (各 OS の最新も消せる) と、古いものを残さない prune ができる。
+
 `quagent run` は tmux セッションを作り、上のペインで VM 内のエージェントを、
 下のペインで承認コンソールを開く。エージェントは `--agent` (TUI でも選べる) で
 `opencode` (既定、`--auto`) か `claude` (Claude Code、
@@ -225,16 +230,30 @@ Landlock (書き込み先の制限) をかけ、それから本来のコマン�
 
 OS ごとの作り方は `internal/image/recipes/<名前>/` に独立して置いてある
 (`recipe.json` にクラウドイメージの URL、`user-data.yaml` に焼き込みの
-cloud-init)。今は `debian` と `arch`。`recipe.json` の `description` は起動メニューに
+cloud-init)。今は `debian`・`arch`・`gentoo`。`recipe.json` の `description` は起動メニューに
 出す短い名前 (OS 名と版くらい)、`details` はイメージ管理の画面に出す中身の説明。`~/.config/quagent/images/<名前>/` に同じ
 形で置けば、組み込みを差し替えたり別の OS を足したりできる。
+
+`gentoo` は公式の cloud image (`di-amd64-cloudinit`) を出発点に、hardened プロファイル
+(no-multilib/systemd) に切り替え、配布カーネル (`sys-kernel/gentoo-kernel`) を
+`USE=hardened` と config fragment (`/etc/kernel/config.d/`) で硬化し直し、起動
+オプション (GRUB) にも硬化を入れる。カーネルを作り直すので、他のレシピより時間が
+かかる (上限は `recipe.json` の `build_timeout_minutes`、既定 45 分)。
+
+Gentoo の cloud image はファイル名にタイムスタンプが入り URL が固定できない。そこで
+`latest_url` に「今のファイル名を載せた小さなテキスト」を指定し、`cloud_image_url` /
+`checksum_url` / `signature_url` の中の `$FILE` をその名前で置き換える。取得のたびに
+最新のファイル名を解決するので、配布元が更新されても URL は古くならない。
 
 取得したクラウドイメージは配布元のチェックサム (`checksum_url`、必須) と照合し、
 署名があれば (`signature_url` と、レシピのディレクトリに置いた公開鍵 `signing_key`)
 gpgv でその鍵だけを使って検証する。arch は arch-boxes の署名鍵 (arch-boxes の
-README に載っている鍵) で検証する。debian は配布元が署名を出していないので、
-cloud.debian.org から TLS で取ったチェックサムとの照合だけ。同梱の鍵の期限は
-GitHub Actions (`signing-keys`) が毎週確かめ、60 日以内に切れるなら issue を立てる。
+README に載っている鍵) で検証する。gentoo は Release Engineering の署名鍵
+(`gentoo-release.asc`。weekly key の署名 subkey) でイメージの分離署名を検証し、
+チェックサムは配布元の clearsigned な `.sha256` を使う。debian は配布元が署名を
+出していないので、cloud.debian.org から TLS で取ったチェックサムとの照合だけ。
+同梱の鍵の期限は GitHub Actions (`signing-keys`) が毎週確かめ、60 日以内に切れるなら
+issue を立てる。
 
 レシピの約束: ユーザー `{{.User}}` を uid 1000 で作り、rootless docker と opencode を入れ、
 `/work` をそのユーザーの所有で作り、成功したら `{{.Marker}}` を `/dev/ttyS0` に
