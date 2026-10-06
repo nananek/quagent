@@ -44,6 +44,31 @@ var ErrQuit = errors.New("quit")
 
 func lastPath() string { return filepath.Join(paths.StateDir(), "last.json") }
 
+// BuildSettings は焼き込み VM の設定 (TUI の管理画面で決める)。
+type BuildSettings struct {
+	CPUs   int `json:"cpus"`
+	MemMiB int `json:"mem_mib"`
+}
+
+func buildSettingsPath() string { return filepath.Join(paths.StateDir(), "build.json") }
+
+func loadBuildSettings() BuildSettings {
+	s := BuildSettings{CPUs: 4, MemMiB: 4096}
+	if b, err := os.ReadFile(buildSettingsPath()); err == nil {
+		_ = json.Unmarshal(b, &s)
+	}
+	return s
+}
+
+func saveBuildSettings(s BuildSettings) {
+	if err := os.MkdirAll(filepath.Dir(buildSettingsPath()), 0o755); err != nil {
+		return
+	}
+	if b, err := json.MarshalIndent(s, "", "  "); err == nil {
+		_ = os.WriteFile(buildSettingsPath(), b, 0o644)
+	}
+}
+
 func loadLast() Launch {
 	l := Launch{Recipe: image.DefaultRecipe, CPUs: 4, MemMiB: 8192}
 	if b, err := os.ReadFile(lastPath()); err == nil {
@@ -152,6 +177,14 @@ func recipeOptions() ([]huh.Option[string], error) {
 	return opts, nil
 }
 
+// positiveInt はフォームの入力が正の整数かを確かめる。
+func positiveInt(s string) error {
+	if n, err := strconv.Atoi(s); err != nil || n <= 0 {
+		return fmt.Errorf("正の整数を入れる")
+	}
+	return nil
+}
+
 func startForm(agents []string) (Launch, error) {
 	l := loadLast()
 	if l.Agent == "" {
@@ -171,12 +204,6 @@ func startForm(agents []string) (Launch, error) {
 		return Launch{}, err
 	}
 	cpus, mem := strconv.Itoa(l.CPUs), strconv.Itoa(l.MemMiB)
-	positive := func(s string) error {
-		if n, err := strconv.Atoi(s); err != nil || n <= 0 {
-			return fmt.Errorf("正の整数を入れる")
-		}
-		return nil
-	}
 	var extras []string
 	if l.MountTmp {
 		extras = append(extras, "tmp")
@@ -209,8 +236,8 @@ func startForm(agents []string) (Launch, error) {
 			Value(&prApproval),
 		huh.NewSelect[string]().Title("ベースイメージ").Options(opts...).Value(&l.Recipe),
 		huh.NewSelect[string]().Title("エージェント").Options(agentOpts...).Value(&l.Agent),
-		huh.NewInput().Title("CPU").Value(&cpus).Validate(positive),
-		huh.NewInput().Title("メモリ (MiB)").Value(&mem).Validate(positive),
+		huh.NewInput().Title("CPU").Value(&cpus).Validate(positiveInt),
+		huh.NewInput().Title("メモリ (MiB)").Value(&mem).Validate(positiveInt),
 		huh.NewMultiSelect[string]().Title("オプション").Options(
 			huh.NewOption("repo の .tmp と VM の /work/.tmp を受け渡す (終了時に回収)", "tmp"),
 			huh.NewOption("ssh で入れるようにする", "ssh"),
@@ -374,7 +401,24 @@ func buildImage(name string, refresh bool) error {
 	if err != nil {
 		return err
 	}
-	img, err := image.Build(r, image.BuildOpts{CPUs: 4, MemMiB: 4096, Refresh: refresh}, os.Stdout)
+	// 焼き込み VM の CPU とメモリは管理画面で決める (前回の値を既定にする)。
+	// カーネルを作り直すレシピはコアが多いほど速い。
+	s := loadBuildSettings()
+	cpus, mem := strconv.Itoa(s.CPUs), strconv.Itoa(s.MemMiB)
+	ok := true
+	err = newForm(huh.NewGroup(
+		huh.NewInput().Title("CPU (焼き込み VM)").Description("ホストの範囲で。多いほどカーネルの作り直しが速い").
+			Value(&cpus).Validate(positiveInt),
+		huh.NewInput().Title("メモリ MiB (焼き込み VM)").Value(&mem).Validate(positiveInt),
+		huh.NewConfirm().Title(name+" を焼く / 更新する?").Affirmative("焼く").Negative("戻る").Value(&ok),
+	)).Run()
+	if err != nil || !ok {
+		return nil
+	}
+	s.CPUs, _ = strconv.Atoi(cpus)
+	s.MemMiB, _ = strconv.Atoi(mem)
+	saveBuildSettings(s)
+	img, err := image.Build(r, image.BuildOpts{CPUs: s.CPUs, MemMiB: s.MemMiB, Refresh: refresh}, os.Stdout)
 	if err != nil {
 		return err
 	}
