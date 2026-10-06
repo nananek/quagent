@@ -103,9 +103,12 @@ hardened プロファイル (`no-multilib/systemd`) に切り替え、配布カ�
   `90-quagent-hardening.config` は硬化用。
 - カーネルの版でシンボルが改名・廃止される (`PAGE_TABLE_ISOLATION` は 6.8 で
   `MITIGATION_PAGE_TABLE_ISOLATION` になった等)。`merge_config` は警告するだけで
-  無視するため、焼き込みの最後に `verify_config` が fragment の各設定行を実際の
-  config (`/usr/src/linux/.config`) と突き合わせ、ずれがあれば焼き込みを失敗させる。
-  fragment を直すときは、ここが通る (実在するシンボルと値にする) ようにする。
+  無視するため、焼き込みの最後に `verify_config` が fragment の各設定行を、今
+  ビルドした版の config (`/usr/src/linux-<ver>/.config`、無ければ
+  `/usr/src/linux/.config`) と突き合わせ、ずれがあれば焼き込みを失敗させる。
+  これは焼くカーネルの設定が意図どおりかを見るだけで、起動そのものは確かめない
+  (最初の起動は run で行う)。fragment を直すときは、ここが通る (実在するシンボルと
+  値にする) ようにする。
 - ジョブは `recipe.json` の `build_timeout_minutes` (既定 45、gentoo は 240) で
   打ち切られる。カーネルの作り直しはコアが多いほど速い。
 

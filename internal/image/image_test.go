@@ -89,6 +89,7 @@ func TestGentooVerifiesHardeningConfig(t *testing.T) {
 	for _, want := range []string{
 		"verify_config /etc/kernel/config.d/50-quagent-docker.config",
 		"verify_config /etc/kernel/config.d/90-quagent-hardening.config",
+		"KCONFIG=$(ls -1 /usr/src/linux-*/.config",
 		"CONFIG_MITIGATION_PAGE_TABLE_ISOLATION=y",
 		"CONFIG_MITIGATION_RETPOLINE=y",
 	} {
@@ -114,6 +115,28 @@ func TestGentooVerifiesHardeningConfig(t *testing.T) {
 			if strings.HasPrefix(line, stale) {
 				t.Errorf("gentoo の user-data に廃止・改名された設定行が残っている: %q", line)
 			}
+		}
+	}
+}
+
+// gentoo の硬化は、攻撃面の削減と実行時の sysctl も揃っていること。
+func TestGentooHardeningSettings(t *testing.T) {
+	r, err := FindRecipe("gentoo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"CONFIG_RANDOM_KMALLOC_CACHES=y",
+		"CONFIG_LIST_HARDENED=y",
+		"CONFIG_BPF_LSM=y",
+		`CONFIG_LSM="landlock,yama,safesetid,bpf,lockdown"`,
+		"CONFIG_IO_URING=n",
+		"kernel.unprivileged_bpf_disabled=2",
+		"kernel.sysrq=0",
+		"dev.tty.ldisc_autoload=0",
+	} {
+		if !strings.Contains(r.userData, want) {
+			t.Errorf("gentoo の user-data に %q が無い", want)
 		}
 	}
 }
