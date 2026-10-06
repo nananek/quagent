@@ -3,6 +3,7 @@ package vm
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -44,5 +45,22 @@ func TestQemuArgvUEFI(t *testing.T) {
 func TestOVMFPathNotFound(t *testing.T) {
 	if _, err := ovmfPath(nil); err == nil {
 		t.Fatal("候補が無いのに成功した")
+	}
+}
+
+// ルートディスクは discard を有効にする (焼き込み後の fstrim で qcow2 を小さくする)。
+func TestQemuArgvDiscard(t *testing.T) {
+	args, err := QemuArgv(QemuOpts{Disk: "disk", Seed: "seed", CPUs: 1, MemMiB: 256, ConsoleLog: "console"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := ""
+	for _, a := range args {
+		if strings.Contains(a, "id=root") {
+			root = a
+		}
+	}
+	if !strings.Contains(root, "discard=unmap") {
+		t.Fatalf("ルートディスクに discard=unmap が無い: %q", root)
 	}
 }

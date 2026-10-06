@@ -207,6 +207,9 @@ write_files:
       # distfiles・binhost のバイナリ)。次は必要になった分だけ取り直す。
       rm -rf /var/tmp/portage /var/tmp/emerge-webrsync.*
       rm -rf /var/cache/distfiles /var/cache/binhost
+      # 消した分をホスト側 (qcow2) からも解放して、できたイメージを小さくする。
+      # discard 非対応の環境でも焼き込みは続ける。
+      fstrim -av || true
 
       echo {{.Marker}} > /dev/ttyS0
 runcmd:

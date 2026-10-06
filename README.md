@@ -248,7 +248,8 @@ cloud-init)。今は `debian`・`arch`・`gentoo`。`recipe.json` の `descripti
 無い) なので `firmware` を `uefi` にする (ホストに OVMF が要る)。カーネルを作り直す
 ので、他のレシピより時間がかかる (上限は `recipe.json` の `build_timeout_minutes`、
 既定 45 分)。焼き込みの最後にビルドのキャッシュ (Portage の作業場・distfiles・
-binhost) を消すので、できたイメージには残らない。
+binhost) を消し、fstrim で qcow2 からも解放するので、できたイメージには残らない
+(イメージが小さい)。
 
 Gentoo の cloud image はファイル名にタイムスタンプが入り URL が固定できない。そこで
 `latest_url` に「今のファイル名を載せた小さなテキスト」を指定し、`cloud_image_url` /
