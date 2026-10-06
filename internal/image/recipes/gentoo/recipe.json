@@ -1,6 +1,7 @@
 {
   "description": "Gentoo Linux (hardened)",
   "details": "hardened プロファイル (no-multilib/systemd)・配布カーネル (sys-kernel/gentoo-kernel) を硬化 CONFIG と起動オプションで作り直し・rootless docker (公式 rootless インストーラー)・opencode (公式インストーラー)・Claude Code (公式インストーラー)",
+  "firmware": "uefi",
   "cloud_image_url": "https://distfiles.gentoo.org/releases/amd64/autobuilds/current-di-amd64-cloudinit/$FILE",
   "latest_url": "https://distfiles.gentoo.org/releases/amd64/autobuilds/current-di-amd64-cloudinit/latest-di-amd64-cloudinit.txt",
   "checksum_url": "https://distfiles.gentoo.org/releases/amd64/autobuilds/current-di-amd64-cloudinit/$FILE.sha256",

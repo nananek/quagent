@@ -80,12 +80,39 @@ type QemuOpts struct {
 	// NestedVirt は guest に CPU の仮想化支援 (svm / vmx) を見せ、VM の中で KVM を
 	// 使えるようにする。既定では隠す (入れ子の KVM を攻撃面として出さない)。
 	NestedVirt bool
+	// UEFI は BIOS (SeaBIOS) の代わりに OVMF で起動する (UEFI 専用のイメージ向け)。
+	// FirmwarePath が空なら OVMFPath() が探す。
+	UEFI bool
+	// FirmwarePath は UEFI のとき使う OVMF の統合イメージ。通常は空。
+	FirmwarePath string
 	// Extra は追加の qemu 引数。
 	Extra []string
 }
 
+// UEFI に使う OVMF の統合イメージ (-bios に渡せるもの) の置き場。配布物によって
+// 場所が違うので順に探す。OVMF_CODE.fd / OVMF_VARS.fd に分かれたものは使わない。
+var ovmfPaths = []string{
+	"/usr/share/edk2/x64/OVMF.4m.fd",      // Arch Linux
+	"/usr/share/edk2-ovmf/x64/OVMF.4m.fd", // Arch Linux (別の置き場)
+	"/usr/share/edk2/ovmf/OVMF.fd",        // Fedora / RHEL
+	"/usr/share/OVMF/OVMF.fd",             // Debian / Ubuntu
+	"/usr/share/ovmf/OVMF.fd",             // Ubuntu (古い)
+}
+
+// OVMFPath は UEFI 起動に使う OVMF の統合イメージを返す。
+func OVMFPath() (string, error) { return ovmfPath(ovmfPaths) }
+
+func ovmfPath(candidates []string) (string, error) {
+	for _, p := range candidates {
+		if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("UEFI ファームウェア (OVMF の統合イメージ OVMF.fd / OVMF.4m.fd) が見つからない。OVMF (edk2-ovmf / ovmf) を入れるか、レシピの firmware を bios にする")
+}
+
 // QemuArgv は qemu-system-x86_64 のコマンドラインを返す。
-func QemuArgv(o QemuOpts) []string {
+func QemuArgv(o QemuOpts) ([]string, error) {
 	netdev := "user,id=n0"
 	if o.Netdev != "" {
 		netdev += "," + o.Netdev
@@ -107,6 +134,18 @@ func QemuArgv(o QemuOpts) []string {
 		"-device", "virtio-net-pci,netdev=n0",
 		"-device", "virtio-rng-pci",
 	}
+	if o.UEFI {
+		fw := o.FirmwarePath
+		if fw == "" {
+			var err error
+			if fw, err = OVMFPath(); err != nil {
+				return nil, err
+			}
+		}
+		// 統合イメージなので EFI 変数の置き場は読めるだけで、書き込みは残らない
+		// (起動に要る既定のローダーはイメージの /EFI 以下から読む)。
+		argv = append(argv, "-bios", fw)
+	}
 	if o.VsockCID != 0 {
 		argv = append(argv, "-device", fmt.Sprintf("vhost-vsock-pci,guest-cid=%d", o.VsockCID))
 	}
@@ -117,7 +156,7 @@ func QemuArgv(o QemuOpts) []string {
 			"-drive", fmt.Sprintf("file=%s,if=none,id=%s,format=raw", path, d.Serial),
 			"-device", fmt.Sprintf("virtio-blk-pci,drive=%s,serial=%s", d.Serial, d.Serial))
 	}
-	return append(argv, o.Extra...)
+	return append(argv, o.Extra...), nil
 }
 
 // HostDNS は netns と guest に渡す host の実 IPv4 リゾルバを返す。
