@@ -88,26 +88,21 @@ func TestBuildIncrementalNeedsPrevious(t *testing.T) {
 	}
 }
 
-// user-data は差分更新の有無どちらでも描ける。gentoo は差分更新のときだけ
-// パッケージを更新する (@world)。
-func TestUserDataTemplate(t *testing.T) {
-	r, err := FindRecipe("gentoo")
+// どのレシピの user-data も、quagent が埋める値 (User・Marker) で描ける。
+func TestUserDataTemplates(t *testing.T) {
+	rs, err := Recipes()
 	if err != nil {
 		t.Fatal(err)
 	}
-	tmpl, err := template.New("user-data").Parse(r.userData)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, inc := range []string{"", "1"} {
-		var b bytes.Buffer
-		err := tmpl.Execute(&b, map[string]string{"User": "agent", "Marker": "M", "Incremental": inc})
+	for _, r := range rs {
+		tmpl, err := template.New("user-data").Parse(r.userData)
 		if err != nil {
-			t.Fatalf("Incremental=%q: %v", inc, err)
+			t.Fatalf("%s: %v", r.Name, err)
 		}
-		got := strings.Contains(b.String(), "emerge --update --deep @world")
-		if want := inc == "1"; got != want {
-			t.Fatalf("Incremental=%q: @world の行が got=%v want=%v", inc, got, want)
+		var b bytes.Buffer
+		err = tmpl.Execute(&b, map[string]string{"User": "agent", "Marker": "QUAGENT_BUILD_OK"})
+		if err != nil {
+			t.Fatalf("%s: %v", r.Name, err)
 		}
 	}
 }

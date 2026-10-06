@@ -144,11 +144,11 @@ write_files:
       # 以降に建てるものとカーネルが硬化される。
       eselect profile set default/linux/amd64/23.0/no-multilib/hardened/systemd
 
-      {{if .Incremental}}
-      # 前回のイメージからの差分更新: 入っているパッケージを更新する (USE の
-      # 変わりによる作り直しはしない。カーネルは下で更新があるときだけ作る)。
-      emerge --update --deep @world
-      {{end}}
+      # 差分更新でもベースシステム全体 (@world) は更新しない。配布イメージの base は
+      # リリースエンジニアリングが焼いた古い stage で、新しいツリーだと
+      # lvm2 → thin-provisioning-tools → Rust/clang/LLVM のような大きなビルドを
+      # 呼ぶことがある (数時間かかる)。base ごと更新したいときは --refresh で
+      # クラウドイメージから焼き直す。
 
       # rootless docker の部品。Gentoo では ~amd64 なので鍵を自動で足す。
       emerge --update --oneshot --autounmask-continue app-containers/slirp4netns sys-fs/fuse-overlayfs

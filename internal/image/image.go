@@ -305,11 +305,7 @@ func Build(r Recipe, o BuildOpts, progress io.Writer) (Image, error) {
 	if err != nil {
 		return Image{}, fmt.Errorf("%s の user-data.yaml: %w", r.Name, err)
 	}
-	inc := ""
-	if o.Incremental {
-		inc = "1"
-	}
-	if err := tmpl.Execute(&ud, map[string]string{"User": vm.GuestUser, "Marker": buildOKMarker, "Incremental": inc}); err != nil {
+	if err := tmpl.Execute(&ud, map[string]string{"User": vm.GuestUser, "Marker": buildOKMarker}); err != nil {
 		return Image{}, err
 	}
 	if err := os.MkdirAll(paths.ImagesDir(), 0o755); err != nil {
