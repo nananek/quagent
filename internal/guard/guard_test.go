@@ -21,6 +21,8 @@ type fakeCompleter struct {
 	users  []string
 	reply  string
 	err    error
+	// replyFn があれば reply/err より優先する。塊ごとに違う判定を返したいテスト用。
+	replyFn func(system, user string) (string, error)
 }
 
 func (f *fakeCompleter) Complete(_ context.Context, system, user string) (string, error) {
@@ -29,6 +31,9 @@ func (f *fakeCompleter) Complete(_ context.Context, system, user string) (string
 	f.calls++
 	f.system, f.user = system, user
 	f.users = append(f.users, user)
+	if f.replyFn != nil {
+		return f.replyFn(system, user)
+	}
 	if f.err != nil {
 		return "", f.err
 	}
@@ -583,5 +588,132 @@ func TestDeniedEvidenceMatchesPresentedJSON(t *testing.T) {
 	}
 	if err := g.Check(context.Background(), req); err == nil {
 		t.Fatal("字下げ形で指摘された該当箇所の再送を止められていない")
+	}
+}
+
+// 塊のどれかが deny でも、後ろの塊まで点検する (途中で打ち切ると、後ろの秘密が
+// モデルにも人間にも見えないまま本文全体が転送されてしまう)。
+func TestInspectInspectsAllChunksAfterDeny(t *testing.T) {
+	g, fake := newTest(t, config.Guard{MaxBytes: 8, MaxChunks: 64},
+		`{"action":"deny","reason":"だめ","evidence":"zz"}`, nil)
+	body := make([]byte, 40)
+	for i := range body {
+		body[i] = byte('a' + i%26)
+	}
+	wantChunks, _ := splitChunks(body, 8, 64)
+	v, err := g.Inspect(context.Background(), Request{Body: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Action != Deny {
+		t.Fatalf("action = %q, want deny", v.Action)
+	}
+	if len(v.flags) != len(wantChunks) {
+		t.Fatalf("flags = %d, want %d (全塊を点検するはず)", len(v.flags), len(wantChunks))
+	}
+	if fake.count() != len(wantChunks) {
+		t.Fatalf("点検回数 = %d, want %d (deny で打ち切っている)", fake.count(), len(wantChunks))
+	}
+}
+
+// deny した塊が複数あるとき、承認者には全部の該当箇所の周辺を見せる。先頭の塊だけで
+// deny を起こして後ろの塊を隠し、承認させて持ち出す攻撃を防ぐ。
+func TestCheckShowsAllDeniedChunks(t *testing.T) {
+	g, fake := newTest(t, config.Guard{MaxBytes: 16, MaxChunks: 16}, "", nil)
+	fake.replyFn = func(_, user string) (string, error) {
+		switch {
+		case strings.Contains(user, "SECRET"):
+			return `{"action":"deny","reason":"秘密","evidence":"SECRET"}`, nil
+		case strings.Contains(user, "DECOY"):
+			return `{"action":"deny","reason":"デコイ","evidence":"DECOY"}`, nil
+		default:
+			return `{"action":"allow","reason":"ok"}`, nil
+		}
+	}
+	var shown []byte
+	g.SetReviewer(func(_ context.Context, req Request, _ string) error {
+		shown = append([]byte(nil), req.Body...)
+		return nil
+	})
+	body := []byte("DECOY" + strings.Repeat("x", 40) + "SECRET")
+	if err := g.Check(context.Background(), Request{Provider: "p", Method: "POST", Host: "h", Path: "/p", Body: body}); err != nil {
+		t.Fatalf("承認されたのに止めた: %v", err)
+	}
+	if !strings.Contains(string(shown), "DECOY") || !strings.Contains(string(shown), "SECRET") {
+		t.Fatalf("deny した塊の後半が承認者に見えていない: %q", shown)
+	}
+}
+
+// 一度承認した該当箇所があっても、同じ本文に新しく指摘された該当箇所があれば訊き直す
+// (承認済みの該当箇所を 1 つ混ぜて、新しい指摘を素通りさせない)。
+func TestCheckAsksAgainForNewEvidence(t *testing.T) {
+	g, fake := newTest(t, config.Guard{MaxBytes: 16, MaxChunks: 16}, "", nil)
+	fake.replyFn = func(_, user string) (string, error) {
+		switch {
+		case strings.Contains(user, "ALPHA"):
+			return `{"action":"deny","reason":"A","evidence":"ALPHA"}`, nil
+		case strings.Contains(user, "BRAVO"):
+			return `{"action":"deny","reason":"B","evidence":"BRAVO"}`, nil
+		default:
+			return `{"action":"allow","reason":"ok"}`, nil
+		}
+	}
+	reviews := 0
+	g.SetReviewer(func(_ context.Context, _ Request, _ string) error { reviews++; return nil })
+
+	if err := g.Check(context.Background(), Request{
+		Provider: "p", Method: "POST", Host: "h", Path: "/p", Body: []byte("ALPHA"),
+	}); err != nil {
+		t.Fatalf("承認されたのに止めた: %v", err)
+	}
+	if reviews != 1 {
+		t.Fatalf("承認回数 = %d, want 1", reviews)
+	}
+	// ALPHA (承認済み) と BRAVO (新規) を両方含む本文。BRAVO は訊き直すはず。
+	body := []byte("ALPHA" + strings.Repeat("x", 40) + "BRAVO")
+	if err := g.Check(context.Background(), Request{
+		Provider: "p", Method: "POST", Host: "h", Path: "/p", Body: body,
+	}); err != nil {
+		t.Fatalf("承認されたのに止めた: %v", err)
+	}
+	if reviews != 2 {
+		t.Fatalf("新しい該当箇所を訊き直していない: 承認回数 = %d, want 2", reviews)
+	}
+}
+
+// 本文に実在しない evidence は人間の判断の鍵にしない。幻覚やプロンプト注入で
+// 返させた文字列を混ぜて、別の本文の承認を流用させない。
+func TestCheckDoesNotKeyDecisionOnFabricatedEvidence(t *testing.T) {
+	g, fake := newTest(t, config.Guard{}, "", nil)
+	fake.replyFn = func(_, _ string) (string, error) {
+		return `{"action":"deny","reason":"疑惑","evidence":"FABRICATED-NOT-IN-BODY"}`, nil
+	}
+	reviews := 0
+	g.SetReviewer(func(_ context.Context, _ Request, _ string) error { reviews++; return nil })
+
+	if err := g.Check(context.Background(), Request{
+		Provider: "p", Method: "POST", Host: "h", Path: "/p", Body: []byte("first body"),
+	}); err != nil {
+		t.Fatalf("承認されたのに止めた: %v", err)
+	}
+	if err := g.Check(context.Background(), Request{
+		Provider: "p", Method: "POST", Host: "h", Path: "/p", Body: []byte("second body with SECRET"),
+	}); err != nil {
+		t.Fatalf("承認されたのに止めた: %v", err)
+	}
+	if reviews != 2 {
+		t.Fatalf("実在しない evidence で承認が流用された: 承認回数 = %d, want 2", reviews)
+	}
+}
+
+// structured output のスキーマに evidence が無いと、strict なサーバーではモデルが
+// 引用を返せず、deny が必ず allow に落ちてしまう。
+func TestVerdictSchemaIncludesEvidence(t *testing.T) {
+	props, ok := verdictSchema["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("verdictSchema に properties が無い")
+	}
+	if _, ok := props["evidence"]; !ok {
+		t.Fatal("verdictSchema に evidence が無い")
 	}
 }
