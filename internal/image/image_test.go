@@ -1,6 +1,7 @@
 package image
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
+
+	"github.com/nananek/quagent/internal/paths"
 )
 
 func TestFindChecksum(t *testing.T) {
@@ -34,6 +38,100 @@ func TestBuiltinRecipesAreVerifiable(t *testing.T) {
 	for _, r := range rs {
 		if r.Source == "builtin" && r.ChecksumURL == "" {
 			t.Errorf("%s: checksum_url が無い", r.Name)
+		}
+	}
+}
+
+// firmware は uefi / bios だけ受け付ける (既定は bios)。
+func TestRecipeFirmware(t *testing.T) {
+	fsys := func(firmware string) fstest.MapFS {
+		return fstest.MapFS{
+			"recipe.json": &fstest.MapFile{Data: []byte(
+				`{"cloud_image_url":"u","checksum_url":"c","firmware":"` + firmware + `"}`)},
+			"user-data.yaml": &fstest.MapFile{Data: []byte("#cloud-config\n")},
+		}
+	}
+	if r, err := readRecipe(fsys("uefi"), "t", "test"); err != nil || r.Firmware != "uefi" {
+		t.Fatalf("uefi: got %q, %v", r.Firmware, err)
+	}
+	if r, err := readRecipe(fsys(""), "t", "test"); err != nil || r.Firmware != "" {
+		t.Fatalf("既定: got %q, %v", r.Firmware, err)
+	}
+	if r, err := readRecipe(fsys("bios"), "t", "test"); err != nil || r.Firmware != "bios" {
+		t.Fatalf("bios: got %q, %v", r.Firmware, err)
+	}
+	if _, err := readRecipe(fsys("legacy"), "t", "test"); err == nil {
+		t.Fatal("不明な firmware を受け付けた")
+	}
+}
+
+// Gentoo は UEFI 専用のクラウドイメージなので firmware を uefi にする。
+func TestGentooRecipeIsUEFI(t *testing.T) {
+	r, err := FindRecipe("gentoo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Firmware != "uefi" {
+		t.Fatalf("got %q", r.Firmware)
+	}
+}
+
+// 付帯情報は既定 (bios) では書かず、uefi のときだけ書いて読める。
+func TestImageMeta(t *testing.T) {
+	dir := t.TempDir()
+	uefi := filepath.Join(dir, "base-gentoo-20261006-120000.qcow2")
+	if err := writeMeta(uefi, imageMeta{Firmware: "uefi"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readMeta(uefi).Firmware; got != "uefi" {
+		t.Fatalf("got %q", got)
+	}
+	bios := filepath.Join(dir, "base-arch-20261006-120000.qcow2")
+	if err := writeMeta(bios, imageMeta{Firmware: "bios"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(metaPath(bios)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("既定 (bios) で付帯情報を書いた")
+	}
+	if got := readMeta(bios).Firmware; got != "" {
+		t.Fatalf("既定が空でない: %q", got)
+	}
+}
+
+// List は付帯情報の firmware を拾い、Remove はイメージと一緒に消す。
+func TestListAndRemoveWithMeta(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	dir := paths.ImagesDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uefi := filepath.Join(dir, "base-gentoo-20261006-120000.qcow2")
+	bios := filepath.Join(dir, "base-arch-20261006-115959.qcow2")
+	for _, p := range []string{uefi, bios} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writeMeta(uefi, imageMeta{Firmware: "uefi"}); err != nil {
+		t.Fatal(err)
+	}
+	imgs, err := List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, img := range imgs {
+		got[filepath.Base(img.Path)] = img.Firmware
+	}
+	if got[filepath.Base(uefi)] != "uefi" || got[filepath.Base(bios)] != "" {
+		t.Fatalf("firmware が拾えていない: %v", got)
+	}
+	if err := Remove(Image{Path: uefi}); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{uefi, metaPath(uefi)} {
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s が残っている", p)
 		}
 	}
 }

@@ -129,7 +129,9 @@ host に必要なもの: `qemu-system-x86_64` (KVM)、`qemu-img`、`xorriso`、
 `slirp4netns`、`unshare`/`nsenter`/`prlimit` (util-linux)、`nft`、`git`、`gh`、`tmux`。
 unprivileged user namespace が有効で、vsock (`/dev/vhost-vsock`、カーネル
 モジュール `vhost_vsock`) が使えること。`--ssh` を使うなら `ssh` / `ssh-keygen` も。
-署名付きのレシピ (arch) でイメージを焼くなら `gpg` / `gpgv` も。
+署名付きのレシピ (arch) でイメージを焼くなら `gpg` / `gpgv` も。UEFI のレシピ
+(gentoo) を焼く・動かすなら OVMF (`edk2-ovmf`、`ovmf` など。統合イメージ
+`OVMF.fd` / `OVMF.4m.fd`) も。
 
 ## クリップボード (OSC 52)
 
@@ -237,8 +239,10 @@ cloud-init)。今は `debian`・`arch`・`gentoo`。`recipe.json` の `descripti
 `gentoo` は公式の cloud image (`di-amd64-cloudinit`) を出発点に、hardened プロファイル
 (no-multilib/systemd) に切り替え、配布カーネル (`sys-kernel/gentoo-kernel`) を
 `USE=hardened` と config fragment (`/etc/kernel/config.d/`) で硬化し直し、起動
-オプション (GRUB) にも硬化を入れる。カーネルを作り直すので、他のレシピより時間が
-かかる (上限は `recipe.json` の `build_timeout_minutes`、既定 45 分)。
+オプション (GRUB) にも硬化を入れる。配布イメージは UEFI 専用 (BIOS のブートコードが
+無い) なので `firmware` を `uefi` にする (ホストに OVMF が要る)。カーネルを作り直す
+ので、他のレシピより時間がかかる (上限は `recipe.json` の `build_timeout_minutes`、
+既定 45 分)。
 
 Gentoo の cloud image はファイル名にタイムスタンプが入り URL が固定できない。そこで
 `latest_url` に「今のファイル名を載せた小さなテキスト」を指定し、`cloud_image_url` /
@@ -260,6 +264,11 @@ issue を立てる。
 出して電源を切る。マーカーが出なければ焼き込みは失敗扱いになる。実行時の VM は
 外向き通信がほぼ無いので、起動時にネットワーク (NTP など) を待つサービスは
 止めておくこと (Arch では `systemd-time-wait-sync` が起動を止めていた)。
+
+`recipe.json` の `firmware` は焼く VM の起動ファームウェア。既定は `bios` (SeaBIOS) で、
+`uefi` にすると OVMF で起動する (配布イメージが UEFI 専用のとき。ホストに OVMF が
+要る)。焼いたイメージには起動方法を付帯情報 (`base-*.json`) として残すので、run は
+レシピを後から変えてもイメージに合った方法で起動する。
 
 ## LLM API の認証プロキシ
 

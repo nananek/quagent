@@ -61,6 +61,10 @@ type Recipe struct {
 	// 中の $FILE を、そのファイルが指すファイル名に置き換える。版ごとにファイル名が
 	// 変わる配布元で URL を固定するために使う。
 	LatestURL string `json:"latest_url,omitempty"`
+	// Firmware は起動ファームウェア。"uefi" なら OVMF (UEFI 専用のイメージ向け)、
+	// 空か "bios" なら SeaBIOS (既定)。焼いたイメージには付帯情報として残り、
+	// run もそれを見て起動する (レシピを後から変えても古いイメージは起動できる)。
+	Firmware string `json:"firmware,omitempty"`
 	// BuildTimeoutMinutes は焼き込み VM の上限 (分)。既定 45。カーネルを作り直す
 	// など重いレシピ向け。
 	BuildTimeoutMinutes int `json:"build_timeout_minutes,omitempty"`
@@ -91,6 +95,11 @@ func readRecipe(fsys fs.FS, name, source string) (Recipe, error) {
 	}
 	if r.ChecksumURL == "" {
 		return Recipe{}, fmt.Errorf("%s: checksum_url が空 (取得したイメージを検証できない)", source)
+	}
+	switch r.Firmware {
+	case "", "bios", "uefi":
+	default:
+		return Recipe{}, fmt.Errorf("%s: firmware は \"uefi\" か \"bios\" (既定: bios)", source)
 	}
 	if (r.SignatureURL == "") != (r.SigningKey == "") {
 		return Recipe{}, fmt.Errorf("%s: signature_url と signing_key は両方指定する", source)
@@ -164,6 +173,41 @@ type Image struct {
 	Path   string
 	Built  time.Time
 	Size   int64
+	// Firmware はこのイメージの起動ファームウェア ("uefi" か、既定の bios なら空)。
+	// 付帯情報 (base-*.json) に残す。
+	Firmware string
+}
+
+// imageMeta はイメージの付帯情報。起動に要るもの (firmware) を残す。
+type imageMeta struct {
+	Firmware string `json:"firmware,omitempty"`
+}
+
+// metaPath はイメージの付帯情報の置き場 (base-*.qcow2 -> base-*.json)。
+func metaPath(imagePath string) string {
+	return strings.TrimSuffix(imagePath, ".qcow2") + ".json"
+}
+
+// writeMeta は付帯情報を書く。既定 (bios) のときは書かない (無ければ bios)。
+func writeMeta(imagePath string, m imageMeta) error {
+	if m.Firmware == "" || m.Firmware == "bios" {
+		return nil
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(metaPath(imagePath), append(b, '\n'), 0o644)
+}
+
+// readMeta は付帯情報を読む。無い・読めないときは既定 (bios)。
+func readMeta(imagePath string) imageMeta {
+	var m imageMeta
+	b, err := os.ReadFile(metaPath(imagePath))
+	if err != nil || json.Unmarshal(b, &m) != nil {
+		return imageMeta{}
+	}
+	return m
 }
 
 var imageName = regexp.MustCompile(`^base-([a-z0-9][a-z0-9_-]*)-(\d{8}-\d{6})\.qcow2$`)
@@ -188,7 +232,9 @@ func List(recipe string) ([]Image, error) {
 		if err != nil {
 			continue
 		}
-		out = append(out, Image{Recipe: m[1], Path: filepath.Join(paths.ImagesDir(), e.Name()), Built: built, Size: info.Size()})
+		path := filepath.Join(paths.ImagesDir(), e.Name())
+		out = append(out, Image{Recipe: m[1], Path: path, Built: built, Size: info.Size(),
+			Firmware: readMeta(path).Firmware})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Built.After(out[j].Built) })
 	return out, nil
@@ -211,7 +257,13 @@ func Remove(img Image) error {
 	if filepath.Dir(img.Path) != paths.ImagesDir() || !imageName.MatchString(filepath.Base(img.Path)) {
 		return fmt.Errorf("quagent のイメージではない: %s", img.Path)
 	}
-	return os.Remove(img.Path)
+	if err := os.Remove(img.Path); err != nil {
+		return err
+	}
+	if err := os.Remove(metaPath(img.Path)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // BuildOpts は焼き込みの設定。
@@ -262,9 +314,13 @@ func Build(r Recipe, o BuildOpts, progress io.Writer) (Image, error) {
 	}
 
 	console := filepath.Join(work, "console.log")
-	argv := vm.QemuArgv(vm.QemuOpts{
+	argv, err := vm.QemuArgv(vm.QemuOpts{
 		Disk: disk, Seed: seed, CPUs: o.CPUs, MemMiB: o.MemMiB, ConsoleLog: console,
+		UEFI: r.Firmware == "uefi",
 	})
+	if err != nil {
+		return Image{}, err
+	}
 	fmt.Fprintf(progress, "%s を VM で焼き込み中 (数分かかる)。コンソール: %s\n", r.Name, console)
 	cmd := exec.Command(argv[0], argv[1:]...)
 	if out, err := runWithTimeout(cmd, r.timeout()); err != nil {
@@ -283,9 +339,14 @@ func Build(r Recipe, o BuildOpts, progress io.Writer) (Image, error) {
 	if b, err := exec.Command("qemu-img", "convert", "-O", "qcow2", disk, out).CombinedOutput(); err != nil {
 		return Image{}, fmt.Errorf("イメージの書き出しに失敗: %v: %s", err, b)
 	}
+	// 起動ファームウェアを残す (run はこれを見て BIOS / UEFI を選ぶ)
+	if err := writeMeta(out, imageMeta{Firmware: r.Firmware}); err != nil {
+		_ = os.Remove(out)
+		return Image{}, fmt.Errorf("イメージの付帯情報を書けない: %w", err)
+	}
 	built, _ := time.ParseInLocation("20060102-150405", stamp, time.Local)
 	info, _ := os.Stat(out)
-	img := Image{Recipe: r.Name, Path: out, Built: built}
+	img := Image{Recipe: r.Name, Path: out, Built: built, Firmware: r.Firmware}
 	if info != nil {
 		img.Size = info.Size()
 	}

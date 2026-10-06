@@ -345,11 +345,15 @@ runcmd:
 		// qemu の hostfwd は子 netns 側 (slirp4netns の tap0 = 10.0.2.100) で受ける。
 		netdev += fmt.Sprintf(",hostfwd=tcp:10.0.2.100:%d-:22", sshPort)
 	}
-	qemu := vm.QemuArgv(vm.QemuOpts{
+	qemu, err := vm.QemuArgv(vm.QemuOpts{
 		Disk: overlay, Seed: seed, CPUs: o.CPUs, MemMiB: o.MemMiB,
 		ConsoleLog: filepath.Join(work, "console.log"),
 		Netdev:     netdev, VsockCID: g.cid, DataDisks: disks, NestedVirt: o.NestedVirt,
+		UEFI: img.Firmware == "uefi",
 	})
+	if err != nil {
+		return err
+	}
 	logf("VM を起動 (base=%s, allow=%v)", filepath.Base(base), o.Allow)
 	spec := netns.Spec{WorkDir: work, SSHPort: sshPort, DNS: dns, Allow: o.Allow, QemuArgv: qemu}
 	if inspectHTTPS {
