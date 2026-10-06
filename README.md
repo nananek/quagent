@@ -300,8 +300,15 @@ provider ID は opencode の provider ID と揃える。秘密の取り出し方
 張り直す。張り直すときも上流の証明書は system のルートで検証するので、終端したからと
 いって検証は緩めない。止める側と判定すれば認証プロキシと同じ承認コンソールで人間が
 通すか止めるかを決め、拒否した該当箇所の記憶も認証プロキシと共有する。平文の HTTP (80) も
-同じように点検する。使い捨て CA は cloud-init で guest の信頼ストアに入れ、Node / Bun に
-は `NODE_EXTRA_CA_CERTS` で教える。使うには `enabled` も true にする。
+同じように点検する。HTTP/2 (h2) で来た接続も終端し、ストリームごとに点検して上流へ
+h2 で中継する (h2 しか使わないクライアントも点検できる)。使い捨て CA は cloud-init で
+guest の信頼ストアに入れ、Node / Bun には `NODE_EXTRA_CA_CERTS` で教える。使うには
+`enabled` も true にする。
+
+証明書を固定 (pinning) するクライアントは使い捨て CA の証明書を弾くので、終端すると
+使えなくなる。`passthrough_https` に行き先を挙げると、そこだけ TLS 終端せず素通しする
+(SNI/Host が許可名に一致することの確認は続けるので、素通しにはならない)。中身の点検は
+できないが、固定するクライアントをその行き先でだけ使えるようにできる。
 
 ### 用意する (llama.cpp + 6GB 級)
 
@@ -326,6 +333,7 @@ llama-server -m Qwen3.5-4B-Q4_K_M.gguf --port 8080 --alias qwen3.5-4b --jinja --
   "timeout_seconds": 30,
   "max_bytes": 8192,
   "max_chunks": 8,
+  "num_ctx": 8192,
   "concurrency": 1,
   "mode": "ask",
   "on_error": "ask",
@@ -343,12 +351,14 @@ Ollama を使うなら `"backend": "ollama"` にする (既定 endpoint は `htt
 | `endpoint` | ローカル LLM の URL。既定 `http://127.0.0.1:8080` (llama.cpp) |
 | `model` | 使うモデル。既定 `qwen2.5-3b-instruct` (llama.cpp は起動時の `--alias` と合わせる) |
 | `timeout_seconds` | LLM 1 回 (塊 1 つ) の点検の上限。既定 30。分割点検全体は最大 10 分 |
-| `max_bytes` | LLM に見せる本文の塊 1 つのバイト数。既定 8192、上限 32768 |
+| `max_bytes` | LLM に見せる本文の塊 1 つのバイト数。既定 8192、上限 32768。`num_ctx` に収まらない大きさは切り下げる |
 | `max_chunks` | 本文を分ける塊の数。既定 8、上限 64。塊は少し重ねてあり、境目にまたがる短い秘密もどれかの塊に丸ごと入る |
-| `concurrency` | 同時に点検する件数。GPU 1 枚なら 1 (既定) |
+| `num_ctx` | ローカル LLM の文脈長 (トークン)。既定 8192、範囲 2048〜131072。llama.cpp では起動時の `num_ctx` と合わせる (リクエストごとには変えられない)。Ollama にはこの値を渡す。`max_bytes` がこの文脈に収まるよう切り下げられる |
+| `concurrency` | 同時に点検する件数。GPU 1 枚なら 1 (既定)。llama.cpp を `--parallel` で動かすときはその数まで上げられる |
 | `mode` | LLM が `evidence` を引用して deny したとき。`ask` (既定。承認コンソールが決める) / `deny` (確認せず止める) / `advisory` (ログに残して通す) |
 | `on_error` | 点検できなかったとき。`ask` (既定) / `deny` / `allow` |
-| `inspect_https` | 許可した行き先への HTTPS (と平文 HTTP) を host 側で TLS 終端し、中身も点検する。既定 false。true には `enabled` が要る。使い捨て CA を guest の信頼ストアに入れるので、証明書を固定するクライアントとは相性が悪い |
+| `inspect_https` | 許可した行き先への HTTPS (と平文 HTTP) を host 側で TLS 終端し、中身も点検する。既定 false。true には `enabled` が要る。使い捨て CA を guest の信頼ストアに入れるので、証明書を固定するクライアントとは相性が悪い (下の `passthrough_https` で除外できる) |
+| `passthrough_https` | TLS 終端せず素通しする行き先のパターン。証明書を固定 (pinning) するクライアント向けで、SNI/Host が許可名に一致することの確認だけ続ける。`"example.com"` (完全一致) か `"*.example.com"` (サブドメイン)。`inspect_https` のときだけ使える |
 
 `response_format` の対応はローカル LLM のビルドによって差がある。対応していなければ
 `json_object`、それも駄目なら付けずに再試行し、通った形を覚える。llama.cpp は
@@ -367,17 +377,41 @@ Ollama を使うなら `"backend": "ollama"` にする (既定 endpoint は `htt
 `quagent guard check "本文"` で、設定したローカル LLM がどう判定するかを試せる (標準入力
 からも読む)。判定と、指摘した該当箇所 (`evidence`) を出す。
 
+### 点検の強さを調整する
+
+`inspect_https` を有効にすると、認証プロキシだけでなく外向きの HTTPS も点検するので、
+ローカル LLM の呼び出し回数が増える。手元の LLM に合わせて、次を目安に `max_bytes` /
+`max_chunks` / `num_ctx` / `concurrency` を調整する:
+
+| ローカル LLM | `num_ctx` | `max_bytes` | `max_chunks` | `concurrency` |
+| --- | --- | --- | --- | --- |
+| 3B 級・6GB (既定) | 8192 | 8192 | 8 | 1 |
+| 7B〜8B 級・12GB | 16384 | 12288 | 12 | 1 |
+| 32k 文脈のモデル | 32768 | 32768 | 16 | 1〜2 |
+| llama.cpp を `--parallel 4` で起動 | 起動時と同じ | 8192 | 8 | 4 |
+
+- `num_ctx` はローカル LLM の文脈長。llama.cpp では起動時の `num_ctx` と合わせる
+  (リクエストごとには変えられない)。Ollama にはこの値を渡す。
+- `max_bytes` は塊 1 つの大きさ。大きくすると後ろに隠した持ち出しも見えるが、1 回の
+  点検が遅くなる。`num_ctx` に収まらない値は切り下げる。
+- `max_chunks` は 1 リクエストを分ける塊の数。大きくすると長い本文の後ろまで点検できる
+  が、その分 LLM を呼ぶ (本文が短ければ使う塊は減る)。
+- `concurrency` は同時に点検する件数。GPU 1 枚で llama.cpp を並列にしていなければ 1 の
+  まま (上げても待ち行列が伸びるだけ)。`--parallel` の数に合わせると速くなる。
+
 ### 効かないところ
 
 - 外向き HTTPS の中身は、`inspect_https` を有効にしない限り点検できない。既定では
   認証プロキシを通る平文 (エージェントが LLM API へ送るリクエスト) だけが見える。
   80 番の平文 HTTP も、有効にしない限り中身ではなく Host しか見ていない。
 - `inspect_https` でも、次は見えない・使えない:
-  - HTTP/2 (h2) は終端しない。透明プロキシは HTTP/1.1 だけを名乗るので、h2 が必須の
-    クライアントは使えない (多くは HTTP/1.1 に落ちる)。
+  - 上流へも h2 で張り直すので、上流が h2 を選べない行き先は中継できない
+    (HTTP/1.1 に落ちない)。HTTP/3 (QUIC = UDP) は許可制 (TCP 80/443) の外なので対象外。
   - 証明書を固定 (pinning) するクライアントは、使い捨て CA の証明書を弾くので使えない。
+    `passthrough_https` に挙げた行き先は終端せず素通しするので使えるが、中身は点検できない。
     自前の証明書束を見る実装は、`NODE_EXTRA_CA_CERTS` のような教え方が要る。
-  - TLS の上で HTTP 以外を話すもの (gRPC など) や、HTTP/3 (QUIC = UDP) は対象外。
+  - gRPC は h2 なので点検の対象になる (本文のバイト列をそのまま LLM に見せる)。
+    TLS の上で HTTP 以外を話すものは対象外。
   - 上流の証明書は system のルートで検証するので、正規でない証明書のサーバーへは
     張り直せない (終端前と同じ)。
 - 本文は `max_bytes` ごとの塊に分けて点検する (塊は少し重ねてあり、境目にまたがる短い
@@ -396,16 +430,6 @@ Ollama を使うなら `"backend": "ollama"` にする (既定 endpoint は `htt
   ある。止められた場合は承認コンソールから通せる。
 - すべての LLM 呼び出しの前にローカル LLM が 1 回走るので、その分遅く、GPU を使う。
   最初の 1 回はモデルの読み込みで遅い (起動時に先に読み込む)。
-
-### 申し送り (次の PR 候補)
-
-- `inspect_https` は HTTP/1.1 だけを扱う。h2 を終端できると、h2 しか使わない
-  クライアント (gRPC など) も点検できる。HTTP/3 (QUIC) は UDP なので、そもそも許可制
-  (TCP 80/443) の外にある。
-- 証明書を固定するクライアントのために、終端を名前ごとに選べるようにする余地がある
-  (固定する行き先は素通しし、SNI/Host の確認だけ続ける)。
-- 外向き HTTPS を終端すると点検の回数が増える。ローカル LLM の能力に応じて
-  `max_bytes` / `max_chunks` / `concurrency` を調整する。
 
 ## PR の作成と署名
 

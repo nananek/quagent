@@ -131,8 +131,11 @@ const (
 	chunkOverlap = 512
 	// MaxHeaderBytes はヘッダ 1 つの値を LLM と承認コンソールに見せる上限。
 	MaxHeaderBytes = 1024
-	// NumCtx はローカル LLM に渡す文脈長。3B 級なら 6GB の VRAM に収まる。
-	NumCtx = 8 << 10
+	// defaultNumCtx はローカル LLM に渡す文脈長の既定値。3B 級なら 6GB の VRAM に
+	// 収まる。MinNumCtx / MaxNumCtx は設定できる範囲。
+	defaultNumCtx = 8 << 10
+	MinNumCtx     = 2 << 10
+	MaxNumCtx     = 128 << 10
 
 	// 1 分に承認コンソールへ出せるコンテンツガードの確認の件数。溢れた分は拒否する。
 	asksPerMinute = 12
@@ -156,6 +159,7 @@ type settings struct {
 	timeout     time.Duration
 	maxBytes    int
 	maxChunks   int
+	numCtx      int
 	mode        mode
 	onError     string // "deny" / "allow" / "ask"
 	concurrency int
@@ -207,7 +211,7 @@ func New(c config.Guard, logger *log.Logger) (*Guard, error) {
 	var comp Completer
 	switch s.backend {
 	case "ollama":
-		comp = &Ollama{Endpoint: s.endpoint, Model: s.model}
+		comp = &Ollama{Endpoint: s.endpoint, Model: s.model, NumCtx: s.numCtx}
 	case "openai":
 		comp = &OpenAI{Endpoint: s.endpoint, Model: s.model}
 	default:
@@ -237,8 +241,8 @@ func (g *Guard) String() string {
 	case modeAdvisory:
 		mode = "advisory"
 	}
-	return fmt.Sprintf("%s の %s (mode=%s, on_error=%s, max_bytes=%d, max_chunks=%d, concurrency=%d)",
-		g.s.backend, g.s.model, mode, g.s.onError, g.s.maxBytes, g.s.maxChunks, g.s.concurrency)
+	return fmt.Sprintf("%s の %s (mode=%s, on_error=%s, max_bytes=%d, max_chunks=%d, num_ctx=%d, concurrency=%d)",
+		g.s.backend, g.s.model, mode, g.s.onError, g.s.maxBytes, g.s.maxChunks, g.s.numCtx, g.s.concurrency)
 }
 
 // SetReviewer は疑わしいリクエストを諮る先 (承認コンソール) を設定する。
@@ -269,6 +273,7 @@ func resolve(c config.Guard) (settings, error) {
 		timeout:     time.Duration(c.TimeoutSeconds) * time.Second,
 		maxBytes:    c.MaxBytes,
 		maxChunks:   c.MaxChunks,
+		numCtx:      c.NumCtx,
 		concurrency: c.Concurrency,
 	}
 	switch s.backend {
@@ -294,11 +299,25 @@ func resolve(c config.Guard) (settings, error) {
 	if s.timeout <= 0 {
 		s.timeout = defaultTimeout
 	}
+	if s.numCtx <= 0 {
+		s.numCtx = defaultNumCtx
+	}
+	if s.numCtx < MinNumCtx {
+		s.numCtx = MinNumCtx
+	}
+	if s.numCtx > MaxNumCtx {
+		s.numCtx = MaxNumCtx
+	}
 	if s.maxBytes <= 0 {
 		s.maxBytes = defaultMaxBytes
 	}
 	if s.maxBytes > MaxChunkBytes {
 		s.maxBytes = MaxChunkBytes
+	}
+	// 文脈長に収まらない塊は、ローカル LLM 側で黙って切られて点検漏れになる。
+	// 文脈に収まるよう切り下げる (「能力に応じて max_bytes を調整する」)。
+	if fit := maxBytesForCtx(s.numCtx); s.maxBytes > fit {
+		s.maxBytes = fit
 	}
 	if s.maxChunks <= 0 {
 		s.maxChunks = defaultMaxChunks
@@ -330,6 +349,18 @@ func resolve(c config.Guard) (settings, error) {
 		return settings{}, fmt.Errorf("guard.on_error は ask / deny / allow のどれか: %q", c.OnError)
 	}
 	return s, nil
+}
+
+// maxBytesForCtx は文脈長 numCtx (トークン) に収まる、点検する本文の最大バイト数を
+// 返す。1 トークンあたり 3 バイトと控えめに見積もり (日本語の UTF-8 でも足りる)、
+// システムプロンプト・ヘッダ・出力 (num_predict 200 程度) のぶんを引く。
+func maxBytesForCtx(numCtx int) int {
+	const reserve = 1536
+	n := (numCtx - reserve) * 3
+	if n < 1024 {
+		return 1024
+	}
+	return n
 }
 
 // Check はリクエストを点検し、通すなら nil、止めるなら理由を返す。人間の判断 (Reviewer)、

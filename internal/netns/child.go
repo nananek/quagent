@@ -218,6 +218,7 @@ func (c *child) run() error {
 			return fmt.Errorf("TLS 終端の CA を読めない: %w", err)
 		}
 		web.mitm = ca
+		web.passthrough = c.spec.PassthroughHTTPS
 		web.inspect = c.inspect
 		web.inspectLimit = c.spec.InspectLimit
 	}
