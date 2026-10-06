@@ -200,7 +200,10 @@ Landlock (書き込み先の制限) をかけ、それから本来のコマン�
 - **Landlock** (`landlock: true`、既定 off): 書き込み・作成・削除・rename を
   `read_write_paths` (既定: ホーム・`/work`・`/tmp`・`/var/tmp`・`/run/user/<uid>`・
   `/dev/shm`) の下だけに限る。読み取りは制限しない。カーネルが Landlock に未対応なら
-  起動役はエラーにする (黙って無効にしない)。
+  起動役はエラーにする (黙って無効にしない)。`read_write_paths` を明示したときは、
+  無いパスがあればエラーにする (Landlock は既定で拒否なので、タイポを黙って落とすと
+  全書き込みが止まったまま起動してしまうため)。カーネルの Landlock ABI が古いと
+  `rename` / `link` (ABI<2) や `truncate` (ABI<3) は制限できない。
 
 ```json
 "sandbox": {

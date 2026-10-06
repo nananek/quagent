@@ -46,7 +46,10 @@ func landlockABI() (int, error) {
 }
 
 // applyLandlock は書き込み・作成・削除を paths の下だけに限る。読み取りは制限しない。
-func applyLandlock(paths []string) error {
+// explicit が true (設定で明示されたパス) のときは、無いパスをエラーにする。Landlock の
+// ruleset は handled にした権利を既定で拒否するので、パスを取りこぼすと全書き込みが
+// 止まったまま静かに起動してしまう。1 つも規則を足せないときもエラーにする。
+func applyLandlock(paths []string, explicit bool) error {
 	abi, err := landlockABI()
 	if err != nil {
 		return err
@@ -81,6 +84,7 @@ func applyLandlock(paths []string) error {
 	}
 	defer unix.Close(int(rfd))
 
+	added := 0
 	for _, p := range paths {
 		if p == "" {
 			continue
@@ -88,7 +92,12 @@ func applyLandlock(paths []string) error {
 		fd, err := unix.Open(p, unix.O_PATH|unix.O_CLOEXEC, 0)
 		if err != nil {
 			if err == unix.ENOENT || err == unix.ENOTDIR {
-				continue // 無いパスは飛ばす (VM によっては /var/tmp が無い等)
+				if explicit {
+					// 明示された書き込み先が無い。黙って落とすと全書き込みが
+					// 止まるので、タイポとしてエラーにする。
+					return fmt.Errorf("Landlock: 指定された書き込み先 %q が無い", p)
+				}
+				continue // 既定のパスは無いものを飛ばす (VM によっては /var/tmp が無い等)
 			}
 			return fmt.Errorf("Landlock: %s を開けない: %w", p, err)
 		}
@@ -99,6 +108,10 @@ func applyLandlock(paths []string) error {
 		if errno != 0 {
 			return fmt.Errorf("Landlock: %s に規則を足せない: %w", p, errno)
 		}
+		added++
+	}
+	if added == 0 {
+		return fmt.Errorf("Landlock: 書き込みを許すパスが 1 つも無い")
 	}
 	if _, _, errno := unix.Syscall(unix.SYS_LANDLOCK_RESTRICT_SELF, rfd, 0, 0); errno != 0 {
 		return fmt.Errorf("Landlock を効かせられない: %w", errno)

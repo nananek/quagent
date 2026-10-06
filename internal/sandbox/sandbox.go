@@ -204,7 +204,8 @@ func (p *Policy) Apply() error {
 		return fmt.Errorf("no_new_privs を立てられない: %w", err)
 	}
 	if p.Landlock {
-		if err := applyLandlock(p.readWritePaths()); err != nil {
+		paths, explicit := p.readWritePaths()
+		if err := applyLandlock(paths, explicit); err != nil {
 			return err
 		}
 	}
@@ -220,18 +221,19 @@ func (p *Policy) Apply() error {
 	return nil
 }
 
-// readWritePaths は Landlock で書き込みを許すパス (未指定なら既定)。
-func (p *Policy) readWritePaths() []string {
+// readWritePaths は Landlock で書き込みを許すパスと、それが設定で明示されたか
+// (既定か) を返す。明示されたパスは、無ければエラーにする (タイポを黙って
+// 落として全書き込みを止めるのを避ける) ため、既定と区別する。
+func (p *Policy) readWritePaths() (paths []string, explicit bool) {
 	if len(p.ReadWritePaths) > 0 {
-		return p.ReadWritePaths
+		return p.ReadWritePaths, true
 	}
-	var paths []string
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		paths = append(paths, home)
 	}
 	paths = append(paths, "/work", "/tmp", "/var/tmp", "/dev/shm")
 	paths = append(paths, fmt.Sprintf("/run/user/%d", os.Getuid()))
-	return paths
+	return paths, false
 }
 
 // Run は隠しサブコマンド `__sandbox` の本体。方針をかけてから target を起動する。

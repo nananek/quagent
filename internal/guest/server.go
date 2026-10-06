@@ -41,6 +41,9 @@ func Serve(relayPort int, hostPort uint32) error {
 			return err
 		}
 		log.Printf("sandbox: 有効 mode=%s (syscall を %d 個拒否, landlock=%v)", policy.Mode, len(deny), policy.Landlock)
+	} else if policy == nil {
+		// host が置いたつもりで置けていない場合に、黙って無効にしない。
+		log.Printf("sandbox: 方針ファイル %s が無いので無効", sandbox.ConfigPath)
 	}
 	l, err := vsock.Listen(Port, nil)
 	if err != nil {
