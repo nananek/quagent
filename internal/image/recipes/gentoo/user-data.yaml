@@ -27,7 +27,7 @@ write_files:
       CONFIG_IP_VS_PROTO_UDP=y
       CONFIG_IP_VS_RR=m
       CONFIG_IP_VS_NFCT=y
-      CONFIG_IP_NF_RAW=y
+      CONFIG_IP_NF_RAW=m
       CONFIG_IP_NF_TARGET_MASQUERADE=m
       CONFIG_IP_NF_TARGET_REDIRECT=m
       CONFIG_BRIDGE_VLAN_FILTERING=y
@@ -56,30 +56,42 @@ write_files:
       CONFIG_STRICT_MODULE_RWX=y
       CONFIG_DEBUG_WX=y
       CONFIG_DEVMEM=n
-      CONFIG_DEVKMEM=n
       CONFIG_PROC_KCORE=n
-      CONFIG_ACPI_CUSTOM_METHOD=n
       CONFIG_COMPAT_BRK=n
 
-      # ランダム化と投機実行対策
+      # ランダム化と投機実行対策。シンボルはカーネルの版で改名される
+      # (PAGE_TABLE_ISOLATION / RETPOLINE は 6.8 で MITIGATION_ 接頭辞になった)。
+      # 焼き込みの最後に verify_config が実際に効いたかを確かめる。
       CONFIG_RANDOMIZE_BASE=y
       CONFIG_RANDOMIZE_MEMORY=y
-      CONFIG_PAGE_TABLE_ISOLATION=y
-      CONFIG_RETPOLINE=y
+      CONFIG_MITIGATION_PAGE_TABLE_ISOLATION=y
+      CONFIG_MITIGATION_RETPOLINE=y
       CONFIG_CPU_MITIGATIONS=y
 
-      # 攻撃面の削減 (32bit バイナリ・x32 は動かさない)
+      # 攻撃面の削減 (32bit バイナリ・x32 は動かさない)。BPF の JIT 硬化は
+      # CONFIG_BPF_JIT_HARDEN が廃止され、sysctl (net.core.bpf_jit_harden) に
+      # 移った。sysctl.d の 90-quagent-hardening.conf で 2 にする。
       CONFIG_LEGACY_VSYSCALL_NONE=y
       CONFIG_BPF_UNPRIV_DEFAULT_OFF=y
       CONFIG_BPF_JIT_ALWAYS_ON=y
-      CONFIG_BPF_JIT_HARDEN=2
       CONFIG_X86_X32_ABI=n
-      CONFIG_X86_X32=n
       CONFIG_IA32_EMULATION=n
       CONFIG_KEXEC=n
       CONFIG_HIBERNATION=n
       CONFIG_UEVENT_HELPER=n
       CONFIG_FW_LOADER_USER_HELPER=n
+
+      # 土台の配布カーネル設定に頼らず、硬化をここで明示する。
+      CONFIG_HARDENED_USERCOPY=y
+      CONFIG_FORTIFY_SOURCE=y
+      CONFIG_STACKPROTECTOR=y
+      CONFIG_STACKPROTECTOR_STRONG=y
+      CONFIG_SLAB_FREELIST_RANDOM=y
+      CONFIG_SLAB_FREELIST_HARDENED=y
+      CONFIG_SHUFFLE_PAGE_ALLOCATOR=y
+      CONFIG_X86_KERNEL_IBT=y
+      CONFIG_SECURITY_LANDLOCK=y
+      CONFIG_SECURITY_YAMA=y
 
       # モジュール署名 (ビルドが鍵を生成し、署名の無いモジュールを拒否する)
       CONFIG_MODULE_SIG=y
@@ -201,6 +213,31 @@ write_files:
       # カーネルを硬化 CONFIG で作り直す (ここまで網が要るので最後に行う)。
       # 差分更新のときは、新しい版が入ったときだけ建て直される (それ以外は数秒)。
       emerge --update --oneshot --newuse --autounmask-continue sys-kernel/gentoo-kernel
+
+      # 要求した硬化 CONFIG が実際に効いたかを確かめる。カーネルの版でシンボルが
+      # 改名・廃止されると、書いた行は黙って無視され (merge_config は警告するだけ)、
+      # 硬化が効かないカーネルを焼いてしまう。書いた行と config を 1 行ずつ突き合わせ、
+      # ずれがあれば焼き込みを失敗させる。config fragment を直すときは、ここも通る
+      # ように (実在するシンボルと値にする) する。
+      KCONFIG=/usr/src/linux/.config
+      [ -r "$KCONFIG" ] || KCONFIG=$(ls -1 /usr/src/linux-*/.config 2>/dev/null | sort -V | tail -1 || true)
+      test -r "$KCONFIG" || { echo "quagent-build: カーネル config ($KCONFIG) が見つからない"; exit 1; }
+      verify_config() {
+        local sym want got
+        while IFS= read -r line; do
+          case "$line" in '#'*|'') continue ;; esac
+          sym=${line%%=*}; want=${line#*=}
+          # =n は config では "# CONFIG_X is not set" になる
+          if [ "$want" = n ] && grep -qE "^# ${sym} is not set$" "$KCONFIG"; then continue; fi
+          got=$( { grep -E "^${sym}=" "$KCONFIG" || true; } | tail -1 | cut -d= -f2-)
+          if [ "${got:-}" != "$want" ]; then
+            echo "quagent-build: カーネル設定が反映されていない: ${sym}=${want} (実際: ${got:-無し})"
+            return 1
+          fi
+        done < "$1"
+      }
+      verify_config /etc/kernel/config.d/50-quagent-docker.config
+      verify_config /etc/kernel/config.d/90-quagent-hardening.config
 
       # 起動オプションの硬化 (既存の値を消さずに追記する。差分更新で二重に
       # 追記しないよう、入っていれば何もしない)。起動時に上書きできないものは
