@@ -185,7 +185,6 @@ var syscallNumbers = map[string]int{
 	"fsconfig":          unix.SYS_FSCONFIG,
 	"fsmount":           unix.SYS_FSMOUNT,
 	"open_tree":         unix.SYS_OPEN_TREE,
-	"getppid":           unix.SYS_GETPPID, // 動作確認用
 }
 
 // Apply は no_new_privs を立て、Landlock と seccomp をこのスレッドにかける。

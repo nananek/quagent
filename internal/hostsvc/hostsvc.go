@@ -148,6 +148,10 @@ func (w *auditWriter) Flush() {
 	}
 }
 
+// Unwrap は包んでいる ResponseWriter を返す。http.ResponseController などが
+// Hijack / SetWriteDeadline のような追加機能を元の実装まで辿れるようにする。
+func (w *auditWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 // Start は host の vsock で待ち受けを始める (ポートは空いているものを選ぶ)。
 func (s *Server) Start() error {
 	var l net.Listener
