@@ -145,6 +145,12 @@ agy (Antigravity CLI) を使うときは `providers` に `gemini` (Gemini API) �
 "agy": { "model": "gemini-3.8-flash-high" }
 ```
 
+サブスクリプション (host で agy にログイン済み) で使うときは、API キーの代わりに
+`"agy": { "subscription": true }` と書く。host の OAuth ログインから短命トークンを
+作り直してプロキシが付け、VM 内の agy はサブスク枠で動く。`providers` の `gemini`
+は要らない。VM に入るのは起動時に作った 1 時間ものだけで、長期の refresh_token は
+host から出さない:
+
 `claude.model` で VM 内の Claude Code、`agy.model` で VM 内の agy の既定モデル、
 `claude.theme` でカラーテーマを指定できる (既定では host の Claude Code の設定を引き継ぐ)。
 provider ID は opencode の provider ID と揃える。秘密の取り出し方は `secret_env` (環境変数名)・

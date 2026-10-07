@@ -74,13 +74,52 @@ func allowed(rules []rule, method, path string) bool {
 // 許可していない操作は upstream へ送らず 403 を返し、denied に知らせる (nil 可)。
 // g が nil でなければ、転送する前にローカル LLM でリクエストの中身を点検する。
 func Register(mux *http.ServeMux, providers map[string]config.Provider, logger *log.Logger, denied func(string), g *guard.Guard) ([]string, error) {
-	var ids []string
+	registers := map[string]secretSource{}
 	for id, p := range providers {
-		up, err := url.Parse(p.Upstream)
-		if err != nil || up.Scheme != "https" || up.Host == "" {
-			return nil, fmt.Errorf("provider %s: upstream は https の URL にする: %q", id, p.Upstream)
+		p := p
+		secret, err := p.Secret()
+		if err != nil {
+			return nil, fmt.Errorf("provider %s: 秘密を取り出せない: %w", id, err)
 		}
-		ops := p.Allow
+		value := p.HeaderPrefix() + secret
+		registers[id] = secretSource{
+			upstream: p.Upstream,
+			header:   p.HeaderName(),
+			secret:   func() (string, error) { return value, nil },
+			allow:    p.Allow,
+		}
+	}
+	return registerAll(mux, registers, logger, denied, g)
+}
+
+// secretSource は upstream に付ける秘密の出どころ。
+type secretSource struct {
+	upstream string
+	header   string
+	// secret はリクエストごとに upstream に付けるヘッダ値を返す (前置き込み)。
+	// 短命トークンのように作り直しが必要なものはここで更新する。
+	secret func() (string, error)
+	// allow は転送してよい操作。空なら推論とモデル一覧だけ (DefaultAllow)。
+	allow []string
+}
+
+// RegisterDynamic は秘密を作り直しながら使う provider を 1 つ登録する
+// (サブスクリプションのように短命トークンで回すもの用)。
+func RegisterDynamic(mux *http.ServeMux, id, upstream, header string, secret func() (string, error), allow []string, logger *log.Logger, denied func(string), g *guard.Guard) error {
+	_, err := registerAll(mux, map[string]secretSource{
+		id: {upstream: upstream, header: header, secret: secret, allow: allow},
+	}, logger, denied, g)
+	return err
+}
+
+func registerAll(mux *http.ServeMux, registers map[string]secretSource, logger *log.Logger, denied func(string), g *guard.Guard) ([]string, error) {
+	var ids []string
+	for id, reg := range registers {
+		up, err := url.Parse(reg.upstream)
+		if err != nil || up.Scheme != "https" || up.Host == "" {
+			return nil, fmt.Errorf("provider %s: upstream は https の URL にする: %q", id, reg.upstream)
+		}
+		ops := reg.allow
 		if len(ops) == 0 {
 			ops = DefaultAllow
 		}
@@ -88,11 +127,11 @@ func Register(mux *http.ServeMux, providers map[string]config.Provider, logger *
 		if err != nil {
 			return nil, fmt.Errorf("provider %s: %w", id, err)
 		}
-		secret, err := p.Secret()
-		if err != nil {
-			return nil, fmt.Errorf("provider %s: 秘密を取り出せない: %w", id, err)
+		header := reg.header
+		if header == "" {
+			header = "Authorization"
 		}
-		h := handler(id, up, p.HeaderName(), p.HeaderPrefix()+secret, logger)
+		h := handler(id, up, header, reg.secret, logger)
 		mux.Handle(Prefix+id+"/", http.MaxBytesHandler(gate(id, up.Host, rules, h, logger, denied, g), 32<<20))
 		ids = append(ids, id)
 	}
@@ -144,7 +183,7 @@ func gate(id, upstreamHost string, rules []rule, next http.Handler, logger *log.
 	})
 }
 
-func handler(id string, up *url.URL, header, value string, logger *log.Logger) http.Handler {
+func handler(id string, up *url.URL, header string, secret func() (string, error), logger *log.Logger) http.Handler {
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			rest := strings.TrimPrefix(r.In.URL.Path, Prefix+id)
@@ -155,6 +194,11 @@ func handler(id string, up *url.URL, header, value string, logger *log.Logger) h
 			r.Out.Host = up.Host
 			for _, h := range strippedHeaders {
 				r.Out.Header.Del(h)
+			}
+			value, err := secret()
+			if err != nil {
+				logger.Printf("llm %s 秘密を作り直せない (%v)", id, err)
+				return
 			}
 			r.Out.Header.Set(header, value)
 		},

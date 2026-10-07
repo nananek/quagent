@@ -8,7 +8,9 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/nananek/quagent/internal/antigravity"
 	"github.com/nananek/quagent/internal/authproxy"
 	"github.com/nananek/quagent/internal/config"
 	"github.com/nananek/quagent/internal/hostsvc"
@@ -233,6 +235,9 @@ const agyProvider = "gemini"
 // setupAgy は agy (Antigravity CLI) が Gemini API を認証プロキシ経由で使い、
 // quagent の MCP を使うよう設定する。
 func setupAgy(g vmGuest, cfg *config.Config, providers []string, token string) error {
+	if cfg.Agy.Subscription {
+		return setupAgySubscription(g, cfg, token)
+	}
 	if !slices.Contains(providers, agyProvider) {
 		return fmt.Errorf("agy を使うには config.json の providers に %q (Gemini API) を設定する", agyProvider)
 	}
@@ -243,7 +248,43 @@ func setupAgy(g vmGuest, cfg *config.Config, providers []string, token string) e
 	if err := writeJSON(g, "~/.gemini/antigravity-cli/settings.json", settings); err != nil {
 		return err
 	}
-	mcpConf := map[string]any{
+	mcpConf := agyMCPConf(token)
+	if err := writeJSON(g, "~/.gemini/config/mcp_config.json", mcpConf); err != nil {
+		return err
+	}
+	_ = writeJSON(g, "~/.gemini/antigravity-cli/mcp_config.json", mcpConf)
+
+	envLines := []string{
+		fmt.Sprintf("export GEMINI_API_KEY=%s", shellQuote(token)),
+		fmt.Sprintf("export GOOGLE_GEMINI_BASE_URL=%s", shellQuote(authproxy.GuestBaseURL(hostsvc.GuestOrigin(), agyProvider))),
+	}
+	if cfg.Agy.Model != "" {
+		envLines = append(envLines, fmt.Sprintf("export AGY_FLAGS=%s", shellQuote("--model "+cfg.Agy.Model)))
+	}
+	envPath := "~/.gemini/antigravity-cli/env.sh"
+	if err := g.writeFile(envPath, []byte(strings.Join(envLines, "\n")+"\n")); err != nil {
+		return err
+	}
+	if out, err := g.sh("chmod 600 "+envPath, nil); err != nil {
+		return fmt.Errorf("%s の権限を変えられない: %v: %s", envPath, err, out)
+	}
+
+	marker := "quagent: agy env"
+	script := `grep -qF ` + shellQuote(marker) + ` ~/.bashrc 2>/dev/null || cat >> ~/.bashrc <<'AGY_ENV'
+# ` + marker + `
+if [ -f ~/.gemini/antigravity-cli/env.sh ]; then
+  . ~/.gemini/antigravity-cli/env.sh
+fi
+AGY_ENV`
+	if out, err := g.sh(script, nil); err != nil {
+		return fmt.Errorf("~/.bashrc に agy 環境変数を書けない: %v: %s", err, out)
+	}
+	return nil
+}
+
+// agyMCPConf は quagent の MCP を使うための agy の MCP 設定を返す。
+func agyMCPConf(token string) map[string]any {
+	return map[string]any{
 		"mcpServers": map[string]any{
 			"quagent": map[string]any{
 				"disabled":  false,
@@ -254,14 +295,57 @@ func setupAgy(g vmGuest, cfg *config.Config, providers []string, token string) e
 			},
 		},
 	}
+}
+
+// setupAgySubscription は agy が host のサブスクリプション (OAuth ログイン) を
+// 認証プロキシ経由で使うよう設定する。API キーは要らない。guest の agy は普段の
+// OAuth 経路で動くが、向き先 (CLOUD_CODE_URL) だけプロキシに向け、送ってきた合言葉は
+// host 側で作り直した短命トークンに付け替える。起動直後の 1 回 (ユーザー情報の確認)
+// だけは guest から直接 Google に行くので、そのぶんの本物 (1 時間もの) を guest の
+// トークンファイルに書く (0600。長期の refresh_token は host から出さない)。
+func setupAgySubscription(g vmGuest, cfg *config.Config, token string) error {
+	seed, err := antigravity.Mint()
+	if err != nil {
+		return fmt.Errorf("agy のサブスクリプションを使えない: %w", err)
+	}
+	settings := map[string]any{
+		"trustedWorkspaces": []string{"/work"},
+	}
+	if err := writeJSON(g, "~/.gemini/antigravity-cli/settings.json", settings); err != nil {
+		return err
+	}
+	onboarding := map[string]any{
+		"consumerOnboardingComplete":   true,
+		"enterpriseOnboardingComplete": false,
+		"onboardingComplete":           true,
+	}
+	if err := writeJSON(g, "~/.gemini/antigravity-cli/cache/onboarding.json", onboarding); err != nil {
+		return err
+	}
+	tok := map[string]any{
+		"token": map[string]any{
+			"access_token":  seed,
+			"token_type":    "Bearer",
+			"refresh_token": "quagent",
+			// guest 側の更新を起こさないよう遠い未来にしておく (中身は 1 時間もの。
+			// 推論はすべてプロキシ経由で新しいものを使うので問題ない)。
+			"expiry": time.Now().Add(10 * 365 * 24 * time.Hour).Format(time.RFC3339),
+		},
+		"auth_method": "consumer",
+		"id_token":    "quagent",
+	}
+	if err := writeJSON(g, "~/.gemini/antigravity-cli/antigravity-oauth-token", tok); err != nil {
+		return err
+	}
+	mcpConf := agyMCPConf(token)
 	if err := writeJSON(g, "~/.gemini/config/mcp_config.json", mcpConf); err != nil {
 		return err
 	}
 	_ = writeJSON(g, "~/.gemini/antigravity-cli/mcp_config.json", mcpConf)
 
 	envLines := []string{
-		fmt.Sprintf("export GEMINI_API_KEY=%s", shellQuote(token)),
-		fmt.Sprintf("export GOOGLE_GEMINI_BASE_URL=%s", shellQuote(authproxy.GuestBaseURL(hostsvc.GuestOrigin(), agyProvider))),
+		fmt.Sprintf("export CLOUD_CODE_URL=%s", shellQuote(authproxy.GuestBaseURL(hostsvc.GuestOrigin(), antigravity.ProviderID))),
+		"export DISABLE_AUTOUPDATER=1",
 	}
 	if cfg.Agy.Model != "" {
 		envLines = append(envLines, fmt.Sprintf("export AGY_FLAGS=%s", shellQuote("--model "+cfg.Agy.Model)))
