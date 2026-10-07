@@ -19,19 +19,20 @@ import (
 const Prefix = "/llm/"
 
 // guest が送ってきても捨てる認証系ヘッダ。
-var strippedHeaders = []string{"Authorization", "X-Api-Key", "Api-Key", "Proxy-Authorization", "Cookie"}
+var strippedHeaders = []string{"Authorization", "X-Api-Key", "Api-Key", "X-Goog-Api-Key", "Proxy-Authorization", "Cookie"}
 
 // DefaultAllow は allow を設定しない provider で転送する操作 (推論とモデル一覧だけ)。
-// upstream に /v1 を含めない provider (api.anthropic.com など) のため /v1 付きも挙げる。
+// upstream に /v1 を含めない provider (api.anthropic.com など) のため /v1 付きも挙げ、
+// Gemini API のため /v1beta 付きや POST /models/* も挙げる。
 var DefaultAllow = func() []string {
 	ops := []string{
 		"POST /messages", "POST /messages/count_tokens", "POST /chat/completions",
-		"POST /responses", "GET /models", "GET /models/*",
+		"POST /responses", "POST /models/*", "GET /models", "GET /models/*",
 	}
 	var out []string
 	for _, op := range ops {
 		m, p, _ := strings.Cut(op, " ")
-		out = append(out, op, m+" /v1"+p)
+		out = append(out, op, m+" /v1"+p, m+" /v1beta"+p)
 	}
 	// Claude Code の疎通確認
 	return append(out, "HEAD /api/hello")

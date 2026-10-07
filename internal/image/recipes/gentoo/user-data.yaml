@@ -10,7 +10,7 @@ users:
     shell: /bin/bash
     lock_passwd: true
 # Gentoo の cloud-init は emerge を packages: で扱わないので、焼き込みはすべて
-# 自前のスクリプトで行う (rootless docker・opencode・Claude Code・カーネル硬化)。
+# 自前のスクリプトで行う (rootless docker・opencode・Claude Code・agy・カーネル硬化)。
 write_files:
   # カーネルが rootless docker に必要な機能 (Gentoo wiki の docker スニペット)。
   - path: /etc/kernel/config.d/50-quagent-docker.config
@@ -269,6 +269,10 @@ write_files:
       if ! grep -qF 'export PATH="$HOME/.local/bin:$PATH"' "/home/$U/.bash_profile"; then
         echo 'export PATH="$HOME/.local/bin:$PATH"' >> "/home/$U/.bash_profile"
       fi
+
+      # Antigravity CLI (agy) (公式インストーラー)
+      runuser -l "$U" -c 'curl -fsSL https://antigravity.google/cli/install.sh | bash'
+      test -x "/home/$U/.local/bin/agy"
 
       # 作業ディレクトリ
       install -d -o "$U" -g "$U" /work

@@ -62,6 +62,10 @@ write_files:
       test -x "/home/$U/.local/bin/claude"
       echo 'export PATH="$HOME/.local/bin:$PATH"' >> "/home/$U/.profile"
 
+      # Antigravity CLI (agy) (公式インストーラー)
+      runuser -l "$U" -c 'curl -fsSL https://antigravity.google/cli/install.sh | bash'
+      test -x "/home/$U/.local/bin/agy"
+
       # 作業ディレクトリ
       install -d -o "$U" -g "$U" /work
 

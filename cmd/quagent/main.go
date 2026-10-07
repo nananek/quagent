@@ -35,7 +35,7 @@ const usage = `usage:
   quagent image rm IMAGE                       ベースイメージを消す
   quagent always ls | rm DOMAIN...              「以後確認しない」ドメインの一覧・取り消し
   quagent guard check [TEXT]                    設定したローカル LLM でリクエストの中身を点検してみる
-  quagent run [--repo DIR] [--image RECIPE] [--cpus N] [--mem MiB] [--agent opencode|claude] [--allow "d1 d2"] [--ssh] [--mount-tmp] [--nested-virt] [--local-head] [--pr-approval]
+  quagent run [--repo DIR] [--image RECIPE] [--cpus N] [--mem MiB] [--agent opencode|claude|agy] [--allow "d1 d2"] [--ssh] [--mount-tmp] [--nested-virt] [--local-head] [--pr-approval]
                                                VM を起動し、tmux でエージェントと承認コンソールを開く
 `
 

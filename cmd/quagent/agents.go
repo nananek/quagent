@@ -45,6 +45,16 @@ OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 opencode --auto /w
 cd /work
 claude --dangerously-skip-permissions`,
 	},
+	"agy": {
+		setup: setupAgy,
+		entrypoint: `#!/bin/bash
+# quagent: エージェントを起動する (終了したあと ↑ で呼び戻せる)
+cd /work
+if [ -f ~/.gemini/antigravity-cli/env.sh ]; then
+  . ~/.gemini/antigravity-cli/env.sh
+fi
+agy --dangerously-skip-permissions ${AGY_FLAGS:-}`,
+	},
 }
 
 // paneCommand はエージェントのペインで実行するコマンド。エージェントが終わったら
@@ -213,6 +223,66 @@ func writeJSON(g vmGuest, path string, v any) error {
 	// 窓口の合言葉が入っているので、作業ユーザー以外には読ませない
 	if out, err := g.sh("chmod 600 "+path, nil); err != nil {
 		return fmt.Errorf("%s の権限を変えられない: %v: %s", path, err, out)
+	}
+	return nil
+}
+
+// agyProvider は agy に使わせる provider ID (Gemini API)。
+const agyProvider = "gemini"
+
+// setupAgy は agy (Antigravity CLI) が Gemini API を認証プロキシ経由で使い、
+// quagent の MCP を使うよう設定する。
+func setupAgy(g vmGuest, cfg *config.Config, providers []string, token string) error {
+	if !slices.Contains(providers, agyProvider) {
+		return fmt.Errorf("agy を使うには config.json の providers に %q (Gemini API) を設定する", agyProvider)
+	}
+	settings := map[string]any{
+		"modelProvider":     "gemini",
+		"trustedWorkspaces": []string{"/work"},
+	}
+	if err := writeJSON(g, "~/.gemini/antigravity-cli/settings.json", settings); err != nil {
+		return err
+	}
+	mcpConf := map[string]any{
+		"mcpServers": map[string]any{
+			"quagent": map[string]any{
+				"disabled":  false,
+				"serverUrl": guestMCPURL(),
+				"headers": map[string]string{
+					"Authorization": "Bearer " + token,
+				},
+			},
+		},
+	}
+	if err := writeJSON(g, "~/.gemini/config/mcp_config.json", mcpConf); err != nil {
+		return err
+	}
+	_ = writeJSON(g, "~/.gemini/antigravity-cli/mcp_config.json", mcpConf)
+
+	envLines := []string{
+		fmt.Sprintf("export GEMINI_API_KEY=%s", shellQuote(token)),
+		fmt.Sprintf("export GOOGLE_GEMINI_BASE_URL=%s", shellQuote(authproxy.GuestBaseURL(hostsvc.GuestOrigin(), agyProvider))),
+	}
+	if cfg.Agy.Model != "" {
+		envLines = append(envLines, fmt.Sprintf("export AGY_FLAGS=%s", shellQuote("--model "+cfg.Agy.Model)))
+	}
+	envPath := "~/.gemini/antigravity-cli/env.sh"
+	if err := g.writeFile(envPath, []byte(strings.Join(envLines, "\n")+"\n")); err != nil {
+		return err
+	}
+	if out, err := g.sh("chmod 600 "+envPath, nil); err != nil {
+		return fmt.Errorf("%s の権限を変えられない: %v: %s", envPath, err, out)
+	}
+
+	marker := "quagent: agy env"
+	script := `grep -qF ` + shellQuote(marker) + ` ~/.bashrc 2>/dev/null || cat >> ~/.bashrc <<'AGY_ENV'
+# ` + marker + `
+if [ -f ~/.gemini/antigravity-cli/env.sh ]; then
+  . ~/.gemini/antigravity-cli/env.sh
+fi
+AGY_ENV`
+	if out, err := g.sh(script, nil); err != nil {
+		return fmt.Errorf("~/.bashrc に agy 環境変数を書けない: %v: %s", err, out)
 	}
 	return nil
 }

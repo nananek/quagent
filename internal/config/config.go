@@ -23,6 +23,8 @@ type Config struct {
 	Opencode Opencode `json:"opencode"`
 	// Claude は VM 内の Claude Code の設定。
 	Claude Claude `json:"claude"`
+	// Agy は VM 内の agy (Antigravity CLI) の設定。
+	Agy Agy `json:"agy"`
 	// PR は PR 作成の設定。
 	PR PR `json:"pr"`
 	// Clipboard は VM が OSC 52 で書き込もうとした中身 (承認したもの) の入れ方。
@@ -107,6 +109,12 @@ type PR struct {
 	// ProtectedBranches はエージェントに push させないブランチ。
 	// 未指定なら main / master / develop。
 	ProtectedBranches []string `json:"protected_branches,omitempty"`
+}
+
+// Agy は VM 内の agy (Antigravity CLI) の設定。
+type Agy struct {
+	// Model は既定のモデル (agy の --model 設定。空なら agy の既定)。
+	Model string `json:"model,omitempty"`
 }
 
 // Opencode は VM 内の opencode の設定。
