@@ -114,6 +114,10 @@ hardened プロファイル (`no-multilib/systemd`) に切り替え、配布カ�
 
 ## gentoo の焼き込みスクリプトの要点
 
+- 焼き込みの出力はファイルにいったん書き、別プロセスの `tail` で serial へ流す。
+  シリアル getty が ttyS0 を初期化し直すと、直接流していた出力が消えて失敗しても
+  原因が残らないため、getty は焼き込みの前に止める。失敗時はログの末尾を `ttyS0`
+  へ直接流してから電源を切る。
 - 焼き込みのあいだだけ `kernel.yama.ptrace_scope` を 1 にする。git 2.52 以降の
   Rust 部品 (cargo) は `PTRACE_TRACEME` を使い、硬化設定の `ptrace_scope=2` は
   これを拒否してビルドが落ちる。sysctl.d の設定自体は触らないので、起動し直した
