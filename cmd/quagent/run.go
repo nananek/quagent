@@ -447,18 +447,19 @@ runcmd:
 		return err
 	}
 	if o.Agent == "agy" && cfg.Agy.Subscription {
-		revokeOnce := sync.OnceValue(func() []string {
-			revoked, err := mgr.Revoke(cfg.Agy.Egress)
-			if err != nil {
-				logf("agy サブスクリプション: egress の取り消しに失敗: %v", err)
-				return nil
-			}
-			return revoked
-		})
+		var once sync.Once
 		revokeAgyEgress = func() {
-			if revoked := revokeOnce(); len(revoked) > 0 {
-				con.Log("agy の起動確認が済んだので一時 egress を閉じた (" + strings.Join(revoked, ", ") + ")")
-			}
+			// 推論のたびに呼ばれるので、取り消しも通知も1回だけ
+			once.Do(func() {
+				revoked, err := mgr.Revoke(cfg.Agy.Egress)
+				if err != nil {
+					logf("agy サブスクリプション: egress の取り消しに失敗: %v", err)
+					return
+				}
+				if len(revoked) > 0 {
+					con.Log("agy の起動確認が済んだので一時 egress を閉じた (" + strings.Join(revoked, ", ") + ")")
+				}
+			})
 		}
 	}
 	if contentGuard != nil {
