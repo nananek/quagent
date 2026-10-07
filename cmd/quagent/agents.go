@@ -245,6 +245,9 @@ func setupAgy(g vmGuest, cfg *config.Config, providers []string, token string) e
 		"modelProvider":     "gemini",
 		"trustedWorkspaces": []string{"/work"},
 	}
+	if cs := agyColorScheme(cfg); cs != "" {
+		settings["colorScheme"] = cs
+	}
 	if err := writeJSON(g, "~/.gemini/antigravity-cli/settings.json", settings); err != nil {
 		return err
 	}
@@ -297,6 +300,36 @@ func agyMCPConf(token string) map[string]any {
 	}
 }
 
+// agyColorScheme は VM 内の agy (Antigravity CLI) のカラースキームを返す。config の
+// agy.color_scheme があればそれ、無ければ host の agy の設定のもの (読めなければ空)。
+func agyColorScheme(cfg *config.Config) string {
+	if cfg.Agy.ColorScheme != "" {
+		return cfg.Agy.ColorScheme
+	}
+	dir := os.Getenv("AGY_CONFIG_DIR")
+	if dir == "" {
+		dir = os.Getenv("GEMINI_CONFIG_DIR")
+	}
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		dir = filepath.Join(home, ".gemini", "antigravity-cli")
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "settings.json"))
+	if err != nil {
+		return ""
+	}
+	var host struct {
+		ColorScheme string `json:"colorScheme"`
+	}
+	if json.Unmarshal(b, &host) != nil {
+		return ""
+	}
+	return host.ColorScheme
+}
+
 // setupAgySubscription は agy が host のサブスクリプション (OAuth ログイン) を
 // 認証プロキシ経由で使うよう設定する。API キーは要らない。guest の agy は普段の
 // OAuth 経路で動くが、向き先 (CLOUD_CODE_URL) だけプロキシに向け、送ってきた合言葉は
@@ -310,6 +343,9 @@ func setupAgySubscription(g vmGuest, cfg *config.Config, token string) error {
 	seed := cfg.Agy.Seed
 	settings := map[string]any{
 		"trustedWorkspaces": []string{"/work"},
+	}
+	if cs := agyColorScheme(cfg); cs != "" {
+		settings["colorScheme"] = cs
 	}
 	if err := writeJSON(g, "~/.gemini/antigravity-cli/settings.json", settings); err != nil {
 		return err

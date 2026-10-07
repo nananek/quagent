@@ -115,6 +115,9 @@ type PR struct {
 type Agy struct {
 	// Model は既定のモデル (agy の --model 設定。空なら agy の既定)。
 	Model string `json:"model,omitempty"`
+	// ColorScheme はカラースキーム (agy の colorScheme 設定)。空なら host の agy の
+	// 設定 (~/.gemini/antigravity-cli/settings.json) のものを使う。
+	ColorScheme string `json:"color_scheme,omitempty"`
 	// Subscription が true なら、host の agy のサブスクリプション (OAuth ログイン)
 	// を認証プロキシ経由で使う。providers の gemini (Gemini API キー) は要らない。
 	// false なら Gemini API キーで使う (providers に gemini が要る)。

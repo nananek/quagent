@@ -136,7 +136,7 @@ agy (Antigravity CLI) を利用する場合は `providers` に `gemini` を設�
 
 サブスクリプション（ホスト側で agy にログイン済み）で利用する場合は、API キーの代わりに `"agy": { "subscription": true }` を指定します（VM 内の agy は `CLOUD_CODE_URL` をプロキシに向け、ホスト側が OAuth ログイン情報から短命トークンを再生成してリクエストに付与します。起動直後のユーザー情報確認とプロフィール画像取得はゲストから直接アクセスされるため、その宛先である `www.googleapis.com` および画像ホスト宛てのみ `--agent agy` 指定時に一時的に egress を開放し、初回推論が通過した時点で即座に遮断します）。
 
-`agy.model` で VM 内の agy の既定モデルを指定できます。
+`agy.model` で VM 内の agy の既定モデルを指定できます。カラースキームはホスト側 agy の設定（`~/.gemini/antigravity-cli/settings.json` の `colorScheme`）を引き継ぎますが、`agy.color_scheme`（`tokyo night` / `dark` など）を明示指定することも可能です。
 
 provider ID は opencode の provider ID と一致させます。機密情報の取得方法は `secret_env`（環境変数名）、`secret_file`（ファイルパス）、`secret_command`（コマンド実行）から選択できます。認証ヘッダーは既定で `Authorization: Bearer <機密情報>` ですが、`header` / `prefix` で変更可能です。機密情報は run 開始時に 1 回だけ取得されます。`opencode.model` は VM 内の opencode の既定モデルであり、`providers` に設定した provider のモデルを指定します。
 

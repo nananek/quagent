@@ -27,6 +27,25 @@ func TestClaudeTheme(t *testing.T) {
 	}
 }
 
+func TestAgyColorScheme(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AGY_CONFIG_DIR", dir)
+	cfg := &config.Config{}
+	if got := agyColorScheme(cfg); got != "" {
+		t.Fatalf("host の設定が無いのに %q", got)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"colorScheme": "tokyo night", "trustedWorkspaces": ["/work"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := agyColorScheme(cfg); got != "tokyo night" {
+		t.Fatalf("host のカラースキームを使っていない: %q", got)
+	}
+	cfg.Agy.ColorScheme = "solarized dark"
+	if got := agyColorScheme(cfg); got != "solarized dark" {
+		t.Fatalf("config のカラースキームを優先していない: %q", got)
+	}
+}
+
 func TestAgentNames(t *testing.T) {
 	names := agentNames()
 	for _, want := range []string{"opencode", "claude", "agy"} {
