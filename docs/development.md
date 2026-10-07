@@ -1,20 +1,17 @@
-# 開発
+# 開発ガイドライン
 
-この文書は quagent 自体を開発する人向けの指針。使い方は [README](../README.md)、
-内部の仕組みと脅威モデルは [design.md](design.md)、ベースイメージのレシピは
-skill `recipe-authoring` を参照。
+本書は quagent 本体の開発者向けの開発指針およびコーディング規約です。基本的な使い方については [README](../README.md)、内部アーキテクチャや脅威モデルについては [design.md](design.md)、ベースイメージのレシピ作成については skill `recipe-authoring` を参照してください。
 
 ## ビルドとテスト
 
 ```sh
-make build                     # bin/quagent (VM に持ち込むので静的リンク、CGO_ENABLED=0)
-make install                   # ~/.local/bin/quagent に入れる (PREFIX で変更可)
+make build                     # bin/quagent (VM 内にも持ち込むため静的リンク、CGO_ENABLED=0 でビルド)
+make install                   # ~/.local/bin/quagent にインストール (PREFIX で変更可)
 make test                      # go test ./...
 make vet                       # go vet ./...
 ```
 
-CI (`.github/workflows/ci.yml`) は push と PR ごとに、整形・`go.mod`/`go.sum`・vet・
-テスト・静的リンクのビルドを確かめる。PR を出す前にローカルでも次を通す:
+CI (`.github/workflows/ci.yml`) では push および PR 作成のたびに、コード整形・`go.mod`/`go.sum` の整合性・vet・テスト・静的リンクでのビルド検証が実行されます。PR を提出する前に、ローカル環境でも以下のチェックをすべて通過することを確認してください:
 
 ```sh
 test -z "$(gofmt -l .)"
@@ -24,54 +21,47 @@ go test ./...
 make build
 ```
 
-依存の更新は Dependabot が週に一度まとめる。出たばかりの版をすぐには取り込まない
-(乗っ取られた版を掴まないよう、公開から 7 日待つ設定にしてある)。
+依存関係の更新は Dependabot により週 1 回自動でまとめられます。サプライチェーン攻撃等のリスクを低減するため、新規リリース直後のパッケージを即座に取り込まず、公開から 7 日間経過した安定版のみを取り込むよう設定されています。
 
 ## リポジトリ構成
 
-- `cmd/quagent` … CLI・TUI の入口と、run の組み立て (`run.go`・`guestops.go` など)
-- `internal/image` … ベースイメージの焼き込み・管理。レシピは `recipes/<名前>/`
-- `internal/vm` … qemu の起動部品 (seed ISO・overlay・コマンドライン)
-- `internal/netns` … 子 netns の nftables・自前 DNS・透明プロキシ・TLS 終端
-- `internal/sandbox` … VM の中の一枚 (seccomp / Landlock)
-- `internal/guest` / `internal/hostsvc` … vsock の受け口 (guest) と host の窓口
-- `internal/access` / `internal/mcpsrv` / `internal/console` … 接続先の申請・承認
-- `internal/authproxy` / `internal/guard` / `internal/tlsmitm` … LLM プロキシ・
-  コンテンツガード・使い捨て CA
-- `internal/pr` … PR の作成と署名のやり直し
-- `internal/config` / `internal/paths` / `internal/tui` … 設定・置き場・TUI
+- `cmd/quagent` … CLI および TUI のエントリポイント、VM 実行制御 (`run.go`、`guestops.go` など)
+- `internal/image` … ベースイメージのビルドおよび管理（レシピは `recipes/<名前>/`）
+- `internal/vm` … QEMU 起動コンポーネント（seed ISO 作成、overlay、起動パラメータ構築）
+- `internal/netns` … 子 netns 内の nftables 制御、自前 DNS、透過プロキシ、TLS 終端
+- `internal/sandbox` … VM 内部の追加防御層（seccomp / Landlock サンドボックス）
+- `internal/guest` / `internal/hostsvc` … vsock のゲスト側レシーバおよびホスト側サービス
+- `internal/access` / `internal/mcpsrv` / `internal/console` … ネットワークアクセス申請・承認コンソール・MCP サーバー
+- `internal/authproxy` / `internal/guard` / `internal/tlsmitm` … LLM 認証プロキシ、ローカル LLM コンテンツガード、動的使い捨て CA
+- `internal/pr` … VM 内コミットの取り込みとホスト側での再署名・PR 作成
+- `internal/config` / `internal/paths` / `internal/tui` … 設定管理、パス解決、起動 TUI
 
-## 守るべき設計の約束 (コーディング指針)
+## 守るべき設計の原則 (コーディング指針)
 
-1. **閉じ込めの本体は host 側に置く。** VM の中の仕組みで外側の許可制を置き換えない。
-   VM の中の一枚 (seccomp / Landlock) は、危険な syscall の入口を減らす追加の一枚で、
-   閉じ込めの本体は VM と host (netns の nft・vsock) にある。この順序を逆にしない。
-2. **秘密を VM に入れない。** API キー・署名鍵・gh のトークンは host に残し、host の
-   プロキシや取り込みの工程で付ける。VM に渡すのは run ごとの使い捨てトークンと、
-   利用者の `user.name` / `user.email` だけ。
-3. **非 root で動く。** host で特権が要る操作を足さない。VM の中も rootless docker を
-   使い、rootful のデーモンは動かさない。
-4. **VM から来る文字列を信用しない。** 理由・DNS の名前・クリップボードの中身などは、
-   承認コンソールに出す前に制御文字と向きを入れ替える文字を無害化する。
-5. **上限を設ける。** VM の中のエージェントが host の資源や承認者を使い潰せないよう、
-   すべての窓口に上限 (件数・大きさ・時間) を付ける。新しい窓口を足すときも同じ。
-6. **外向きは既定でゼロ。** 新しい通信を足すときは、許可制 (DNS + nft + 透明プロキシ) を
-   通す。host の資源へ届く経路を増やすときは、この文書と `design.md` を更新する。
-7. **テストを書く。** 純粋なロジックは unit test にする。外部コマンド (qemu・nft・gpg
-   など) が要るものは、無ければ skip するか、テスト用の口を分ける。
+1. **隔離の主体はホスト側に置く**
+   VM 内部のセキュリティ機構でホスト側のアクセス制御を代替してはいけません。VM 内部の seccomp や Landlock は、危険なシステムコールの侵入経路を減らすための追加の防御層（多層防御）であり、隔離の根幹は VM 境界とホスト側（netns 内の nftables や vsock 制御）にあります。この主従関係を逆転させてはなりません。
+2. **機密情報を VM 内に持ち込まない**
+   API キー、コミット署名鍵、GitHub トークンなどの機密情報はホスト側にのみ保持し、ホスト側のプロキシや取り込み処理の段階で付与します。VM に渡すのは run ごとの一時認証トークンと、Git の `user.name` / `user.email` のみです。
+3. **非 root（非特権）で動作させる**
+   ホスト側で特権を要する操作を追加してはいけません。VM 内部でも rootless Docker を利用し、root 権限で動くデーモンは起動しません。
+4. **VM から渡される入力値を信用しない**
+   申請理由、DNS ホスト名、クリップボードの内容など VM から受け取る文字列は、承認コンソールに表示する前に制御文字や書字方向制御文字（Bidi）を無害化します。
+5. **各種リソースや要求に上限を設ける**
+   VM 内のエージェントがホストのリソースや人間の承認者を過剰に消費（枯渇）させないよう、すべてのインターフェースに上限（件数・データサイズ・タイムアウト）を設定します。新しいインターフェースを追加する場合も同様です。
+6. **アウトバウンド通信は既定で遮断する**
+   新たな通信経路を追加する場合は、必ず許可制（DNS + nftables + 透過プロキシ）を経由させます。ホストのリソースへ到達可能な経路を増やす場合は、本書および `design.md` を更新してください。
+7. **テストコードを整備する**
+   純粋なロジックは単体テスト（unit test）として実装します。外部コマンド（QEMU、nftables、GnuPG など）に依存するテストは、環境にコマンドが存在しない場合にスキップするか、テスト用のインターフェースを分離してください。
 
 ## コミットと PR
 
-- コミットメッセージは日本語で、`fix(範囲):` / `feat(範囲):` のように接頭辞を付ける
-  (例 `fix(image/gentoo): …`、`feat(vm,image): …`)。
-- PR は 1 つの関心事に絞る。無関係な整形を混ぜない。
-- VM 内で作ったコミットは使い捨ての ssh 鍵で署名され、host が取り込んで署名し直す。
-  仕組みは [design.md](design.md) の「PR の作成と署名」を参照。
+- コミットメッセージは日本語で記述し、`fix(範囲):` / `feat(範囲):` などの接頭辞を付与してください（例: `fix(image/gentoo): …`、`feat(vm,image): …`）。
+- PR は単一の関心事に絞り、無関係なコード整形などを混在させないでください。
+- VM 内で作成されたコミットは一時的な使い捨て SSH 鍵で署名され、ホスト側がこれを取り込んで正規の鍵で再署名します。仕組みの詳細は [design.md](design.md) の「PR の作成と署名」を参照してください。
 
-## ドキュメントの置き場
+## ドキュメントの配置と役割
 
-- `README.md` … 使い方 (これから使う人が読む)。内部の話は書かない。
-- `docs/design.md` … 設計と脅威モデル (仕組み・制限・プロキシ)。
-- `docs/development.md` … この文書 (開発の進め方とコーディング指針)。
-- `.opencode/skills/recipe-authoring/` … ベースイメージのレシピの約束
-  (エージェントがレシピを足す・直すときに読む)。
+- `README.md` … 基本的な使い方（利用者向け。内部アーキテクチャの詳細は記載しない）。
+- `docs/design.md` … 設計と脅威モデル（隔離機構、アクセス制限、プロキシの内部仕様）。
+- `docs/development.md` … 本書（開発の進め方とコーディング規約）。
+- `.opencode/skills/recipe-authoring/` … ベースイメージレシピの作成規約（エージェントがレシピを追加・変更する際に参照）。
