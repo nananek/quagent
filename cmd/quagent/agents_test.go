@@ -50,4 +50,3 @@ func TestSetupAgyRequiresGeminiProvider(t *testing.T) {
 		t.Fatal("providers に gemini が無いのを通した")
 	}
 }
-
