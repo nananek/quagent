@@ -304,10 +304,10 @@ func agyMCPConf(token string) map[string]any {
 // だけは guest から直接 Google に行くので、そのぶんの本物 (1 時間もの) を guest の
 // トークンファイルに書く (0600。長期の refresh_token は host から出さない)。
 func setupAgySubscription(g vmGuest, cfg *config.Config, token string) error {
-	seed, err := antigravity.Mint()
-	if err != nil {
-		return fmt.Errorf("agy のサブスクリプションを使えない: %w", err)
+	if cfg.Agy.Seed == "" {
+		return fmt.Errorf("agy のサブスクリプションの種が無い (host で agy にログインしていない)")
 	}
+	seed := cfg.Agy.Seed
 	settings := map[string]any{
 		"trustedWorkspaces": []string{"/work"},
 	}

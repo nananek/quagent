@@ -11,6 +11,7 @@ import (
 
 	"github.com/nananek/quagent/internal/antigravity"
 	"github.com/nananek/quagent/internal/authproxy"
+	"github.com/nananek/quagent/internal/hostsvc"
 )
 
 // TestAgySubscriptionE2E は本物の agy + 本物のサブスク上流でプロキシ経路を検証する。
@@ -23,11 +24,18 @@ func TestAgySubscriptionE2E(t *testing.T) {
 		t.Skip("agy が無い")
 	}
 	minter := antigravity.NewMinter()
-	if _, err := minter.Token(); err != nil {
+	seed, err := minter.Token()
+	if err != nil {
 		t.Fatalf("mint できない: %v", err)
 	}
 	logger := log.New(os.Stderr, "", log.Ltime)
-	mux := http.NewServeMux()
+	svc, err := hostsvc.New(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 本番 (run.go) と同じく seed を追加の合言葉にする。hostsvc の認証も検証する。
+	svc.ExtraTokens = []string{seed}
+	mux := svc.Mux
 	secret := func() (string, error) {
 		tok, err := minter.Token()
 		return "Bearer " + tok, err
@@ -41,7 +49,7 @@ func TestAgySubscriptionE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	go http.Serve(ln, mux)
+	go http.Serve(ln, svc.Handler())
 	base := "http://" + ln.Addr().String() + "/llm/" + antigravity.ProviderID
 
 	home := t.TempDir()
@@ -54,18 +62,10 @@ func TestAgySubscriptionE2E(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	writeJSON("/.gemini/antigravity-cli/antigravity-oauth-token",
-		`{"token":{"access_token":"QUAGENT_WINDOW","token_type":"Bearer","refresh_token":"quagent","expiry":"2035-01-01T00:00:00+09:00"},"auth_method":"consumer","id_token":"quagent"}`)
 	// 起動直後の 1 回だけ guest から直接 Google に行く (ユーザー情報の確認) ので、
 	// 本物を入れる (setupAgySubscription と同じ)。
-	seed, err := antigravity.Mint()
-	if err != nil {
-		t.Fatalf("seed を作れない: %v", err)
-	}
 	realTok := `{"token":{"access_token":"` + seed + `","token_type":"Bearer","refresh_token":"quagent","expiry":"2035-01-01T00:00:00+09:00"},"auth_method":"consumer","id_token":"quagent"}`
-	if err := os.WriteFile(home+"/.gemini/antigravity-cli/antigravity-oauth-token", []byte(realTok), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeJSON("/.gemini/antigravity-cli/antigravity-oauth-token", realTok)
 	writeJSON("/.gemini/antigravity-cli/cache/onboarding.json",
 		`{"consumerOnboardingComplete": true, "enterpriseOnboardingComplete": false, "onboardingComplete": true}`)
 	writeJSON("/.gemini/antigravity-cli/settings.json", `{"trustedWorkspaces": ["/work"]}`)

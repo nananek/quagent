@@ -119,6 +119,9 @@ type Agy struct {
 	// を認証プロキシ経由で使う。providers の gemini (Gemini API キー) は要らない。
 	// false なら Gemini API キーで使う (providers に gemini が要る)。
 	Subscription bool `json:"subscription,omitempty"`
+	// Seed はサブスクリプション用に host が run 開始時に作った短命トークン。
+	// guest のトークンファイルと窓口の追加の合言葉に使う。設定ファイルには書かない。
+	Seed string `json:"-"`
 }
 
 // Opencode は VM 内の opencode の設定。

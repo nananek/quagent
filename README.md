@@ -149,7 +149,9 @@ agy (Antigravity CLI) を使うときは `providers` に `gemini` (Gemini API) �
 `"agy": { "subscription": true }` と書く。host の OAuth ログインから短命トークンを
 作り直してプロキシが付け、VM 内の agy はサブスク枠で動く。`providers` の `gemini`
 は要らない。VM に入るのは起動時に作った 1 時間ものだけで、長期の refresh_token は
-host から出さない:
+host から出さない。その 1 時間ものは窓口の追加の合言葉にもなっている。起動直後の
+ユーザー情報確認は guest から直接行くので、その宛先 (`www.googleapis.com`) だけ
+egress も開ける:
 
 `claude.model` で VM 内の Claude Code、`agy.model` で VM 内の agy の既定モデル、
 `claude.theme` でカラーテーマを指定できる (既定では host の Claude Code の設定を引き継ぐ)。

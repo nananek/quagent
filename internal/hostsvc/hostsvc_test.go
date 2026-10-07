@@ -41,6 +41,33 @@ func TestTokenRequired(t *testing.T) {
 	}
 }
 
+func TestExtraTokens(t *testing.T) {
+	s, err := New(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.ExtraTokens = []string{"seed-token"}
+	s.Mux.HandleFunc("/llm/antigravity", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) })
+	h := s.handler()
+	cases2 := []struct {
+		name, value string
+		want        int
+	}{
+		{"window", "Bearer " + s.Token, 204},
+		{"seed", "Bearer seed-token", 204},
+		{"wrong", "Bearer wrong", 401},
+	}
+	for _, c := range cases2 {
+		req := httptest.NewRequest("GET", "/llm/antigravity", nil)
+		req.Header.Set("Authorization", c.value)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != c.want {
+			t.Errorf("%s: got %d want %d", c.name, rec.Code, c.want)
+		}
+	}
+}
+
 func TestAuditRecordsAllRequests(t *testing.T) {
 	s, err := New(3)
 	if err != nil {

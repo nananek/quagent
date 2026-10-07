@@ -252,11 +252,20 @@ func run(o runOpts) error {
 	}
 	// agy のサブスクリプションは providers ではなく host の agy の OAuth ログインを
 	// 使う。短命アクセストークンは認証プロキシが host 側で作り直して付ける。
+	// guest に書く種 (起動直後のユーザー情報確認の直接通信用) もここで 1 つ作り、
+	// 窓口の追加の合言葉にする。
 	if cfg.Agy.Subscription {
 		minter := antigravity.NewMinter()
-		if _, err := minter.Token(); err != nil {
+		seed, err := minter.Token()
+		if err != nil {
 			return fmt.Errorf("agy のサブスクリプションを使えない: %w", err)
 		}
+		cfg.Agy.Seed = seed
+		svc.ExtraTokens = []string{seed}
+		// 起動直後のユーザー情報確認は guest から直接行くので、その宛先だけ
+		//  egress も開ける (それ以外はプロキシ経由)。
+		o.Allow = append(o.Allow, "www.googleapis.com")
+		logf("agy サブスクリプション: www.googleapis.com への egress を開ける (起動時のユーザー情報確認用)")
 		secret := func() (string, error) {
 			tok, err := minter.Token()
 			if err != nil {

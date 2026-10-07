@@ -61,6 +61,9 @@ type Server struct {
 	// これを持たないリクエストを拒否する (VM 内のエージェント以外のプロセスや
 	// コンテナが、プロキシ経由で鍵や MCP を使えないように)。
 	Token string
+	// ExtraTokens は Token の代わりに受け付ける合言葉 (agy のサブスクリプションで
+	// guest に書いた短命トークンなど、run ごとに host が用意したもの)。
+	ExtraTokens []string
 	// Port は host で待ち受ける vsock のポート (Start で決まる)。
 	Port uint32
 	cid  uint32 // 受け付ける VM の CID (他の VM からの接続は切る)
@@ -82,17 +85,22 @@ func New(cid uint32) (*Server, error) {
 
 // authorized はリクエストが合言葉を持っているかを返す。
 func (s *Server) authorized(r *http.Request) bool {
-	want := []byte(s.Token)
+	wants := append([]string{s.Token}, s.ExtraTokens...)
 	for _, got := range []string{
 		strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "),
 		r.Header.Get("X-Api-Key"),
 	} {
-		if subtle.ConstantTimeCompare([]byte(got), want) == 1 {
-			return true
+		for _, want := range wants {
+			if subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1 {
+				return true
+			}
 		}
 	}
 	return false
 }
+
+// Handler は窓口の HTTP ハンドラ (合言葉の確認つき)。テスト用にも使う。
+func (s *Server) Handler() http.Handler { return s.handler() }
 
 func (s *Server) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
