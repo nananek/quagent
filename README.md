@@ -112,7 +112,7 @@ agy (Antigravity CLI) を利用する場合は `providers` に `gemini`（Gemini
 
 サブスクリプション（ホスト側で agy にログイン済み）で利用する場合は、API キーの代わりに `"agy": { "subscription": true }` を指定します。ホスト側の OAuth ログイン情報から一時トークンを再生成してプロキシが付与するため、VM 内の agy はサブスクリプション枠で動作します（この場合 `providers` の `gemini` 設定は不要です）。VM に渡されるのは起動時に生成された有効期限 1 時間の一時トークンのみであり、長期の refresh_token がホストから流出することはありません。この一時トークンはプロキシへの接続認証トークンとしても使用されます。なお、起動直後のユーザー情報確認とプロフィール画像の取得はゲストから直接アクセスされるため、その宛先（`www.googleapis.com` および画像ホスト）のみ一時的に egress を開放します。開放は `--agent agy` の指定時のみ行われ、初回推論が完了すると直ちに遮断されます（以降は通常の申請・承認フローに戻ります）。
 
-`claude.model` で VM 内の Claude Code、`agy.model` で VM 内の agy の既定モデル、`claude.theme` でカラーテーマを指定できます（既定ではホスト側の Claude Code の設定を引き継ぎます）。provider ID は opencode の provider ID と一致させます。機密情報の取得方法は `secret_env`（環境変数名）、`secret_file`（ファイルパス）、`secret_command`（コマンド実行）から選択できます。`opencode.model` は VM 内の opencode の既定モデルであり、`providers` に設定した provider のモデルを指定します。プロキシが転送対象とする操作（推論およびモデル一覧取得）や `allow` リストの指定方法については [docs/design.md](docs/design.md) を参照してください。
+`claude.model` で VM 内の Claude Code、`agy.model` で VM 内の agy の既定モデル、`claude.theme` でカラーテーマ、`agy.color_scheme` でカラースキームを指定できます（既定ではホスト側の各エージェントの設定を引き継ぎます）。provider ID は opencode の provider ID と一致させます。機密情報の取得方法は `secret_env`（環境変数名）、`secret_file`（ファイルパス）、`secret_command`（コマンド実行）から選択できます。`opencode.model` は VM 内の opencode の既定モデルであり、`providers` に設定した provider のモデルを指定します。プロキシが転送対象とする操作（推論およびモデル一覧取得）や `allow` リストの指定方法については [docs/design.md](docs/design.md) を参照してください。
 
 ## コンテンツガード (任意)
 
