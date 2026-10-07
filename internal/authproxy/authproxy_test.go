@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -117,5 +118,33 @@ func TestGateContentGuard(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/llm/p/v1/chat/completions", strings.NewReader("world")))
 	if rec.Code != http.StatusOK || reached != 1 {
 		t.Fatalf("通らなかった: code=%d reached=%d body=%s", rec.Code, reached, rec.Body.String())
+	}
+}
+
+func TestHandlerOnResponse(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer up.Close()
+	uu, _ := url.Parse(up.URL)
+	var got []string
+	h := handler("p", uu, "Authorization", func() (string, error) { return "Bearer x", nil },
+		log.New(io.Discard, "", 0),
+		func(id, method, path string, status int) { got = append(got, id+" "+method+" "+path) })
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/llm/p/v1internal:streamGenerateContent", nil))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d", rec.Code)
+	}
+	if len(got) != 1 || got[0] != "p POST /v1internal:streamGenerateContent" {
+		t.Fatalf("onResponse が呼ばれない: %v", got)
+	}
+	// nil でも動く
+	h2 := handler("p", uu, "Authorization", func() (string, error) { return "Bearer x", nil },
+		log.New(io.Discard, "", 0), nil)
+	rec = httptest.NewRecorder()
+	h2.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/llm/p/v1internal:streamGenerateContent", nil))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d", rec.Code)
 	}
 }

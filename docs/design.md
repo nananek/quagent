@@ -234,8 +234,9 @@ agy (Antigravity CLI) を使うときは `providers` に `gemini` を入れる (
 サブスクリプション (host で agy にログイン済み) で使うときは、API キーの代わりに
 `"agy": { "subscription": true }` と書く (VM 内の agy は `CLOUD_CODE_URL` を
 プロキシに向け、host が OAuth の短命トークンを作り直して付ける。起動直後の
-ユーザー情報確認は guest から直接行くので、その宛先 `www.googleapis.com` だけ
-egress も開ける)。
+ユーザー情報確認とプロフィール画像は guest から直接行くので、その宛先
+(`www.googleapis.com` と画像のホスト) だけ `--agent agy` のときだけ egress を
+開け、初回の推論が通ったら閉じる)。
 
 `agy.model` で VM 内の agy の既定モデルを指定できる。
 

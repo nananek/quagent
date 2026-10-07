@@ -122,6 +122,9 @@ type Agy struct {
 	// Seed はサブスクリプション用に host が run 開始時に作った短命トークン。
 	// guest のトークンファイルと窓口の追加の合言葉に使う。設定ファイルには書かない。
 	Seed string `json:"-"`
+	// Egress はサブスクリプション用に一時的に開ける egress の宛先
+	// (ユーザー情報確認とプロフィール画像)。初回の推論が通ったら閉じる。
+	Egress []string `json:"-"`
 }
 
 // Opencode は VM 内の opencode の設定。

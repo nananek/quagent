@@ -389,6 +389,30 @@ func (m *Manager) Release(domains []string) ([]string, error) {
 	return released, m.sync()
 }
 
+// Revoke は host 側が一時的に開けた許可を取り消す。Release と違い、
+// このセッションでは確認しない扱い (session) も外すので、以後は通常の
+// 申請・承認に戻る (Preallow で開けたものを用済みで閉じる用)。
+func (m *Manager) Revoke(domains []string) ([]string, error) {
+	domains, err := NormalizeDomains(domains)
+	if err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	var revoked []string
+	for _, d := range domains {
+		if _, ok := m.grants[d]; ok {
+			delete(m.grants, d)
+			revoked = append(revoked, d)
+		}
+		delete(m.session, d)
+	}
+	m.mu.Unlock()
+	if len(revoked) > 0 {
+		m.logf("許可を取り消し: %s", strings.Join(revoked, ", "))
+	}
+	return revoked, m.sync()
+}
+
 // Grants は有効な許可を返す (パターン -> 期限。0 は期限なし)。
 func (m *Manager) Grants() map[string]int64 {
 	m.mu.Lock()

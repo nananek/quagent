@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -253,8 +254,10 @@ func run(o runOpts) error {
 	// agy のサブスクリプションは providers ではなく host の agy の OAuth ログインを
 	// 使う。短命アクセストークンは認証プロキシが host 側で作り直して付ける。
 	// guest に書く種 (起動直後のユーザー情報確認の直接通信用) もここで 1 つ作り、
-	// 窓口の追加の合言葉にする。
-	if cfg.Agy.Subscription {
+	// 窓口の追加の合言葉にする。agy 以外のエージェントでは何もしない。
+	// 用が済んだ推論の初成功で閉じるよう、revokeAgyEgress は後で差す。
+	var revokeAgyEgress func()
+	if o.Agent == "agy" && cfg.Agy.Subscription {
 		minter := antigravity.NewMinter()
 		seed, err := minter.Token()
 		if err != nil {
@@ -262,10 +265,18 @@ func run(o runOpts) error {
 		}
 		cfg.Agy.Seed = seed
 		svc.ExtraTokens = []string{seed}
-		// 起動直後のユーザー情報確認は guest から直接行くので、その宛先だけ
-		//  egress も開ける (それ以外はプロキシ経由)。
-		o.Allow = append(o.Allow, "www.googleapis.com")
-		logf("agy サブスクリプション: www.googleapis.com への egress を開ける (起動時のユーザー情報確認用)")
+		// 起動直後のユーザー情報確認とプロフィール画像は guest から直接行くので、
+		// その宛先だけ egress も一時的に開ける (それ以外はプロキシ経由)。
+		// 画像の置き場所は人によって違うので、ユーザー情報から取る。
+		egress := []string{"www.googleapis.com"}
+		if _, picture, err := antigravity.UserInfo(seed); err != nil {
+			return fmt.Errorf("agy のユーザー情報を取れない: %w", err)
+		} else if host := antigravity.PictureHost(picture); host != "" {
+			egress = append(egress, host)
+		}
+		cfg.Agy.Egress = egress
+		o.Allow = append(o.Allow, egress...)
+		logf("agy サブスクリプション: %s への egress を一時的に開ける (起動時の確認用。初回の推論が通ったら閉じる)", strings.Join(egress, ", "))
 		secret := func() (string, error) {
 			tok, err := minter.Token()
 			if err != nil {
@@ -279,7 +290,14 @@ func run(o runOpts) error {
 				case llmDenied <- s:
 				default:
 				}
-			}, contentGuard); err != nil {
+			}, contentGuard, func(id, method, path string, status int) {
+				// 初回の推論が通れば起動 (ユーザー情報確認を含む) は済んでいるので、
+				// 一時的に開けた egress をすぐ閉じる。
+				if id == antigravity.ProviderID && status/100 == 2 &&
+					strings.HasPrefix(path, "/v1internal:streamGenerateContent") && revokeAgyEgress != nil {
+					revokeAgyEgress()
+				}
+			}); err != nil {
 			return err
 		}
 		providers = append(providers, antigravity.ProviderID)
@@ -427,6 +445,21 @@ runcmd:
 	con.Clipboard, err = clipboardSink(cfg.Clipboard)
 	if err != nil {
 		return err
+	}
+	if o.Agent == "agy" && cfg.Agy.Subscription {
+		revokeOnce := sync.OnceValue(func() []string {
+			revoked, err := mgr.Revoke(cfg.Agy.Egress)
+			if err != nil {
+				logf("agy サブスクリプション: egress の取り消しに失敗: %v", err)
+				return nil
+			}
+			return revoked
+		})
+		revokeAgyEgress = func() {
+			if revoked := revokeOnce(); len(revoked) > 0 {
+				con.Log("agy の起動確認が済んだので一時 egress を閉じた (" + strings.Join(revoked, ", ") + ")")
+			}
+		}
 	}
 	if contentGuard != nil {
 		// 疑わしいリクエストは承認コンソールで人間が通すか止めるか決める

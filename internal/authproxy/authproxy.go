@@ -89,7 +89,7 @@ func Register(mux *http.ServeMux, providers map[string]config.Provider, logger *
 			allow:    p.Allow,
 		}
 	}
-	return registerAll(mux, registers, logger, denied, g)
+	return registerAll(mux, registers, logger, denied, g, nil)
 }
 
 // secretSource は upstream に付ける秘密の出どころ。
@@ -104,15 +104,16 @@ type secretSource struct {
 }
 
 // RegisterDynamic は秘密を作り直しながら使う provider を 1 つ登録する
-// (サブスクリプションのように短命トークンで回すもの用)。
-func RegisterDynamic(mux *http.ServeMux, id, upstream, header string, secret func() (string, error), allow []string, logger *log.Logger, denied func(string), g *guard.Guard) error {
+// (サブスクリプションのように短命トークンで回すもの用)。onResponse が
+// nil でなければ upstream の応答ごとに呼ぶ (成功を検知して後始末する用)。
+func RegisterDynamic(mux *http.ServeMux, id, upstream, header string, secret func() (string, error), allow []string, logger *log.Logger, denied func(string), g *guard.Guard, onResponse func(id, method, path string, status int)) error {
 	_, err := registerAll(mux, map[string]secretSource{
 		id: {upstream: upstream, header: header, secret: secret, allow: allow},
-	}, logger, denied, g)
+	}, logger, denied, g, onResponse)
 	return err
 }
 
-func registerAll(mux *http.ServeMux, registers map[string]secretSource, logger *log.Logger, denied func(string), g *guard.Guard) ([]string, error) {
+func registerAll(mux *http.ServeMux, registers map[string]secretSource, logger *log.Logger, denied func(string), g *guard.Guard, onResponse func(id, method, path string, status int)) ([]string, error) {
 	var ids []string
 	for id, reg := range registers {
 		up, err := url.Parse(reg.upstream)
@@ -131,7 +132,7 @@ func registerAll(mux *http.ServeMux, registers map[string]secretSource, logger *
 		if header == "" {
 			header = "Authorization"
 		}
-		h := handler(id, up, header, reg.secret, logger)
+		h := handler(id, up, header, reg.secret, logger, onResponse)
 		mux.Handle(Prefix+id+"/", http.MaxBytesHandler(gate(id, up.Host, rules, h, logger, denied, g), 32<<20))
 		ids = append(ids, id)
 	}
@@ -183,7 +184,7 @@ func gate(id, upstreamHost string, rules []rule, next http.Handler, logger *log.
 	})
 }
 
-func handler(id string, up *url.URL, header string, secret func() (string, error), logger *log.Logger) http.Handler {
+func handler(id string, up *url.URL, header string, secret func() (string, error), logger *log.Logger, onResponse func(id, method, path string, status int)) http.Handler {
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			rest := strings.TrimPrefix(r.In.URL.Path, Prefix+id)
@@ -208,6 +209,9 @@ func handler(id string, up *url.URL, header string, secret func() (string, error
 		ModifyResponse: func(resp *http.Response) error {
 			// path は VM が決めるので %q で書く (改行や制御文字でログを偽装させない)
 			logger.Printf("llm %s %s %q -> %d", id, resp.Request.Method, resp.Request.URL.Path, resp.StatusCode)
+			if onResponse != nil {
+				onResponse(id, resp.Request.Method, resp.Request.URL.Path, resp.StatusCode)
+			}
 			return nil
 		},
 	}

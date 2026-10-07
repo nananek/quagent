@@ -146,13 +146,18 @@ func (m *Minter) refresh() (string, error) {
 }
 
 func mintWith(c credentials, rt string) (string, error) {
+
+	return mintWithEndpoint(TokenURL, c, rt)
+}
+
+func mintWithEndpoint(tokenURL string, c credentials, rt string) (string, error) {
 	form := url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {rt},
 		"client_id":     {c.id},
 		"client_secret": {c.secret},
 	}
-	req, err := http.NewRequest(http.MethodPost, TokenURL, bytes.NewBufferString(form.Encode()))
+	req, err := http.NewRequest(http.MethodPost, tokenURL, bytes.NewBufferString(form.Encode()))
 	if err != nil {
 		return "", err
 	}
@@ -226,4 +231,47 @@ func uniq(in []string) []string {
 		}
 	}
 	return out
+}
+
+// userInfoURL は起動直後に agy が直接見に行くユーザー情報の向き先。
+const userInfoURL = "https://www.googleapis.com/oauth2/v2/userinfo"
+
+// UserInfo はアクセストークンでユーザー情報 (email とプロフィール画像の URL) を
+// 取る。画像の置き場所 (ホスト) は人によって違うので、一時 egress の宛先に使う。
+func UserInfo(accessToken string) (email, picture string, err error) {
+	return userInfoWith(userInfoURL, accessToken)
+}
+
+func userInfoWith(endpoint, accessToken string) (email, picture string, err error) {
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("ユーザー情報を取れない: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("ユーザー情報を取れない (HTTP %d)", resp.StatusCode)
+	}
+	var out struct {
+		Email   string `json:"email"`
+		Picture string `json:"picture"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", "", fmt.Errorf("ユーザー情報が読めない: %w", err)
+	}
+	return out.Email, out.Picture, nil
+}
+
+// PictureHost はプロフィール画像 URL のホストを返す。画像が無ければ空。
+func PictureHost(picture string) string {
+	u, err := url.Parse(picture)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	return u.Host
 }
