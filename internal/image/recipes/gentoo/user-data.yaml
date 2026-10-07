@@ -39,7 +39,9 @@ write_files:
       CONFIG_NETFILTER_XT_MARK=m
   # カーネル硬化。Gentoo の USE=hardened が入れる hardened-base.config に
   # 上乗せする (署名・lockdown・ABI 削減・起動時オプションの前提)。
-  - path: /etc/kernel/config.d/90-quagent-hardening.config
+  # config.d はファイル名順にマージされ、後のものが勝つ。配布の
+  # dist-amd64-livecd.config より後に来るよう、zz- という名前にしている。
+  - path: /etc/kernel/config.d/zz-quagent-hardening.config
     permissions: '0644'
     content: |
       # メモリ・スタック
@@ -86,6 +88,14 @@ write_files:
       # 攻撃面の削減: VM に出てこないハードウェアのドライバはビルドしない。
       # 実行時の VM にあるのは virtio とエミュレートされた基本デバイスだけで、
       # virtio・vsock・KVM はここで消える系統の外にあるので残る。
+      # なお、単に =n と書くだけでは足りないものがある。Kconfig の select は
+      # 明示の =n より強いので、select する側も一緒に止める。6.18 では
+      # iSCSI/FCoE オフロード (実機の HBA 用) の 3 つが select ETHERNET し、
+      # USB 周辺機器 (タブレット・マウス・ジョイスティック等) の 18 個が
+      # select USB する。
+      CONFIG_SCSI_BNX2_ISCSI=n
+      CONFIG_SCSI_BNX2X_FCOE=n
+      CONFIG_SCSI_CXGB3_ISCSI=n
       CONFIG_ETHERNET=n
       CONFIG_SOUND=n
       CONFIG_MEDIA_SUPPORT=n
@@ -96,6 +106,24 @@ write_files:
       CONFIG_CAN=n
       CONFIG_INFINIBAND=n
       CONFIG_STAGING=n
+      CONFIG_INPUT_ATI_REMOTE2=n
+      CONFIG_INPUT_KEYSPAN_REMOTE=n
+      CONFIG_INPUT_POWERMATE=n
+      CONFIG_INPUT_YEALINK=n
+      CONFIG_INPUT_CM109=n
+      CONFIG_JOYSTICK_PXRC=n
+      CONFIG_JOYSTICK_XPAD=n
+      CONFIG_MOUSE_APPLETOUCH=n
+      CONFIG_MOUSE_BCM5974=n
+      CONFIG_MOUSE_SYNAPTICS_USB=n
+      CONFIG_TABLET_USB_ACECAD=n
+      CONFIG_TABLET_USB_AIPTEK=n
+      CONFIG_TABLET_USB_HANWANG=n
+      CONFIG_TABLET_USB_KBTAB=n
+      CONFIG_TABLET_USB_PEGASUS=n
+      CONFIG_TOUCHSCREEN_USB_COMPOSITE=n
+      CONFIG_USB_PULSE8_CEC=n
+      CONFIG_USB_RAINSHADOW_CEC=n
       CONFIG_USB=n
 
       # 土台の配布カーネル設定に頼らず、硬化をここで明示する。
@@ -276,7 +304,7 @@ write_files:
         done < "$1"
       }
       verify_config /etc/kernel/config.d/50-quagent-docker.config
-      verify_config /etc/kernel/config.d/90-quagent-hardening.config
+      verify_config /etc/kernel/config.d/zz-quagent-hardening.config
 
       # 起動オプションの硬化 (既存の値を消さずに追記する。差分更新で二重に
       # 追記しないよう、入っていれば何もしない)。起動時に上書きできないものは
