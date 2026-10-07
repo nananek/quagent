@@ -60,7 +60,8 @@ func dispatch(args []string) error {
 			return err
 		}
 		return run(runOpts{Repo: l.Repo, Recipe: l.Recipe, CPUs: l.CPUs, MemMiB: l.MemMiB,
-			MountTmp: l.MountTmp, SSH: l.SSH, NestedVirt: l.NestedVirt, LocalHead: l.LocalHead, Agent: l.Agent, PRApproval: l.PRApproval, Interactive: true})
+			MountTmp: l.MountTmp, SSH: l.SSH, NestedVirt: l.NestedVirt, LocalHead: l.LocalHead, Agent: l.Agent, PRApproval: l.PRApproval, Interactive: true,
+			AfterSession: afterSession})
 	}
 	switch args[0] {
 	case netns.ChildCommand:
@@ -184,20 +185,35 @@ func cmdRun(args []string) error {
 	prApproval := fs.Bool("pr-approval", false, "PR の作成を承認コンソールで確認してから push する")
 	allow := fs.String("allow", "", "egress を許すドメイン (空白区切り)。LLM API は認証プロキシ経由なので不要")
 	_ = fs.Parse(args)
-	return run(runOpts{
+	interactive := isTerminal(os.Stdin)
+	o := runOpts{
 		Repo:        *repo,
 		Recipe:      *recipe,
 		CPUs:        *cpus,
 		MemMiB:      *mem,
 		Allow:       strings.Fields(*allow),
-		Interactive: isTerminal(os.Stdin),
+		Interactive: interactive,
 		SSH:         *useSSH,
 		MountTmp:    *mountTmp,
 		NestedVirt:  *nested,
 		LocalHead:   *localHead,
 		Agent:       *agent,
 		PRApproval:  *prApproval,
-	})
+	}
+	if interactive {
+		o.AfterSession = afterSession
+	}
+	return run(o)
+}
+
+// afterSession はエージェントのセッションが終わったあとに TUI で次の操作を尋ねる。
+// 再起動ならエージェント名を、終了なら空を返す。
+func afterSession(agent string) (next string, discardLogs bool) {
+	c := tui.AfterSession(agentNames(), agent)
+	if c.Restart {
+		next = c.Agent
+	}
+	return next, c.DiscardLogs
 }
 
 func cmdAlways(args []string) error {

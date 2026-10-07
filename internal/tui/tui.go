@@ -140,6 +140,51 @@ func Run(agents []string) (Launch, error) {
 	}
 }
 
+// AfterChoice はエージェントのセッションが終わったあとに選んだ次の操作。
+type AfterChoice struct {
+	// Restart は新しい VM でエージェント Agent を起動し直す。false なら終了する。
+	Restart bool
+	Agent   string
+	// DiscardLogs はこの VM のログ (host.log など) を残さない。
+	DiscardLogs bool
+}
+
+// AfterSession はセッション終了後に、エージェントを選び直して再起動するか終了するか、
+// ログを残すかを尋ねる。current は直前まで動かしていたエージェント (選択の初期値)。
+// 中断 (Ctrl-C) されたときは、従来どおり「終了・ログを残す」として扱う。
+func AfterSession(agents []string, current string) AfterChoice {
+	action, agent, logs := "quit", current, "keep"
+	var agentOpts []huh.Option[string]
+	for _, a := range agents {
+		agentOpts = append(agentOpts, huh.NewOption(a, a))
+	}
+	err := newForm(
+		huh.NewGroup(
+			huh.NewNote().Title("エージェントが終了した").
+				Description("VM は、ここでの選択のあとに破棄される (VM の中の作業は残らない)。"),
+			huh.NewSelect[string]().Title("次の操作").Options(
+				huh.NewOption("エージェントを選び直して再起動 (新しい VM を起動する)", "restart"),
+				huh.NewOption("終了", "quit"),
+			).Value(&action),
+		),
+		huh.NewGroup(
+			huh.NewSelect[string]().Title("エージェント").Options(agentOpts...).Value(&agent),
+		).WithHideFunc(func() bool { return action != "restart" }),
+		huh.NewGroup(
+			huh.NewSelect[string]().Title("この VM のログ").
+				Description("host.log などの host 側の記録 (VM の中のものではない)").
+				Options(
+					huh.NewOption("残す", "keep"),
+					huh.NewOption("残さない", "discard"),
+				).Value(&logs),
+		),
+	).Run()
+	if err != nil {
+		return AfterChoice{}
+	}
+	return AfterChoice{Restart: action == "restart", Agent: agent, DiscardLogs: logs == "discard"}
+}
+
 var errBack = errors.New("back")
 
 // errNoImage は選んだレシピのベースイメージがまだ無い (管理画面へ誘導する)。
