@@ -46,7 +46,8 @@ quagent run --image arch       # VM を起動 (--ssh: 人が ssh で入れる、
 
 `quagent run` は tmux セッションを作り、上のペインで VM 内のエージェントを、
 下のペインで承認コンソールを開く。エージェントは `--agent` (TUI でも選べる) で
-`opencode` (既定、`--auto`) か `claude` (Claude Code、
+`opencode` (既定、`--auto`)、`claude` (Claude Code、
+`--dangerously-skip-permissions`)、`agy` (Antigravity CLI、
 `--dangerously-skip-permissions`) を選ぶ。VM という檻の中では確認なしで動かす。
 エージェントの起動は VM の `/entrypoint.sh` にまとめてあり、終了するとシェルに落ちる。
 `~/.bashrc` にあらかじめ仕込んだ仕掛けで `/entrypoint.sh` が履歴の先頭に入るので、
@@ -131,11 +132,24 @@ Claude Code を使うときは `providers` に `anthropic` を入れる。サブ
 "claude": { "subscription": "max" }
 ```
 
-`claude.model` で VM 内の Claude Code の既定モデル、`claude.theme` でカラーテーマを
-指定できる (既定では host の Claude Code の設定を引き継ぐ)。provider ID は opencode の
-provider ID と揃える。秘密の取り出し方は `secret_env` (環境変数名)・`secret_file`
-(パス)・`secret_command` (コマンド) のいずれか。`opencode.model` は VM 内 opencode の
-既定モデルで、`providers` に挙げた provider のものを指定する。プロキシが転送する操作
+agy (Antigravity CLI) を使うときは `providers` に `gemini` (Gemini API) を入れる:
+
+```json
+"providers": {
+  "gemini": {
+    "upstream": "https://generativelanguage.googleapis.com",
+    "header": "x-goog-api-key", "prefix": "",
+    "secret_command": ["pass", "show", "gemini/api-key"]
+  }
+},
+"agy": { "model": "gemini-3.8-flash-high" }
+```
+
+`claude.model` で VM 内の Claude Code、`agy.model` で VM 内の agy の既定モデル、
+`claude.theme` でカラーテーマを指定できる (既定では host の Claude Code の設定を引き継ぐ)。
+provider ID は opencode の provider ID と揃える。秘密の取り出し方は `secret_env` (環境変数名)・
+`secret_file` (パス)・`secret_command` (コマンド) のいずれか。`opencode.model` は VM 内
+opencode の既定モデルで、`providers` に挙げた provider のものを指定する。プロキシが転送する操作
 (推論とモデル一覧) と `allow` の書き方は [docs/design.md](docs/design.md) を参照。
 
 ## コンテンツガード (任意)

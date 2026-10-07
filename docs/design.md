@@ -38,7 +38,7 @@ sshd は既定で止める (systemd-ssh-generator が作る vsock / unix ソケ�
 ## VM の中
 
 - ベースイメージ: OS ごとのレシピから焼く (下記)。どれも rootless docker と
-  opencode 入りで、rootful の docker デーモンは動かさない。
+  opencode・Claude Code・agy 入りで、rootful の docker デーモンは動かさない。
 - ユーザー `agent` (sudo なし)。作業ディレクトリは `/work` で、ここに対象 repo を
   履歴ごと取り込み、host と同じブランチを checkout する。渡すのは checkout 中の
   ブランチと origin の remote-tracking だけで、ほかのローカルブランチやタグは渡さない。
@@ -217,6 +217,22 @@ host でログイン中の Claude Code の認証情報 (`~/.claude/.credentials.
 Claude Code の設定 (`~/.claude/settings.json` の `theme`) を引き継ぐ。`claude.theme`
 (`dark` / `light-daltonized` など) を書けばそちらを使う。
 
+agy (Antigravity CLI) を使うときは `providers` に `gemini` を入れる (VM 内の agy は
+`GOOGLE_GEMINI_BASE_URL` をプロキシに向け、合言葉を `GEMINI_API_KEY` で渡す):
+
+```json
+"providers": {
+  "gemini": {
+    "upstream": "https://generativelanguage.googleapis.com",
+    "header": "x-goog-api-key", "prefix": "",
+    "secret_command": ["pass", "show", "gemini/api-key"]
+  }
+},
+"agy": { "model": "gemini-3.8-flash-high" }
+```
+
+`agy.model` で VM 内の agy の既定モデルを指定できる。
+
 provider ID は opencode の provider ID と揃える。秘密の取り出し方は
 `secret_env` (環境変数名)・`secret_file` (パス)・`secret_command` (コマンド) の
 いずれか。ヘッダは既定で `Authorization: Bearer <秘密>` (`header` / `prefix` で変更可)。
@@ -224,8 +240,8 @@ provider ID は opencode の provider ID と揃える。秘密の取り出し方
 モデルで、`providers` に挙げた provider のものを指定する。
 
 プロキシが鍵を付けて転送するのは推論とモデル一覧の操作だけ (`POST /messages`・
-`/messages/count_tokens`・`/chat/completions`・`/responses`、`GET /models`、それぞれ
-`/v1` 付きも)。ファイルやバッチなどほかの API は 403 で断り、承認コンソールに出す。
+`/messages/count_tokens`・`/chat/completions`・`/responses`・`/models/*`、`GET /models`、
+それぞれ `/v1` や `/v1beta` 付きも)。ファイルやバッチなどほかの API は 403 で断り、承認コンソールに出す。
 足りなければ provider ごとに `"allow": ["POST /messages", "GET /models/*"]` のように
 指定する (upstream からの相対パス。末尾の `*` は前方一致。指定すると既定は使わない)。
 
