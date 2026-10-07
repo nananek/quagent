@@ -105,7 +105,7 @@ func TestGentooVerifiesHardeningConfig(t *testing.T) {
 	}
 	for _, want := range []string{
 		"verify_config /etc/kernel/config.d/50-quagent-docker.config",
-		"verify_config /etc/kernel/config.d/90-quagent-hardening.config",
+		"verify_config /etc/kernel/config.d/zz-quagent-hardening.config",
 		"KCONFIG=$(ls -1 /usr/src/linux-*/.config",
 		"CONFIG_MITIGATION_PAGE_TABLE_ISOLATION=y",
 		"CONFIG_MITIGATION_RETPOLINE=y",
@@ -149,8 +149,10 @@ func TestGentooHardeningSettings(t *testing.T) {
 		"CONFIG_LIST_HARDENED=y",
 		"CONFIG_BPF_LSM=y",
 		`CONFIG_LSM="landlock,yama,safesetid,bpf,lockdown"`,
-		"CONFIG_ETHERNET=n", // VM に出てこないハードウェアのドライバは積まない
+		"CONFIG_ETHERNET=n",        // VM に出てこないハードウェアのドライバは積まない
+		"CONFIG_SCSI_BNX2_ISCSI=n", // select ETHERNET で戻すので一緒に止める
 		"CONFIG_USB=n",
+		"CONFIG_JOYSTICK_XPAD=n", // select USB で戻すので一緒に止める
 		"kernel.unprivileged_bpf_disabled=2",
 		"kernel.io_uring_disabled=2", // io_uring は CONFIG では止められない
 		"kernel.sysrq=0",

@@ -100,10 +100,15 @@ hardened プロファイル (`no-multilib/systemd`) に切り替え、配布カ�
 入れる。配布イメージは UEFI 専用なので `firmware` を `uefi` にする。
 
 - config fragment は `/etc/kernel/config.d/` に置く。`50-` は rootless docker 用、
-  `90-quagent-hardening.config` は硬化用。
+  `zz-quagent-hardening.config` は硬化用。config.d はファイル名順にマージされ、
+  後のものが勝つので、配布の `dist-amd64-livecd.config` より後に来る名前に
+  している。
 - 使わないドライバは fragment で無効化する (攻撃面の削減)。たとえば
   `CONFIG_ETHERNET=n` でイーサネットのベンダードライバがまとめて消える。
-  `=n` の行も `verify_config` が突き合わせる。
+  `=n` の行も `verify_config` が突き合わせる。ただし `=n` にしても、他の
+  シンボルが `select` で y に戻すことがある (6.18 では iSCSI/FCoE オフロードの
+  3 つが `select ETHERNET`、USB 周辺機器の 18 個が `select USB` する)。
+  `select` する側も一緒に止める。
 - io_uring は 6.18 では CONFIG で無効化できない (`CONFIG_IO_URING=n` にしても
   y に戻る)。sysctl の `kernel.io_uring_disabled=2` で止める。
 - カーネルの版でシンボルが改名・廃止される (`PAGE_TABLE_ISOLATION` は 6.8 で
