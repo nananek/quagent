@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,9 +56,11 @@ type runOpts struct {
 	// PRApproval は PR の作成を承認コンソールで確認してから push する。
 	PRApproval bool
 	// AfterSession は対話セッションが終わったあと (VM を破棄する前) に呼ばれ、次の操作を
-	// 返す。next が空でなければ、そのエージェントで新しい VM を起動し直す。空なら終了。
-	// discardLogs が true なら、この VM の host 側のログを残さない。nil なら何も尋ねない。
-	AfterSession func(agent string) (next string, discardLogs bool)
+	// 返す。current は直前まで動かしていたエージェント、choices は選べるエージェント。
+	// next が空でなければ、同じ VM でそのエージェントを起動し直す (VM は破棄しない)。
+	// 空なら終了で、discardLogs が true ならこの VM の host 側のログを残さない
+	// (discardLogs は終了のときだけ意味を持つ)。nil なら何も尋ねない。
+	AfterSession func(current string, choices []string) (next string, discardLogs bool)
 }
 
 func logf(format string, a ...any) {
@@ -114,23 +115,7 @@ func normalizePassthrough(in []string) ([]string, error) {
 	return access.NormalizeDomains(in)
 }
 
-// run は VM を 1 台起動してエージェントを動かす。セッションのあとに再起動が選ばれたら、
-// 選び直したエージェントで新しい VM を起動し直す (VM は毎回破棄する)。
 func run(o runOpts) error {
-	baseAllow := slices.Clone(o.Allow)
-	for {
-		var next string
-		cur := o
-		cur.Allow = slices.Clone(baseAllow)
-		if err := runOnce(cur, &next); err != nil || next == "" {
-			return err
-		}
-		o.Agent = next
-	}
-}
-
-// runOnce は VM を 1 台分動かして破棄する。再起動が選ばれたら *next にエージェント名を入れる。
-func runOnce(o runOpts, next *string) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -203,7 +188,7 @@ func runOnce(o runOpts, next *string) error {
 		return err
 	}
 	defer lock.Close()
-	// セッション終了後の選択で「ログを残さない」にしたとき true にする
+	// 終了時の選択で「ログを残さない」にしたとき true にする
 	discardLogs := false
 	defer func() {
 		if discardLogs {
@@ -387,9 +372,11 @@ bootcmd:
   - [sh, -c, "systemctl mask --now systemd-timesyncd.service 2>/dev/null; true"]
   - [sh, -c, "%s"]
 runcmd:
+  # 再起動のとき作業ユーザーが差し替えられるよう、/entrypoint.sh の実体は作業ユーザーのホームに置く
+  - [sh, -c, "install -o %s -g %s -m 755 /entrypoint.sh %s && ln -sf %s /entrypoint.sh"]
 %s%s  - [sh, -c, "mkdir -p /run/quagent-seed && mount -o ro /dev/disk/by-label/cidata /run/quagent-seed && install -m 755 /run/quagent-seed/quagent-guest /usr/local/bin/quagent-guest && umount /run/quagent-seed"]
   - [systemd-run, --unit=quagent-guest, --uid=%s, -p, Restart=always, /usr/local/bin/quagent-guest, %s, "%d"]
-`, indentBlock(entrypoint, "      "), extraFiles, sandboxFile, hostsvc.GuestHost, maskCmd(sshUnits(o.SSH)), trustCmd, tmpCmd, vm.GuestUser, guestCommand, svc.Port)
+`, indentBlock(entrypoint, "      "), extraFiles, sandboxFile, hostsvc.GuestHost, maskCmd(sshUnits(o.SSH)), vm.GuestUser, vm.GuestUser, entrypointPath, entrypointPath, trustCmd, tmpCmd, vm.GuestUser, guestCommand, svc.Port)
 	// 時刻の表示 (承認の期限やコミットの日時) を host とそろえる
 	if tz := hostTimezone(); tz != "" {
 		userData += "timezone: " + tz + "\n"
@@ -618,14 +605,70 @@ runcmd:
 		return nil
 	}
 
-	agent := g.interactiveArgv(paneCommand)
-	session := "quagent-" + filepath.Base(work)
-	if err := runTmux(session, agent, []string{self, consoleCommand, filepath.Join(work, "console.sock")}, con.Quit); err != nil {
+	cur := o.Agent
+	for {
+		agent := g.interactiveArgv(paneCommand)
+		session := "quagent-" + filepath.Base(work)
+		if err := runTmux(session, agent, []string{self, consoleCommand, filepath.Join(work, "console.sock")}, con.Quit); err != nil {
+			return err
+		}
+		// 端末が戻ったら、VM を破棄する前に、同じ VM でエージェントを起動し直すか終了するかを尋ねる
+		if o.AfterSession == nil {
+			return nil
+		}
+		select {
+		case <-con.Quit: // 承認コンソールから終了を指示された
+			return nil
+		default:
+		}
+		next, discard := o.AfterSession(cur, restartChoices(o.Agent, cfg))
+		if next == "" {
+			discardLogs = discard
+			return nil
+		}
+		if next == cur {
+			continue
+		}
+		if err := switchAgent(g, cfg, next, providers, svc.Token, caCert); err != nil {
+			logf("エージェントを %s に切り替えられない (%s のまま起動し直す): %v", next, cur, err)
+			continue
+		}
+		cur = next
+	}
+}
+
+// entrypointPath は VM の /entrypoint.sh の実体 (作業ユーザーのホーム)。/entrypoint.sh は
+// ここへのシンボリックリンクで、作業ユーザーが VM を破棄せずに差し替えられる。
+var entrypointPath = "/home/" + vm.GuestUser + "/.quagent-entrypoint.sh"
+
+// restartChoices は再起動で選べるエージェントを返す。agy のサブスクリプションは起動時に
+// host 側の準備 (認証プロキシと一時的な egress) が要るので、agy で起動した VM でだけ選べる。
+func restartChoices(started string, cfg *config.Config) []string {
+	var out []string
+	for _, n := range agentNames() {
+		if n == "agy" && cfg.Agy.Subscription && started != "agy" {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// switchAgent は動いている VM のまま、エージェントの設定と /entrypoint.sh だけを next のものに差し替える。
+func switchAgent(g vmGuest, cfg *config.Config, next string, providers []string, token, caCert string) error {
+	ag, ok := agents[next]
+	if !ok {
+		return fmt.Errorf("不明なエージェント %q", next)
+	}
+	if err := ag.setup(g, cfg, providers, token); err != nil {
 		return err
 	}
-	// 端末が戻ったら、VM を破棄する前に再起動するか終了するか (ログを残すか) を尋ねる
-	if o.AfterSession != nil {
-		*next, discardLogs = o.AfterSession(o.Agent)
+	entrypoint, _, _ := injectCA(ag.entrypoint, caCert)
+	if err := g.writeFile(entrypointPath, []byte(entrypoint+"\n")); err != nil {
+		return err
+	}
+	if out, err := g.sh("chmod 755 "+entrypointPath, nil); err != nil {
+		return fmt.Errorf("%s の権限を変えられない: %v: %s", entrypointPath, err, out)
 	}
 	return nil
 }
