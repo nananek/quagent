@@ -114,8 +114,9 @@ func TestGentooVerifiesHardeningConfig(t *testing.T) {
 			t.Errorf("gentoo の user-data に %q が無い", want)
 		}
 	}
-	// 6.8 で MITIGATION_ 接頭辞に改名された古い名前や、廃止されたシンボルを残さない
-	// (書いても無視され、硬化が静かに効かなくなる)。注釈ではなく設定行だけを見る。
+	// 6.8 で MITIGATION_ 接頭辞に改名された古い名前や、廃止・無効化できない
+	// シンボルを残さない (書いても無視され、硬化が静かに効かなくなる)。注釈では
+	// なく設定行だけを見る。
 	for _, line := range strings.Split(r.userData, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "CONFIG_") {
@@ -128,6 +129,7 @@ func TestGentooVerifiesHardeningConfig(t *testing.T) {
 			"CONFIG_DEVKMEM",
 			"CONFIG_ACPI_CUSTOM_METHOD",
 			"CONFIG_X86_X32=",
+			"CONFIG_IO_URING=", // 6.18 では n にしても y に戻るので書かない
 		} {
 			if strings.HasPrefix(line, stale) {
 				t.Errorf("gentoo の user-data に廃止・改名された設定行が残っている: %q", line)
@@ -147,8 +149,10 @@ func TestGentooHardeningSettings(t *testing.T) {
 		"CONFIG_LIST_HARDENED=y",
 		"CONFIG_BPF_LSM=y",
 		`CONFIG_LSM="landlock,yama,safesetid,bpf,lockdown"`,
-		"CONFIG_IO_URING=n",
+		"CONFIG_ETHERNET=n", // VM に出てこないハードウェアのドライバは積まない
+		"CONFIG_USB=n",
 		"kernel.unprivileged_bpf_disabled=2",
+		"kernel.io_uring_disabled=2", // io_uring は CONFIG では止められない
 		"kernel.sysrq=0",
 		"dev.tty.ldisc_autoload=0",
 	} {

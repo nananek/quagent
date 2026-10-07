@@ -70,7 +70,9 @@ write_files:
 
       # 攻撃面の削減 (32bit バイナリ・x32 は動かさない)。BPF の JIT 硬化は
       # CONFIG_BPF_JIT_HARDEN が廃止され、sysctl (net.core.bpf_jit_harden) に
-      # 移った。sysctl.d の 90-quagent-hardening.conf で 2 にする。
+      # 移った。sysctl.d の 90-quagent-hardening.conf で 2 にする。io_uring は
+      # 6.18 では CONFIG で無効化できない (n にしても y に戻る) ので、同じ
+      # sysctl.d の kernel.io_uring_disabled で止める。
       CONFIG_LEGACY_VSYSCALL_NONE=y
       CONFIG_BPF_UNPRIV_DEFAULT_OFF=y
       CONFIG_BPF_JIT_ALWAYS_ON=y
@@ -80,7 +82,21 @@ write_files:
       CONFIG_HIBERNATION=n
       CONFIG_UEVENT_HELPER=n
       CONFIG_FW_LOADER_USER_HELPER=n
-      CONFIG_IO_URING=n
+
+      # 攻撃面の削減: VM に出てこないハードウェアのドライバはビルドしない。
+      # 実行時の VM にあるのは virtio とエミュレートされた基本デバイスだけで、
+      # virtio・vsock・KVM はここで消える系統の外にあるので残る。
+      CONFIG_ETHERNET=n
+      CONFIG_SOUND=n
+      CONFIG_MEDIA_SUPPORT=n
+      CONFIG_MMC=n
+      CONFIG_WLAN=n
+      CONFIG_BT=n
+      CONFIG_NFC=n
+      CONFIG_CAN=n
+      CONFIG_INFINIBAND=n
+      CONFIG_STAGING=n
+      CONFIG_USB=n
 
       # 土台の配布カーネル設定に頼らず、硬化をここで明示する。
       CONFIG_HARDENED_USERCOPY=y
@@ -126,6 +142,8 @@ write_files:
       kernel.unprivileged_bpf_disabled=2
       kernel.perf_event_paranoid=3
       kernel.sysrq=0
+      # io_uring は 6.18 の CONFIG では止められないので、実行時に無効化する
+      kernel.io_uring_disabled=2
       net.core.bpf_jit_harden=2
       vm.unprivileged_userfaultfd=0
       fs.suid_dumpable=0
