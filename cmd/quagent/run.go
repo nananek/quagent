@@ -267,10 +267,10 @@ func run(o runOpts) error {
 	// agy のサブスクリプションは providers ではなく host の agy の OAuth ログインを
 	// 使う。短命アクセストークンは認証プロキシが host 側で作り直して付ける。
 	// guest に書く種 (起動直後のユーザー情報確認の直接通信用) もここで 1 つ作り、
-	// 窓口の追加の合言葉にする。agy 以外のエージェントでは何もしない。
-	// 用が済んだ推論の初成功で閉じるよう、revokeAgyEgress は後で差す。
-	var revokeAgyEgress func()
-	if o.Agent == "agy" && cfg.Agy.Subscription {
+	// 窓口の追加の合言葉にする。再起動で agy に切り替えるときもこれを使う。
+	// agy 起動時の一時 egress の開放と初推論成功時の取り消しは agyEgress で管理する。
+	var agyEgress *agyEgressController
+	if cfg.Agy.Subscription {
 		minter := antigravity.NewMinter()
 		seed, err := minter.Token()
 		if err != nil {
@@ -288,8 +288,7 @@ func run(o runOpts) error {
 			egress = append(egress, host)
 		}
 		cfg.Agy.Egress = egress
-		o.Allow = append(o.Allow, egress...)
-		logf("agy サブスクリプション: %s への egress を一時的に開ける (起動時の確認用。初回の推論が通ったら閉じる)", strings.Join(egress, ", "))
+		agyEgress = &agyEgressController{egress: egress}
 		secret := func() (string, error) {
 			tok, err := minter.Token()
 			if err != nil {
@@ -307,8 +306,8 @@ func run(o runOpts) error {
 				// 初回の推論が通れば起動 (ユーザー情報確認を含む) は済んでいるので、
 				// 一時的に開けた egress をすぐ閉じる。
 				if id == antigravity.ProviderID && status/100 == 2 &&
-					strings.HasPrefix(path, "/v1internal:streamGenerateContent") && revokeAgyEgress != nil {
-					revokeAgyEgress()
+					strings.HasPrefix(path, "/v1internal:streamGenerateContent") {
+					agyEgress.Revoke()
 				}
 			}); err != nil {
 			return err
@@ -461,20 +460,11 @@ runcmd:
 	if err != nil {
 		return err
 	}
-	if o.Agent == "agy" && cfg.Agy.Subscription {
-		var once sync.Once
-		revokeAgyEgress = func() {
-			// 推論のたびに呼ばれるので、取り消しも通知も1回だけ
-			once.Do(func() {
-				revoked, err := mgr.Revoke(cfg.Agy.Egress)
-				if err != nil {
-					logf("agy サブスクリプション: egress の取り消しに失敗: %v", err)
-					return
-				}
-				if len(revoked) > 0 {
-					con.Log("agy の起動確認が済んだので一時 egress を閉じた (" + strings.Join(revoked, ", ") + ")")
-				}
-			})
+	if agyEgress != nil {
+		agyEgress.mgr = mgr
+		agyEgress.con = con
+		if o.Agent == "agy" {
+			agyEgress.Open()
 		}
 	}
 	if contentGuard != nil {
@@ -621,19 +611,74 @@ runcmd:
 			return nil
 		default:
 		}
-		next, discard := o.AfterSession(cur, restartChoices(o.Agent, cfg))
+		next, discard := o.AfterSession(cur, restartChoices())
 		if next == "" {
 			discardLogs = discard
 			return nil
 		}
 		if next == cur {
+			if next == "agy" {
+				agyEgress.Open()
+			}
 			continue
 		}
 		if err := switchAgent(g, cfg, next, providers, svc.Token, caCert); err != nil {
 			logf("エージェントを %s に切り替えられない (%s のまま起動し直す): %v", next, cur, err)
 			continue
 		}
+		if next == "agy" {
+			agyEgress.Open()
+		} else {
+			agyEgress.Revoke()
+		}
 		cur = next
+	}
+}
+
+// agyEgressController は agy のサブスクリプションで一時的に開ける egress
+// (ユーザー情報確認とプロフィール画像) を管理する。
+type agyEgressController struct {
+	mu     sync.Mutex
+	mgr    *access.Manager
+	con    *console.Server
+	egress []string
+	open   bool
+}
+
+func (c *agyEgressController) Open() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.egress) == 0 || c.mgr == nil {
+		return
+	}
+	if err := c.mgr.Preallow(c.egress); err != nil {
+		logf("agy サブスクリプション: egress の開放に失敗: %v", err)
+		return
+	}
+	c.open = true
+	logf("agy サブスクリプション: %s への egress を一時的に開ける (起動時の確認用。初回の推論が通ったら閉じる)", strings.Join(c.egress, ", "))
+}
+
+func (c *agyEgressController) Revoke() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.open || c.mgr == nil {
+		return
+	}
+	revoked, err := c.mgr.Revoke(c.egress)
+	if err != nil {
+		logf("agy サブスクリプション: egress の取り消しに失敗: %v", err)
+		return
+	}
+	c.open = false
+	if len(revoked) > 0 && c.con != nil {
+		c.con.Log("agy の起動確認が済んだので一時 egress を閉じた (" + strings.Join(revoked, ", ") + ")")
 	}
 }
 
@@ -641,17 +686,9 @@ runcmd:
 // ここへのシンボリックリンクで、作業ユーザーが VM を破棄せずに差し替えられる。
 var entrypointPath = "/home/" + vm.GuestUser + "/.quagent-entrypoint.sh"
 
-// restartChoices は再起動で選べるエージェントを返す。agy のサブスクリプションは起動時に
-// host 側の準備 (認証プロキシと一時的な egress) が要るので、agy で起動した VM でだけ選べる。
-func restartChoices(started string, cfg *config.Config) []string {
-	var out []string
-	for _, n := range agentNames() {
-		if n == "agy" && cfg.Agy.Subscription && started != "agy" {
-			continue
-		}
-		out = append(out, n)
-	}
-	return out
+// restartChoices は再起動で選べるエージェントを返す。
+func restartChoices() []string {
+	return agentNames()
 }
 
 // switchAgent は動いている VM のまま、エージェントの設定と /entrypoint.sh だけを next のものに差し替える。

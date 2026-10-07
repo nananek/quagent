@@ -153,7 +153,7 @@ type AfterChoice struct {
 // 終了のときだけログを残すかを尋ねる。current は直前まで動かしていたエージェント (選択の初期値)。
 // 中断 (Ctrl-C) されたときは、従来どおり「終了・ログを残す」として扱う。
 func AfterSession(agents []string, current string) AfterChoice {
-	action, agent, logs := "quit", current, "keep"
+	action, agent, logs := "restart", current, "keep"
 	var agentOpts []huh.Option[string]
 	for _, a := range agents {
 		agentOpts = append(agentOpts, huh.NewOption(a, a))
