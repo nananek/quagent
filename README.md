@@ -114,6 +114,30 @@ agy (Antigravity CLI) を利用する場合は `providers` に `gemini`（Gemini
 
 `claude.model` で VM 内の Claude Code、`agy.model` で VM 内の agy の既定モデル、`claude.theme` でカラーテーマ、`agy.color_scheme` でカラースキームを指定できます（既定ではホスト側の各エージェントの設定を引き継ぎます）。provider ID は opencode の provider ID と一致させます。機密情報の取得方法は `secret_env`（環境変数名）、`secret_file`（ファイルパス）、`secret_command`（コマンド実行）から選択できます。`opencode.model` は VM 内の opencode の既定モデルであり、`providers` に設定した provider のモデルを指定します。プロキシが転送対象とする操作（推論およびモデル一覧取得）や `allow` リストの指定方法については [docs/design.md](docs/design.md) を参照してください。
 
+## ツールサーバー (OpenAPI)
+
+Open WebUI のツールサーバーなど、OpenAPI 仕様で公開された外部サーバーを、VM 内のエージェントから MCP ツールとして利用できます。ホスト側で OpenAPI 仕様 (JSON) を取得して各 operation を MCP ツールへと自動変換し、既存の MCP エンドポイント (`http://quagent.host:7070/mcp`) に登録します。ツール呼び出しはホストがツールサーバーへプロキシ転送するため、VM からツールサーバーへ直接通信する必要はなく（プライベート LAN 上のサーバーも利用可能）、API キーなどの機密情報が VM 内に配置されることもありません。
+
+```json
+"tool_servers": {
+  "my-tools": {
+    "url": "http://192.168.1.10:8000",
+    "secret_env": "MY_TOOLS_KEY"
+  },
+  "public-tools": {
+    "url": "https://tools.example.com",
+    "openapi_path": "/weather/openapi.json"
+  }
+}
+```
+
+- 各サーバーの設定キー（`my-tools` など）がツール名のプレフィックスとなり、ツールは `<キー>__<operationId>` という形式で公開されます。
+- 認証が不要なサーバーの場合は `secret_env` / `secret_file` / `secret_command` をすべて省略します（認証なしで登録されます）。認証が必要な場合は `providers` と同様に設定し、`header` / `prefix` で認証ヘッダーのカスタマイズも可能です（既定: `Authorization: Bearer <機密情報>`）。機密情報は仕様の取得およびツール呼び出しの転送時にホスト側で付与されます。
+- OpenAPI 仕様は `url` に `openapi_path`（既定: `/openapi.json`）を連結した URL から取得します。Open WebUI のツールサーバー等でパスが異なる場合は適宜指定してください（OpenAPI 3.x の JSON 形式に対応、YAML は非対応）。
+- パス・クエリ・ヘッダーの各パラメータは同名のツール引数となり、リクエストボディは `body` 引数として渡されます（JSON、または `application/x-www-form-urlencoded` 形式に対応）。
+- 仕様の取得は VM 起動時に 1 回のみ行われます。取得できなかったサーバーは警告ログを出力してスキップされ、VM の起動処理自体は継続します。
+- ツール呼び出しのリクエストもコンテンツガード（有効時）の検査対象となります。レスポンス本文は最大 1 MiB まで取得され、画像等のテキスト以外のレスポンスはメタデータ（Content-Type とサイズ）のみを返します。
+
 ## コンテンツガード (任意)
 
 接続先ドメインの許可制だけでは、許可済みドメインへの通信に機密情報が意図せず（または悪意を持って）紛れ込むケース（例: User-Agent ヘッダーに機密情報を埋め込むなど）を防止できません。任意で、ホスト側で平文として参照可能なリクエスト内容をローカル LLM に検査させ、機密情報と判断される具体的な根拠（`evidence`）が抽出された場合のみ、承認コンソールへ転送して人間の判断を仰ぐことができます。判定の仕組みや限界については [docs/design.md](docs/design.md) を参照してください。

@@ -19,6 +19,10 @@ type Config struct {
 	// Providers は認証プロキシ経由で guest に使わせる LLM API。キーは provider ID
 	// (opencode の provider ID と揃える)。
 	Providers map[string]Provider `json:"providers"`
+	// ToolServers は OpenAPI で公開された外部のツールサーバー (Open WebUI のツール
+	// サーバーなど)。host が OpenAPI 仕様を読んで MCP のツールに変換し、guest の
+	// エージェントに使わせる。キーはツール名の前置きになる名前。
+	ToolServers map[string]ToolServer `json:"tool_servers,omitempty"`
 	// Opencode は VM 内の opencode の設定。
 	Opencode Opencode `json:"opencode"`
 	// Claude は VM 内の Claude Code の設定。
@@ -220,6 +224,51 @@ func (p Provider) Secret() (string, error) {
 		return "", fmt.Errorf("秘密が空")
 	}
 	return s, nil
+}
+
+// ToolServer は OpenAPI で公開された 1 つの外部ツールサーバーの設定。
+type ToolServer struct {
+	// URL はサーバーの base URL (例: http://192.168.1.10:8000)。host から到達できれば
+	// よい (LAN 内でも可。guest が直接つなぐわけではない)。http / https のどちらも使える。
+	URL string `json:"url"`
+	// OpenAPIPath は OpenAPI 仕様 (JSON) の URL 内のパス。既定 "/openapi.json"。
+	// Open WebUI のツールサーバーでは "/<ツール名>/openapi.json" のようになる。
+	OpenAPIPath string `json:"openapi_path,omitempty"`
+	// Header は秘密を載せるヘッダ名 (既定 Authorization)。
+	Header string `json:"header,omitempty"`
+	// Prefix はヘッダ値の前置き (Header が Authorization なら既定 "Bearer ")。
+	Prefix *string `json:"prefix,omitempty"`
+	// 秘密の取り出し方。認証が要らないサーバーでは 3 つとも省略する (認証なし)。
+	SecretEnv     string   `json:"secret_env,omitempty"`
+	SecretFile    string   `json:"secret_file,omitempty"`
+	SecretCommand []string `json:"secret_command,omitempty"`
+}
+
+// provider は秘密まわりの設定を Provider として扱う (取り出し方を共通にするため)。
+func (t ToolServer) provider() Provider {
+	return Provider{Upstream: t.URL, Header: t.Header, Prefix: t.Prefix,
+		SecretEnv: t.SecretEnv, SecretFile: t.SecretFile, SecretCommand: t.SecretCommand}
+}
+
+// NeedsAuth は認証ヘッダを付けるかどうか (秘密の取り出し方が 1 つでもあれば true)。
+func (t ToolServer) NeedsAuth() bool {
+	return t.SecretEnv != "" || t.SecretFile != "" || len(t.SecretCommand) > 0
+}
+
+// HeaderName は秘密を載せるヘッダ名を返す。
+func (t ToolServer) HeaderName() string { return t.provider().HeaderName() }
+
+// AuthValue は認証ヘッダの値 (前置き込み) を返す。認証なしなら空文字列。
+// 秘密は host のプロセス内だけで使い、guest には渡さない。
+func (t ToolServer) AuthValue() (string, error) {
+	if !t.NeedsAuth() {
+		return "", nil
+	}
+	s, err := t.provider().Secret()
+	if err != nil {
+		return "", err
+	}
+	return t.provider().HeaderPrefix() + s, nil
 }
 
 func expandHome(p string) string {
