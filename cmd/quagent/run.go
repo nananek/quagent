@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,6 +56,10 @@ type runOpts struct {
 	Agent string
 	// PRApproval は PR の作成を承認コンソールで確認してから push する。
 	PRApproval bool
+	// AfterSession は対話セッションが終わったあと (VM を破棄する前) に呼ばれ、次の操作を
+	// 返す。next が空でなければ、そのエージェントで新しい VM を起動し直す。空なら終了。
+	// discardLogs が true なら、この VM の host 側のログを残さない。nil なら何も尋ねない。
+	AfterSession func(agent string) (next string, discardLogs bool)
 }
 
 func logf(format string, a ...any) {
@@ -109,7 +114,23 @@ func normalizePassthrough(in []string) ([]string, error) {
 	return access.NormalizeDomains(in)
 }
 
+// run は VM を 1 台起動してエージェントを動かす。セッションのあとに再起動が選ばれたら、
+// 選び直したエージェントで新しい VM を起動し直す (VM は毎回破棄する)。
 func run(o runOpts) error {
+	baseAllow := slices.Clone(o.Allow)
+	for {
+		var next string
+		cur := o
+		cur.Allow = slices.Clone(baseAllow)
+		if err := runOnce(cur, &next); err != nil || next == "" {
+			return err
+		}
+		o.Agent = next
+	}
+}
+
+// runOnce は VM を 1 台分動かして破棄する。再起動が選ばれたら *next にエージェント名を入れる。
+func runOnce(o runOpts, next *string) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -182,7 +203,14 @@ func run(o runOpts) error {
 		return err
 	}
 	defer lock.Close()
+	// セッション終了後の選択で「ログを残さない」にしたとき true にする
+	discardLogs := false
 	defer func() {
+		if discardLogs {
+			os.RemoveAll(work)
+			logf("VM を破棄した (ログは残さない)")
+			return
+		}
 		saveLogs(work)
 		os.RemoveAll(work)
 		logf("VM を破棄した (ログ: %s)", filepath.Join(paths.LogsDir(), filepath.Base(work)))
@@ -592,7 +620,14 @@ runcmd:
 
 	agent := g.interactiveArgv(paneCommand)
 	session := "quagent-" + filepath.Base(work)
-	return runTmux(session, agent, []string{self, consoleCommand, filepath.Join(work, "console.sock")}, con.Quit)
+	if err := runTmux(session, agent, []string{self, consoleCommand, filepath.Join(work, "console.sock")}, con.Quit); err != nil {
+		return err
+	}
+	// 端末が戻ったら、VM を破棄する前に再起動するか終了するか (ログを残すか) を尋ねる
+	if o.AfterSession != nil {
+		*next, discardLogs = o.AfterSession(o.Agent)
+	}
+	return nil
 }
 
 // finishTmp は VM の /work/.tmp を host の .tmp へ回収する。回収できなければ

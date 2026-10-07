@@ -34,7 +34,7 @@ make build
 - `internal/access` / `internal/mcpsrv` / `internal/console` … ネットワークアクセス申請・承認コンソール・MCP サーバー
 - `internal/authproxy` / `internal/guard` / `internal/tlsmitm` … LLM 認証プロキシ、ローカル LLM コンテンツガード、動的使い捨て CA
 - `internal/pr` … VM 内コミットの取り込みとホスト側での再署名・PR 作成
-- `internal/config` / `internal/paths` / `internal/tui` … 設定管理、パス解決、起動 TUI
+- `internal/config` / `internal/paths` / `internal/tui` … 設定管理、パス解決、起動・終了 TUI
 
 ## 守るべき設計の原則 (コーディング指針)
 
