@@ -302,3 +302,44 @@ func TestSettledAreForgotten(t *testing.T) {
 		t.Fatal("古い申請を忘れていない")
 	}
 }
+
+func TestRevokeClosesTempGrant(t *testing.T) {
+	m, _ := newTestManager(t)
+	if err := m.Preallow([]string{"tmp.example", "keep.example"}); err != nil {
+		t.Fatal(err)
+	}
+	// 放棄ではなく取り消し: session 扱いも外れる
+	if _, err := m.Release([]string{"tmp.example"}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := m.Submit([]string{"tmp.example"}, "再申請")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.result.Auto {
+		t.Fatal("Release 後も自動で通るはず (session が残る)")
+	}
+	revoked, err := m.Revoke([]string{"tmp.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Submit の自動許可で grant し直されているので取り消し対象になる
+	if len(revoked) != 1 || revoked[0] != "tmp.example" {
+		t.Fatalf("取り消しが効かない: %v", revoked)
+	}
+	if _, ok := m.Grants()["tmp.example"]; ok {
+		t.Fatal("grants に残っている")
+	}
+	// 取り消し後は通常の申請に戻る (確認なしでは通らない)
+	r2, err := m.Submit([]string{"tmp.example"}, "再申請")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r2.result.Auto {
+		t.Fatal("取り消し後も自動で通ってしまう")
+	}
+	// 触っていない方は残る
+	if _, ok := m.Grants()["keep.example"]; !ok {
+		t.Fatal("関係ない許可まで消えた")
+	}
+}
