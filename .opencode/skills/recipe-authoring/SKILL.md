@@ -101,6 +101,11 @@ hardened プロファイル (`no-multilib/systemd`) に切り替え、配布カ�
 
 - config fragment は `/etc/kernel/config.d/` に置く。`50-` は rootless docker 用、
   `90-quagent-hardening.config` は硬化用。
+- 使わないドライバは fragment で無効化する (攻撃面の削減)。たとえば
+  `CONFIG_ETHERNET=n` でイーサネットのベンダードライバがまとめて消える。
+  `=n` の行も `verify_config` が突き合わせる。
+- io_uring は 6.18 では CONFIG で無効化できない (`CONFIG_IO_URING=n` にしても
+  y に戻る)。sysctl の `kernel.io_uring_disabled=2` で止める。
 - カーネルの版でシンボルが改名・廃止される (`PAGE_TABLE_ISOLATION` は 6.8 で
   `MITIGATION_PAGE_TABLE_ISOLATION` になった等)。`merge_config` は警告するだけで
   無視するため、焼き込みの最後に `verify_config` が fragment の各設定行を、今
