@@ -207,13 +207,13 @@ func cmdRun(args []string) error {
 }
 
 // afterSession はエージェントのセッションが終わったあとに TUI で次の操作を尋ねる。
-// 再起動ならエージェント名を、終了なら空を返す。
-func afterSession(agent string) (next string, discardLogs bool) {
-	c := tui.AfterSession(agentNames(), agent)
+// 起動し直すならエージェント名を、終了なら空を返す (終了のときだけログの扱いも尋ねる)。
+func afterSession(current string, choices []string) (next string, discardLogs bool) {
+	c := tui.AfterSession(choices, current)
 	if c.Restart {
-		next = c.Agent
+		return c.Agent, false
 	}
-	return next, c.DiscardLogs
+	return "", c.DiscardLogs
 }
 
 func cmdAlways(args []string) error {

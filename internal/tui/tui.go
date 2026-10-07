@@ -142,15 +142,15 @@ func Run(agents []string) (Launch, error) {
 
 // AfterChoice はエージェントのセッションが終わったあとに選んだ次の操作。
 type AfterChoice struct {
-	// Restart は新しい VM でエージェント Agent を起動し直す。false なら終了する。
+	// Restart は同じ VM でエージェント Agent を起動し直す。false なら終了する。
 	Restart bool
 	Agent   string
-	// DiscardLogs はこの VM のログ (host.log など) を残さない。
+	// DiscardLogs はこの VM のログ (host.log など) を残さない (終了のときだけ意味を持つ)。
 	DiscardLogs bool
 }
 
-// AfterSession はセッション終了後に、エージェントを選び直して再起動するか終了するか、
-// ログを残すかを尋ねる。current は直前まで動かしていたエージェント (選択の初期値)。
+// AfterSession はセッション終了後に、エージェントを選び直して再起動するか終了するかを尋ね、
+// 終了のときだけログを残すかを尋ねる。current は直前まで動かしていたエージェント (選択の初期値)。
 // 中断 (Ctrl-C) されたときは、従来どおり「終了・ログを残す」として扱う。
 func AfterSession(agents []string, current string) AfterChoice {
 	action, agent, logs := "quit", current, "keep"
@@ -161,9 +161,9 @@ func AfterSession(agents []string, current string) AfterChoice {
 	err := newForm(
 		huh.NewGroup(
 			huh.NewNote().Title("エージェントが終了した").
-				Description("VM は、ここでの選択のあとに破棄される (VM の中の作業は残らない)。"),
+				Description("再起動は同じ VM のまま行う。終了すると VM は破棄される (VM の中の作業は残らない)。"),
 			huh.NewSelect[string]().Title("次の操作").Options(
-				huh.NewOption("エージェントを選び直して再起動 (新しい VM を起動する)", "restart"),
+				huh.NewOption("エージェントを選び直して再起動 (同じ VM のまま)", "restart"),
 				huh.NewOption("終了", "quit"),
 			).Value(&action),
 		),
@@ -177,7 +177,7 @@ func AfterSession(agents []string, current string) AfterChoice {
 					huh.NewOption("残す", "keep"),
 					huh.NewOption("残さない", "discard"),
 				).Value(&logs),
-		),
+		).WithHideFunc(func() bool { return action != "quit" }),
 	).Run()
 	if err != nil {
 		return AfterChoice{}
