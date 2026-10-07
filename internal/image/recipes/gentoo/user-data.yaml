@@ -147,10 +147,19 @@ write_files:
     content: |
       #!/bin/bash
       set -euxo pipefail
-      # 焼き込みの出力を serial (コンソールログ) にも流し、失敗したときはどの行で
-      # 落ちたかを残す (電源が切れる前に流れるよう、少し待ってから終わる)。
-      exec &> >(tee /dev/ttyS0)
-      trap 'rc=$?; set +e; echo "quagent-build: 失敗 (rc=$rc, line=$LINENO)"; sleep 10; exit $rc' ERR
+      # シリアル getty は ttyS0 を初期化し直すときに焼き込みの出力を消すことが
+      # あるので止める (実行時のイメージには残らない)。
+      systemctl stop serial-getty@ttyS0.service || true
+      # 焼き込みの出力はファイルに書き、別プロセスの tail が serial (コンソール
+      # ログ) へ流す。ttyS0 への書き込みが詰まっても焼き込みは止まらない。失敗
+      # したときはログの末尾を ttyS0 へ直接流し、どの行で落ちたかを残す (電源が
+      # 切れる前に流れるよう、少し待ってから終わる)。
+      LOG=/var/log/quagent-build.log
+      : > "$LOG"
+      tail -n +1 -F "$LOG" > /dev/ttyS0 2>/dev/null &
+      TAIL_PID=$!
+      exec &>> "$LOG"
+      trap 'rc=$?; set +e; echo "quagent-build: 失敗 (rc=$rc, line=$LINENO)"; timeout 15 tail -n 150 "$LOG" > /dev/ttyS0 || true; kill "$TAIL_PID" 2>/dev/null; sleep 10; rm -f "$LOG"; exit $rc' ERR
       U={{.User}}
       UID_=$(id -u "$U")
 
@@ -275,6 +284,10 @@ write_files:
       # 消した分をホスト側 (qcow2) からも解放して、できたイメージを小さくする。
       # discard 非対応の環境でも焼き込みは続ける。
       fstrim -av || true
+
+      # 焼き込みのログはイメージに残さない。
+      kill "$TAIL_PID" 2>/dev/null || true
+      rm -f "$LOG"
 
       echo {{.Marker}} > /dev/ttyS0
 runcmd:
