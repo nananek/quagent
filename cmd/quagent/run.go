@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/nananek/quagent/internal/access"
+	"github.com/nananek/quagent/internal/antigravity"
 	"github.com/nananek/quagent/internal/authproxy"
 	"github.com/nananek/quagent/internal/config"
 	"github.com/nananek/quagent/internal/console"
@@ -248,6 +249,31 @@ func run(o runOpts) error {
 	}, contentGuard)
 	if err != nil {
 		return err
+	}
+	// agy のサブスクリプションは providers ではなく host の agy の OAuth ログインを
+	// 使う。短命アクセストークンは認証プロキシが host 側で作り直して付ける。
+	if cfg.Agy.Subscription {
+		minter := antigravity.NewMinter()
+		if _, err := minter.Token(); err != nil {
+			return fmt.Errorf("agy のサブスクリプションを使えない: %w", err)
+		}
+		secret := func() (string, error) {
+			tok, err := minter.Token()
+			if err != nil {
+				return "", err
+			}
+			return "Bearer " + tok, nil
+		}
+		if err := authproxy.RegisterDynamic(svc.Mux, antigravity.ProviderID, antigravity.Upstream,
+			"Authorization", secret, antigravity.Allow, logger, func(s string) {
+				select {
+				case llmDenied <- s:
+				default:
+				}
+			}, contentGuard); err != nil {
+			return err
+		}
+		providers = append(providers, antigravity.ProviderID)
 	}
 	if len(providers) == 0 {
 		logf("認証プロキシの provider が未設定 (%s)。VM から LLM API は使えない", config.Path())

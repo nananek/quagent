@@ -115,6 +115,10 @@ type PR struct {
 type Agy struct {
 	// Model は既定のモデル (agy の --model 設定。空なら agy の既定)。
 	Model string `json:"model,omitempty"`
+	// Subscription が true なら、host の agy のサブスクリプション (OAuth ログイン)
+	// を認証プロキシ経由で使う。providers の gemini (Gemini API キー) は要らない。
+	// false なら Gemini API キーで使う (providers に gemini が要る)。
+	Subscription bool `json:"subscription,omitempty"`
 }
 
 // Opencode は VM 内の opencode の設定。

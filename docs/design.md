@@ -231,6 +231,10 @@ agy (Antigravity CLI) を使うときは `providers` に `gemini` を入れる (
 "agy": { "model": "gemini-3.8-flash-high" }
 ```
 
+サブスクリプション (host で agy にログイン済み) で使うときは、API キーの代わりに
+`"agy": { "subscription": true }` と書く (VM 内の agy は `CLOUD_CODE_URL` を
+プロキシに向け、host が OAuth の短命トークンを作り直して付ける)。
+
 `agy.model` で VM 内の agy の既定モデルを指定できる。
 
 provider ID は opencode の provider ID と揃える。秘密の取り出し方は
