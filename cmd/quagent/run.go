@@ -533,7 +533,8 @@ runcmd:
 			return con.AskPR(console.PRInfo{Branch: req.Branch, Base: req.Base, Title: req.Title, Body: req.Body})
 		}
 	}
-	svc.Mux.Handle(mcpsrv.Path, mcpsrv.Handler(mgr, publisher, contentGuard, con.Log))
+	svc.Mux.Handle(mcpsrv.Path, mcpsrv.Handler(mgr, publisher, contentGuard, con.Log,
+		toolServerTools(cfg, contentGuard, con.Log)...))
 
 	// 待機中の Ctrl-C でも後始末を通す。対話中の入力は tmux の端末が受けるので届かない。
 	sigs := make(chan os.Signal, 1)

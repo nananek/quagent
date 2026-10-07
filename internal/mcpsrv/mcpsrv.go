@@ -138,10 +138,14 @@ type PRPublisher interface {
 }
 
 // Handler は MCP サーバーの HTTP ハンドラを返す。g が nil でなければ、PR の
-// タイトル・本文も LLM プロキシと同じコンテンツガードに通す。
-func Handler(m *access.Manager, pub PRPublisher, g *guard.Guard, logf func(string)) http.Handler {
+// タイトル・本文も LLM プロキシと同じコンテンツガードに通す。extra は組み込みの
+// ツールに加えて登録するツール (OpenAPI のツールサーバーなど)。
+func Handler(m *access.Manager, pub PRPublisher, g *guard.Guard, logf func(string), extra ...func(*mcp.Server)) http.Handler {
 	s := mcp.NewServer(&mcp.Implementation{Name: "quagent", Version: "0.1.0"},
 		&mcp.ServerOptions{Instructions: instructions})
+	for _, register := range extra {
+		register(s)
+	}
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "request_network_access",
