@@ -16,18 +16,16 @@ import (
 // DefaultUserAgent は User-Agent の既定の固定値。
 const DefaultUserAgent = "quagent"
 
-// 既定で転送を許すヘッダ。末尾が "*" のものは前方一致。内容の記述 (Content-*)、
-// 条件付き取得、認証、WebSocket / gRPC のハンドシェイクなど、プロトコルが成り立つ
-// のに要るものだけを挙げる。接続ごとのヘッダは別に落としてあるので、Connection と
-// Upgrade は Upgrade の要求のときだけ残っている。
+// 既定で転送を許すヘッダ。HTTP の基本操作 (取得、ダウンロード、レジューム、
+// リクエストボディの送信) に最低限要るものだけに絞る。任意の文字列を載せて情報持ち出しの
+// 経路になりうる Authorization、Cache-Control、If-Match/If-None-Match、
+// 拡張ヘッダ (Grpc-*)、素通しトンネル化を招く WebSocket (Upgrade / Sec-WebSocket-*)
+// などは既定で落とす。これらが必要な宛先は設定 (hosts / allow) で個別に緩和する。
 var defaultAllow = []string{
 	"Accept", "Accept-Encoding",
-	"Authorization",
-	"Cache-Control",
-	"Content-Encoding", "Content-Length", "Content-Type",
-	"If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since", "If-Range",
+	"Content-Length", "Content-Type",
 	"Range",
-	"Connection", "Upgrade", "Sec-WebSocket-*", "Te", "Grpc-*",
+	"If-Modified-Since",
 }
 
 // HostRule は行き先ごとの緩和。
@@ -105,23 +103,25 @@ func (r *Rules) add(names []string) {
 	}
 }
 
-// Apply は h を規則どおりに絞る (h を直接書き換える)。許可に無いヘッダは落とし、
-// User-Agent は固定値にする (KeepUserAgent の行き先では元の値のまま)。落としたヘッダ名
-// を返す。User-Agent の置き換えは落としたものに数えない。
+// Apply は h を規則どおりに絞る (h を直接書き換える)。許可に無いヘッダ、または
+// 値が構文規則に合致しないヘッダは落とし、User-Agent は固定値にする (KeepUserAgent
+// の行き先では元の値のまま)。落としたヘッダ名を返す。User-Agent の置き換えは落とした
+// ものに数えない。
 func (r Rules) Apply(h http.Header) (dropped []string) {
 	ua := h.Values("User-Agent")
-	for k := range h {
+	for k, vs := range h {
 		if k == "User-Agent" {
 			continue
 		}
-		if !r.allowed(k) {
+		canon := http.CanonicalHeaderKey(k)
+		if !r.allowed(k) || !validateHeaderValues(canon, vs) {
 			dropped = append(dropped, k)
 			delete(h, k)
 		}
 	}
 	h.Del("User-Agent")
 	switch {
-	case r.keepUserAgent && len(ua) > 0:
+	case r.keepUserAgent && len(ua) > 0 && validateGenericHeaderValue(ua[0]):
 		h["User-Agent"] = ua
 	case r.keepUserAgent:
 		// エージェントが付けていないなら付けない。Go の転送は未設定だと自前の既定値
