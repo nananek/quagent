@@ -288,6 +288,21 @@ func run(o runOpts) error {
 		}
 		cfg.Agy.Egress = egress
 		agyEgress = &agyEgressController{egress: egress}
+		// header_policy が有効でも、起動直後のユーザー情報確認 (Authorization 付き)
+		// だけは TLS 終端の対象外にして素通しする。終端すると Authorization が
+		// 落とされて userinfo が 401 になり、agy が起動できないため。
+		if headersOn {
+			seen := map[string]bool{}
+			for _, p := range passthrough {
+				seen[strings.ToLower(p)] = true
+			}
+			for _, h := range egress {
+				if !seen[strings.ToLower(h)] {
+					passthrough = append(passthrough, h)
+					seen[strings.ToLower(h)] = true
+				}
+			}
+		}
 		secret := func() (string, error) {
 			tok, err := minter.Token()
 			if err != nil {
