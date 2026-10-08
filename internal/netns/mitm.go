@@ -75,6 +75,14 @@ func (p *webProxy) serveH2Stream(w http.ResponseWriter, r *http.Request, tr *htt
 	}
 	normalizeRequest(r, name, true)
 	removeHopHeaders(r.Header)
+	if p.headers != nil {
+		rules := p.headers.Rules(name)
+		if code, reason := rules.CheckRequest(r); code != 0 {
+			p.block(fmt.Sprintf("%s %s (%s)", r.Method, name, reason))
+			http.Error(w, "quagent: "+reason, code)
+			return
+		}
+	}
 	p.filter(r, name)
 	out, err := tr.RoundTrip(r)
 	if err != nil {
@@ -129,6 +137,14 @@ func (p *webProxy) serveHTTP1(client net.Conn, br *bufio.Reader, dst, name strin
 		// 外す。Upgrade の要求はハンドシェイクに要るので落とさない。
 		if !upgrade {
 			removeHopHeaders(req.Header)
+		}
+		if p.headers != nil {
+			rules := p.headers.Rules(host)
+			if code, reason := rules.CheckRequest(req); code != 0 {
+				p.block(fmt.Sprintf("%s %s (%s)", req.Method, host, reason))
+				_ = writeHTTP1Error(client, code, "quagent: "+reason)
+				return
+			}
 		}
 		// Expect: 100-continue のクライアントは本文を待っているので、点検で本文を
 		// 読む前に続行を伝える。応答済みなので転送するときは Expect を落とす。
@@ -318,4 +334,27 @@ func removeHopHeaders(h http.Header) {
 		"Proxy-Authenticate", "Proxy-Authorization", "Te", "Trailer", "Upgrade"} {
 		h.Del(k)
 	}
+}
+
+// writeHTTP1Error はクライアントへエラー応答を書き込み、接続を閉じる。
+func writeHTTP1Error(w io.Writer, code int, msg string) error {
+	statusText := http.StatusText(code)
+	if statusText == "" {
+		statusText = "Error"
+	}
+	body := msg + "\n"
+	resp := &http.Response{
+		Status:        fmt.Sprintf("%d %s", code, statusText),
+		StatusCode:    code,
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        make(http.Header),
+		Close:         true,
+		Body:          io.NopCloser(strings.NewReader(body)),
+		ContentLength: int64(len(body)),
+	}
+	resp.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	resp.Header.Set("Connection", "close")
+	return resp.Write(w)
 }

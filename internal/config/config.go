@@ -34,7 +34,7 @@ type Config struct {
 	PR PR `json:"pr"`
 	// Clipboard は VM が OSC 52 で書き込もうとした中身 (承認したもの) の入れ方。
 	Clipboard Clipboard `json:"clipboard"`
-	// HeaderPolicy は VM から外へ出るリクエストのヘッダを絞り、User-Agent を固定する
+	// HeaderPolicy は VM から外へ出るリクエストのヘッダや本文を絞り、User-Agent を固定する
 	// 設定 (LLM 認証プロキシは対象外。プロバイダごとに必要なヘッダがあるため)。
 	// 有効にすると HTTPS を終端して平文に戻す (使い捨て CA を使う)。未指定なら何もしない。
 	HeaderPolicy *headerpolicy.Policy `json:"header_policy,omitempty"`
