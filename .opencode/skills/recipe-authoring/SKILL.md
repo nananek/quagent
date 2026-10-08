@@ -34,10 +34,9 @@ Gentoo などのクラウドイメージはファイル名にビルド日時タ�
 ## ダウンロードの検証
 
 - 取得したクラウドイメージは、配布元のチェックサム（`checksum_url`、必須）と照合・検証されます。
-- 署名が設定されている場合（`signature_url` およびレシピディレクトリ内の公開鍵 `signing_key`）、`gpgv` を用いて指定の公開鍵のみで署名を検証します（ユーザー環境のキーリングは参照しません）。
+- 署名が設定されている場合（`signature_url` およびレシピディレクトリ内の公開鍵 `signing_key`）、`gpgv` を用いて指定の公開鍵のみで署名を検証します（ユーザー環境のキーリングは参照しません）。組み込みレシピではすべて署名検証を行います:
   - Arch Linux: arch-boxes の署名鍵（arch-boxes の README に記載の鍵）。
   - Gentoo: Release Engineering の署名鍵（`gentoo-release.asc`。weekly key の署名 subkey）でイメージの分離署名を検証し、チェックサムは配布元のクリア署名付き `.sha256` を使用します。
-  - Debian: 配布元が個別署名を提供していないため、cloud.debian.org から TLS 経由で取得したチェックサムとの照合のみ行います。
 - レシピに同梱された署名鍵の有効期限は GitHub Actions ワークフロー（`signing-keys`）により毎週自動検証され、有効期限まで 60 日を切った場合は自動で issue が起票されます（`.github/scripts/check-signing-keys.sh`）。
 
 ## 起動ファームウェア (firmware)

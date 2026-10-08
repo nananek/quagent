@@ -24,7 +24,7 @@ import (
 const usage = `usage:
   quagent                                      TUI (VM の起動設定とベースイメージの管理)
   quagent image recipes                        使えるレシピ (OS) の一覧
-  quagent image build [--refresh|--incremental] [RECIPE]  ベースイメージを焼く/差分更新する (既定: debian)
+  quagent image build [--refresh|--incremental] [RECIPE]  ベースイメージを焼く/差分更新する (既定: arch)
   quagent image ls                             焼いたベースイメージの一覧
   quagent image rm IMAGE                       ベースイメージを消す
   quagent always ls | rm DOMAIN...              「以後確認しない」ドメインの一覧・取り消し

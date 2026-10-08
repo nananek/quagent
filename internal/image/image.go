@@ -38,7 +38,7 @@ const (
 	diskSize      = "40G"
 	buildOKMarker = "QUAGENT_BUILD_OK"
 	// DefaultRecipe は特に指定がないときのレシピ。
-	DefaultRecipe = "debian"
+	DefaultRecipe = "arch"
 )
 
 // Recipe は 1 つの OS のベースイメージの作り方。
@@ -115,7 +115,7 @@ func readRecipe(fsys fs.FS, name, source string) (Recipe, error) {
 
 // recipeOrder は一覧に出すときの優先順。Gentoo はビルドが重いが、その分だけ
 // 硬化を一番強くできるので先頭に出す。ここに無いものは後ろに名前順で並べる。
-var recipeOrder = []string{"gentoo", "arch", "debian"}
+var recipeOrder = []string{"gentoo", "arch"}
 
 // recipeRank は一覧の並び順 (小さいほど前)。recipeOrder に無ければ同じ扱いにする。
 func recipeRank(name string) int {
@@ -127,7 +127,7 @@ func recipeRank(name string) int {
 	return len(recipeOrder)
 }
 
-// Recipes は使えるレシピを、優先順 (Gentoo/Arch/Debian、その他は名前順) で返す。
+// Recipes は使えるレシピを、優先順 (Gentoo/Arch、その他は名前順) で返す。
 func Recipes() ([]Recipe, error) {
 	byName := map[string]Recipe{}
 	entries, err := fs.ReadDir(builtin, "recipes")

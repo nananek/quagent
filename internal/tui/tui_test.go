@@ -10,7 +10,7 @@ import (
 	"github.com/nananek/quagent/internal/paths"
 )
 
-// 起動画面のベースイメージは Gentoo/Arch/Debian の順で、焼いてあるものは色を
+// 起動画面のベースイメージは Gentoo/Arch の順で、焼いてあるものは色を
 // 付けず、未ビルドのものはグレー (端末の色) にする。
 func TestRecipeOptions(t *testing.T) {
 	t.Setenv("CLICOLOR_FORCE", "1") // 擬似端末でなくても色を出す
@@ -33,7 +33,7 @@ func TestRecipeOptions(t *testing.T) {
 	for _, o := range opts {
 		names = append(names, o.Value)
 	}
-	if got := strings.Join(names, ","); got != "gentoo,arch,debian" {
+	if got := strings.Join(names, ","); got != "gentoo,arch" {
 		t.Fatalf("並び: got %q", got)
 	}
 	if strings.Contains(opts[0].Key, "\x1b[") {
