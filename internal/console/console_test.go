@@ -237,4 +237,3 @@ func TestServerBacklog(t *testing.T) {
 		t.Errorf("expected backlog count 1, got %d", backlogCount)
 	}
 }
-

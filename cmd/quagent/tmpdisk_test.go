@@ -110,4 +110,3 @@ func TestPrepareTmp(t *testing.T) {
 		t.Errorf("img stat failed or invalid size: %v, size=%d", err, fi.Size())
 	}
 }
-

@@ -131,4 +131,3 @@ func TestCappedBuffer(t *testing.T) {
 		t.Errorf("content = %q, want '1234567890'", b.String())
 	}
 }
-

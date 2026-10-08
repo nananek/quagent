@@ -103,4 +103,3 @@ func TestAddHostfwd(t *testing.T) {
 		t.Fatalf("addHostfwd failed: %v", err)
 	}
 }
-

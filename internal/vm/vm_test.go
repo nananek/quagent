@@ -166,4 +166,3 @@ func TestHostDNS(t *testing.T) {
 	// 見つからなければエラーを返す。パニックしないことを確認。
 	_, _ = HostDNS()
 }
-

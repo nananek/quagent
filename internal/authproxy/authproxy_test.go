@@ -153,4 +153,3 @@ func TestRegisterDynamicBadUpstream(t *testing.T) {
 		t.Fatal("expected error for empty host upstream")
 	}
 }
-

@@ -434,6 +434,3 @@ func TestHandleHTTP(t *testing.T) {
 		t.Error("expected dial to be called for allowed Host")
 	}
 }
-
-
-

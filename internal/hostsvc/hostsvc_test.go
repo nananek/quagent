@@ -218,4 +218,3 @@ func TestReleaseConnCloseOnce(t *testing.T) {
 		t.Errorf("expected release to be called exactly once, got %d", releases)
 	}
 }
-

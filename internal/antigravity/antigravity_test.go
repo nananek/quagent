@@ -211,4 +211,3 @@ func TestTokenFileAndRefreshToken(t *testing.T) {
 		t.Fatalf("refreshToken() = %q, %v; want rt-xyz", rt, err)
 	}
 }
-

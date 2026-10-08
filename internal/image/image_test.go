@@ -472,4 +472,3 @@ func TestVerifyChecksum(t *testing.T) {
 		t.Fatal("expected error on mismatched hash")
 	}
 }
-

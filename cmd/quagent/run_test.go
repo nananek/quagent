@@ -130,8 +130,25 @@ func TestRepoRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("repoRoot(.) error: %v", err)
 	}
-	if !strings.HasSuffix(root, "work") {
-		t.Errorf("repoRoot = %q, expected to end with work", root)
+	if !filepath.IsAbs(root) {
+		t.Errorf("repoRoot = %q, want absolute path", root)
+	}
+	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
+		t.Errorf("repoRoot = %q is not a directory: %v", root, err)
+	}
+	if fi, err := os.Stat(filepath.Join(root, ".git")); err != nil {
+		// worktree の場合は .git がファイルになることもあるので存在だけ確認する。
+		t.Errorf("repoRoot = %q has no .git: %v", root, err)
+	} else if fi.IsDir() || fi.Mode().IsRegular() {
+		// ok: .git がディレクトリ (通常clone) かファイル (worktree) のいずれか。
+	} else {
+		t.Errorf("repoRoot = %q has unexpected .git: %v", root, fi.Mode())
+	}
+
+	// git 管理外のディレクトリではエラーを返す。
+	tmp := t.TempDir()
+	if _, err := repoRoot(tmp); err == nil {
+		t.Fatal("expected error for non-git directory")
 	}
 
 	if _, err := repoRoot("/nonexistent/directory/quagent"); err == nil {

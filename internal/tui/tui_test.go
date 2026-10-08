@@ -125,4 +125,3 @@ func TestTheme(t *testing.T) {
 		t.Fatal("theme() returned nil")
 	}
 }
-

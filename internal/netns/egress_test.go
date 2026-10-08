@@ -180,4 +180,3 @@ func TestReadControl(t *testing.T) {
 		t.Fatal("expected error on invalid json")
 	}
 }
-
