@@ -36,6 +36,10 @@ type HostRule struct {
 	UserAgent string `json:"user_agent,omitempty"`
 	// KeepUserAgent が true なら User-Agent を固定せずエージェントの値を通す。
 	KeepUserAgent bool `json:"keep_user_agent,omitempty"`
+	// AllowRequestBody が true なら、全体の DenyRequestBody が有効でもこの行き先ではボディ送信を許可する。
+	AllowRequestBody bool `json:"allow_request_body,omitempty"`
+	// AllowedMethods はその行き先で追加で許可する HTTP メソッド (例: ["POST", "PUT"])。
+	AllowedMethods []string `json:"allowed_methods,omitempty"`
 }
 
 // Policy はヘッダを絞る設定。ゼロ値は無効 (何も変えない)。
@@ -54,6 +58,10 @@ type Policy struct {
 	// Hosts は行き先ごとの緩和。キーは "example.com" (完全一致) か
 	// "*.example.com" (サブドメイン)。
 	Hosts map[string]HostRule `json:"hosts,omitempty"`
+	// DenyRequestBody が true なら、リクエストボディの送信を拒否する (Content-Length > 0 や chunked を遮断)。
+	DenyRequestBody bool `json:"deny_request_body,omitempty"`
+	// AllowedMethods は許可する HTTP メソッド (例: ["GET", "HEAD"])。指定がある場合、これらに含まれないメソッドは拒否する。
+	AllowedMethods []string `json:"allowed_methods,omitempty"`
 }
 
 // FixedUserAgent は固定する User-Agent (行き先ごとの差し替えを除く) を返す。
@@ -70,13 +78,26 @@ type Rules struct {
 	prefixes      []string
 	userAgent     string
 	keepUserAgent bool
+	denyBody      bool
+	methods       map[string]bool
 }
 
 // Rules は host に適用する規則を返す (行き先ごとの緩和は足し合わせる)。
 func (p *Policy) Rules(host string) Rules {
-	r := Rules{exact: map[string]bool{}, userAgent: p.FixedUserAgent()}
+	r := Rules{
+		exact:     map[string]bool{},
+		userAgent: p.FixedUserAgent(),
+		denyBody:  p.DenyRequestBody,
+		methods:   map[string]bool{},
+	}
 	r.add(defaultAllow)
 	r.add(p.Allow)
+	for _, m := range p.AllowedMethods {
+		m = strings.ToUpper(strings.TrimSpace(m))
+		if m != "" {
+			r.methods[m] = true
+		}
+	}
 	for pattern, hr := range p.Hosts {
 		if !matchHost(pattern, host) {
 			continue
@@ -87,6 +108,15 @@ func (p *Policy) Rules(host string) Rules {
 		}
 		if hr.KeepUserAgent {
 			r.keepUserAgent = true
+		}
+		if hr.AllowRequestBody {
+			r.denyBody = false
+		}
+		for _, m := range hr.AllowedMethods {
+			m = strings.ToUpper(strings.TrimSpace(m))
+			if m != "" {
+				r.methods[m] = true
+			}
 		}
 	}
 	return r
@@ -154,4 +184,61 @@ func matchHost(pattern, host string) bool {
 		return strings.HasSuffix(host, "."+rest)
 	}
 	return pattern == host
+}
+
+// DenyRequestBody はリクエストボディを拒否すべきかを返す。
+func (r Rules) DenyRequestBody() bool {
+	return r.denyBody
+}
+
+// MethodAllowed はメソッド m が許可されているかを返す。
+// 許可リストが未設定 (空) の場合はすべてのメソッドを許可する。
+func (r Rules) MethodAllowed(m string) bool {
+	if len(r.methods) == 0 {
+		return true
+	}
+	return r.methods[strings.ToUpper(strings.TrimSpace(m))]
+}
+
+// CheckRequest はリクエストのメソッドとボディを点検する。
+// 規則に反している場合は HTTP ステータスコード (405, 400 など) とブロック理由を返す。
+// 通してよければ 0, "" を返す。
+func (r Rules) CheckRequest(req *http.Request) (statusCode int, reason string) {
+	if req == nil {
+		return 0, ""
+	}
+	if !r.MethodAllowed(req.Method) {
+		return http.StatusMethodNotAllowed, "メソッド不許可"
+	}
+	if r.denyBody && HasRequestBody(req) {
+		return http.StatusBadRequest, "リクエストボディ不許可"
+	}
+	return 0, ""
+}
+
+// HasRequestBody はリクエストに本文 (ボディ) が含まれているかを判定する。
+// Content-Length > 0、chunked 転送、または未定長 (-1) の本文ストリームがある場合は true を返す。
+func HasRequestBody(req *http.Request) bool {
+	if req == nil {
+		return false
+	}
+	if req.ContentLength > 0 {
+		return true
+	}
+	if req.ContentLength < 0 {
+		return true
+	}
+	for _, te := range req.TransferEncoding {
+		if strings.EqualFold(strings.TrimSpace(te), "chunked") {
+			return true
+		}
+	}
+	if req.Header != nil {
+		for _, v := range req.Header["Transfer-Encoding"] {
+			if strings.Contains(strings.ToLower(v), "chunked") {
+				return true
+			}
+		}
+	}
+	return false
 }

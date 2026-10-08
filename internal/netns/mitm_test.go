@@ -473,3 +473,403 @@ func TestPlainHTTPDisallowedHost(t *testing.T) {
 		t.Fatal("拒否が通知されていない")
 	}
 }
+
+func TestMITMDenyRequestBody(t *testing.T) {
+	upCA, _ := tlsmitm.NewCA()
+	var seen seenHeaders
+	addr, roots := testUpstream(t, upCA, "allowed.example", seen.handler("ok"))
+	proxyCA, _ := tlsmitm.NewCA()
+	policy := newPolicy()
+	policy.DenyRequestBody = true
+
+	var mu sync.Mutex
+	var blocked []string
+	p := &webProxy{
+		allowed:       func(name string) bool { return name == "allowed.example" },
+		mitm:          proxyCA,
+		headers:       policy,
+		upstreamRoots: roots,
+		sem:           make(chan struct{}, 8),
+		blocked: func(reason string) {
+			mu.Lock()
+			blocked = append(blocked, reason)
+			mu.Unlock()
+		},
+		dial: func(network, addr string, mark int) (net.Conn, error) {
+			return net.Dial(network, addr)
+		},
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go p.terminate(c, addr, "allowed.example")
+		}
+	}()
+	proxyAddr := ln.Addr().String()
+	client := &http.Client{Timeout: 10 * time.Second, Transport: dialProxy(t, proxyAddr, proxyCA)}
+
+	// 1. GET without body should succeed
+	resp, err := client.Get("https://allowed.example/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200", resp.StatusCode)
+	}
+
+	// 2. POST with body should be rejected with 400
+	req, _ := http.NewRequest("POST", "https://allowed.example/", strings.NewReader("secret payload"))
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST status = %d, want 400", resp.StatusCode)
+	}
+
+	// 3. GET with body should be rejected with 400
+	req, _ = http.NewRequest("GET", "https://allowed.example/", strings.NewReader("exfil"))
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("GET with body status = %d, want 400", resp.StatusCode)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(blocked) != 2 {
+		t.Fatalf("blocked count = %d, want 2 (%v)", len(blocked), blocked)
+	}
+}
+
+func TestMITMAllowedMethods(t *testing.T) {
+	upCA, _ := tlsmitm.NewCA()
+	var seen seenHeaders
+	addr, roots := testUpstream(t, upCA, "allowed.example", seen.handler("ok"))
+	proxyCA, _ := tlsmitm.NewCA()
+	policy := newPolicy()
+	policy.AllowedMethods = []string{"GET", "HEAD"}
+	proxyAddr := testProxy(t, proxyCA, addr, roots, policy)
+	client := &http.Client{Timeout: 10 * time.Second, Transport: dialProxy(t, proxyAddr, proxyCA)}
+
+	// GET -> 200
+	resp, err := client.Get("https://allowed.example/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200", resp.StatusCode)
+	}
+
+	// POST without body -> 405
+	req, _ := http.NewRequest("POST", "https://allowed.example/", nil)
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("POST status = %d, want 405", resp.StatusCode)
+	}
+}
+
+func TestMITMHostRelaxationBodyAndMethod(t *testing.T) {
+	upCA, _ := tlsmitm.NewCA()
+	var seen seenHeaders
+	addr, roots := testUpstream(t, upCA, "allowed.example", seen.handler("ok"))
+	proxyCA, _ := tlsmitm.NewCA()
+	policy := newPolicy()
+	policy.DenyRequestBody = true
+	policy.AllowedMethods = []string{"GET"}
+	policy.Hosts = map[string]headerpolicy.HostRule{
+		"allowed.example": {
+			AllowRequestBody: true,
+			AllowedMethods:   []string{"POST"},
+		},
+	}
+	proxyAddr := testProxy(t, proxyCA, addr, roots, policy)
+	client := &http.Client{Timeout: 10 * time.Second, Transport: dialProxy(t, proxyAddr, proxyCA)}
+
+	// POST with body to relaxed host should succeed (200)
+	req, _ := http.NewRequest("POST", "https://allowed.example/", strings.NewReader("payload"))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestMITMHTTP2DenyRequestBody(t *testing.T) {
+	upCA, _ := tlsmitm.NewCA()
+	var seen seenHeaders
+	addr, roots := testUpstreamH2(t, upCA, "allowed.example", seen.handler("ok"))
+	proxyCA, _ := tlsmitm.NewCA()
+	policy := newPolicy()
+	policy.DenyRequestBody = true
+	proxyAddr := testProxy(t, proxyCA, addr, roots, policy)
+	client := &http.Client{Timeout: 10 * time.Second, Transport: dialProxyH2(t, proxyAddr, proxyCA)}
+
+	// GET -> 200
+	resp, err := client.Get("https://allowed.example/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200", resp.StatusCode)
+	}
+
+	// POST with body -> 400
+	req, _ := http.NewRequest("POST", "https://allowed.example/", strings.NewReader("secret"))
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestPlainHTTPDenyRequestBody(t *testing.T) {
+	upLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "ok")
+	})}
+	go srv.Serve(upLn)
+	t.Cleanup(func() { _ = srv.Close() })
+
+	policy := newPolicy()
+	policy.DenyRequestBody = true
+	p := &webProxy{
+		allowed: func(name string) bool { return name == "allowed.example" },
+		headers: policy,
+		sem:     make(chan struct{}, 8),
+		dial:    func(network, addr string, mark int) (net.Conn, error) { return net.Dial(network, upLn.Addr().String()) },
+	}
+	proxyAddr := testProxyFn(t, func(c net.Conn) {
+		p.serveHTTP1(c, bufio.NewReader(c), "203.0.113.9:80", "", false)
+	})
+
+	// POST with body -> 400
+	c, err := net.Dial("tcp", proxyAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	fmt.Fprint(c, "POST / HTTP/1.1\r\nHost: allowed.example\r\nContent-Length: 4\r\n\r\ndata")
+	resp, err := http.ReadResponse(bufio.NewReader(c), &http.Request{Method: "POST"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("平文 POST status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestMITMExpect100ContinueRejectedWithoutContinue(t *testing.T) {
+	upCA, _ := tlsmitm.NewCA()
+	var seen seenHeaders
+	addr, roots := testUpstream(t, upCA, "allowed.example", seen.handler("ok"))
+	proxyCA, _ := tlsmitm.NewCA()
+	policy := newPolicy()
+	policy.DenyRequestBody = true
+	proxyAddr := testProxy(t, proxyCA, addr, roots, policy)
+
+	raw, err := net.Dial("tcp", proxyAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	tc := tls.Client(raw, &tls.Config{RootCAs: poolFor(t, proxyCA), ServerName: "allowed.example"})
+	if err := tc.Handshake(); err != nil {
+		t.Fatal(err)
+	}
+	_ = tc.SetDeadline(time.Now().Add(5 * time.Second))
+
+	// Send POST with Expect: 100-continue and body declared
+	fmt.Fprint(tc, "POST / HTTP/1.1\r\nHost: allowed.example\r\nExpect: 100-continue\r\nContent-Length: 100\r\n\r\n")
+
+	br := bufio.NewReader(tc)
+	resp, err := http.ReadResponse(br, &http.Request{Method: "POST"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (Expect: 100-continue with body should be rejected without 100 Continue)", resp.StatusCode)
+	}
+}
+
+func TestMITMChunkedRejected(t *testing.T) {
+	upCA, _ := tlsmitm.NewCA()
+	var seen seenHeaders
+	addr, roots := testUpstream(t, upCA, "allowed.example", seen.handler("ok"))
+	proxyCA, _ := tlsmitm.NewCA()
+	policy := newPolicy()
+	policy.DenyRequestBody = true
+	proxyAddr := testProxy(t, proxyCA, addr, roots, policy)
+
+	raw, err := net.Dial("tcp", proxyAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	tc := tls.Client(raw, &tls.Config{RootCAs: poolFor(t, proxyCA), ServerName: "allowed.example"})
+	if err := tc.Handshake(); err != nil {
+		t.Fatal(err)
+	}
+	_ = tc.SetDeadline(time.Now().Add(5 * time.Second))
+
+	// Send raw chunked body
+	fmt.Fprint(tc, "POST / HTTP/1.1\r\nHost: allowed.example\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n")
+
+	br := bufio.NewReader(tc)
+	resp, err := http.ReadResponse(br, &http.Request{Method: "POST"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("chunked status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestMITMKeepAliveThenBlocked(t *testing.T) {
+	upCA, _ := tlsmitm.NewCA()
+	var seen seenHeaders
+	addr, roots := testUpstream(t, upCA, "allowed.example", seen.handler("ok"))
+	proxyCA, _ := tlsmitm.NewCA()
+	policy := newPolicy()
+	policy.DenyRequestBody = true
+	proxyAddr := testProxy(t, proxyCA, addr, roots, policy)
+
+	raw, err := net.Dial("tcp", proxyAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	tc := tls.Client(raw, &tls.Config{RootCAs: poolFor(t, proxyCA), ServerName: "allowed.example"})
+	if err := tc.Handshake(); err != nil {
+		t.Fatal(err)
+	}
+	_ = tc.SetDeadline(time.Now().Add(5 * time.Second))
+
+	br := bufio.NewReader(tc)
+
+	// 1st request: GET without body -> 200
+	fmt.Fprint(tc, "GET / HTTP/1.1\r\nHost: allowed.example\r\n\r\n")
+	resp1, err := http.ReadResponse(br, &http.Request{Method: "GET"})
+	if err != nil {
+		t.Fatalf("req 1 failed: %v", err)
+	}
+	io.Copy(io.Discard, resp1.Body)
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("req 1 status = %d, want 200", resp1.StatusCode)
+	}
+
+	// 2nd request on the same connection: POST with body -> 400
+	fmt.Fprint(tc, "POST / HTTP/1.1\r\nHost: allowed.example\r\nContent-Length: 4\r\n\r\ndata")
+	resp2, err := http.ReadResponse(br, &http.Request{Method: "POST"})
+	if err != nil {
+		t.Fatalf("req 2 failed: %v", err)
+	}
+	io.Copy(io.Discard, resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusBadRequest {
+		t.Fatalf("req 2 status = %d, want 400", resp2.StatusCode)
+	}
+
+	// Connection should now be closed by the proxy (Connection: close)
+	buf := make([]byte, 1)
+	n, _ := tc.Read(buf)
+	if n > 0 {
+		t.Fatalf("connection was not closed after blocked request")
+	}
+}
+
+func TestMITMWildcardHostRelaxation(t *testing.T) {
+	upCA, _ := tlsmitm.NewCA()
+	var seen seenHeaders
+	addr, roots := testUpstream(t, upCA, "sub.pkg.example", seen.handler("ok"))
+	proxyCA, _ := tlsmitm.NewCA()
+	policy := newPolicy()
+	policy.DenyRequestBody = true
+	policy.AllowedMethods = []string{"GET"}
+	policy.Hosts = map[string]headerpolicy.HostRule{
+		"*.pkg.example": {
+			AllowRequestBody: true,
+			AllowedMethods:   []string{"PUT"},
+		},
+	}
+
+	p := &webProxy{
+		allowed:       func(name string) bool { return true },
+		mitm:          proxyCA,
+		headers:       policy,
+		upstreamRoots: roots,
+		sem:           make(chan struct{}, 8),
+		dial: func(network, addr string, mark int) (net.Conn, error) {
+			return net.Dial(network, addr)
+		},
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go p.terminate(c, addr, "sub.pkg.example")
+		}
+	}()
+	proxyAddr := ln.Addr().String()
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: poolFor(t, proxyCA), ServerName: "sub.pkg.example"},
+			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+				return net.Dial("tcp", proxyAddr)
+			},
+		},
+	}
+
+	// PUT with body to sub.pkg.example should succeed (200)
+	req, _ := http.NewRequest("PUT", "https://sub.pkg.example/", strings.NewReader("package data"))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200", resp.StatusCode)
+	}
+}

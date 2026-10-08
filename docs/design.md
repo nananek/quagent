@@ -154,24 +154,28 @@ provider ID は opencode の provider ID と一致させます。機密情報の
 
 ## ヘッダの制限 (header_policy)
 
-許可済みドメイン宛ての通信では、ヘッダ（User-Agent へのメールアドレスの埋め込み、Referer、Cookie、独自の `X-*` など）も持ち出しの経路になります。`header_policy` を有効にすると、VM から外へ出る HTTP リクエストのヘッダを許可リスト方式で絞り、User-Agent を固定します（既定では無効）。
+許可済みドメイン宛ての通信では、ヘッダ（User-Agent へのメールアドレスの埋め込み、Referer、Cookie、独自の `X-*` など）やリクエストボディ（ファイルアップロードや POST ペイロード）も持ち出しの経路になります。`header_policy` を有効にすると、VM から外へ出る HTTP リクエストのヘッダを許可リスト方式で絞り、User-Agent を固定します（既定では無効）。さらに、`deny_request_body` や `allowed_methods` によってリクエストボディの送信や HTTP メソッドを制限できます。
 
 ```json
 "header_policy": {
   "enabled": true,
   "user_agent": "quagent",
   "allow": ["Accept-Language"],
+  "deny_request_body": true,
+  "allowed_methods": ["GET", "HEAD"],
   "passthrough_https": ["*.pinned.example"],
   "hosts": {
     "*.example.com": { "allow": ["X-Example-*"], "user_agent": "example-client" },
+    "registry.example.org": { "allow_request_body": true, "allowed_methods": ["POST", "PUT"] },
     "legacy.example.org": { "keep_user_agent": true }
   }
 }
 ```
 
 - **残すヘッダと構文バリデーション:** `Accept` / `Accept-Encoding` / `Content-Length` / `Content-Type` / `Range` / `If-Modified-Since` のみです。それ以外（Cookie、Referer、Authorization、Cache-Control、If-Match / If-None-Match、WebSocket や gRPC、独自の `X-*` など）は転送前に落とします。また、残すヘッダについても値の厳格な構文バリデーションを実施します（RFC 1123 日時形式、数字のみの Content-Length、`bytes=` 範囲形式、既知の圧縮アルゴリズム名、許可されたパラメータ `charset`/`boundary`/`q` のみ、制御文字の混入防止など）。不正な値や余計なパラメータが埋め込まれたヘッダは落とされます。`User-Agent` は常に固定値（`user_agent`、既定 `quagent`）で置き換えます。認証（Docker Hub など）や WebSocket、gRPC などが必要な宛先は `hosts` または `allow` で個別に緩和します。
-- **緩和:** `allow` は全宛先に対して、`hosts` は宛先ごとに（`example.com` は完全一致、`*.example.com` はサブドメイン）許可ヘッダの追加・User-Agent の差し替え・`keep_user_agent`（固定せずエージェントの値を通す）を指定します。緩和は宛先名の関数として解決されるため、将来エージェントが MCP 経由で緩和を申請し、承認コンソールで承認する方式（接続先の申請と同様）へ拡張できます（現時点では未実装で、設定ファイルでのみ指定できます）。
-- **適用範囲:** ホスト側でヘッダを書き換えられる通信が対象です。具体的には、透過プロキシで TLS を終端した HTTPS と平文の HTTP（ポート 80）、およびツールサーバー経由の呼び出し（User-Agent のみ固定。ヘッダ引数は信頼済みの OpenAPI 仕様が定義したものです）です。**LLM 認証プロキシは対象外**です（プロバイダごとにエージェントが送るべきヘッダがあるため）。
+- **リクエストボディとメソッドの制限:** `deny_request_body: true` を指定すると、リクエストボディ（`Content-Length > 0` や chunked 転送など）を持つ通信を HTTP 400 で遮断し、上流へ転送しません（承認コンソールに拒否ログが通知されます）。`allowed_methods` を指定すると、リストに含まれない HTTP メソッドを HTTP 405 で拒否します。
+- **緩和:** `allow` は全宛先に対して、`hosts` は宛先ごとに（`example.com` は完全一致、`*.example.com` はサブドメイン）許可ヘッダの追加・User-Agent の差し替え・`keep_user_agent`（固定せずエージェントの値を通す）・`allow_request_body`（ボディ送信の許可）・`allowed_methods`（特定宛先でのメソッド緩和）を指定します。緩和は宛先名の関数として解決されるため、将来エージェントが MCP 経由で緩和を申請し、承認コンソールで承認する方式（接続先の申請と同様）へ拡張できます（現時点では未実装で、設定ファイルでのみ指定できます）。
+- **適用範囲:** ホスト側でヘッダ・本文を検査できる通信が対象です。具体的には、透過プロキシで TLS を終端した HTTPS と平文の HTTP（ポート 80）、およびツールサーバー経由の呼び出し（User-Agent のみ固定。ヘッダ引数は信頼済みの OpenAPI 仕様が定義したものです）です。**LLM 認証プロキシは対象外**です（プロバイダごとにエージェントが送るべきヘッダがあるため）。素通し (`passthrough_https`) に指定された宛先は TLS 終端を行わないため、ヘッダやボディの制限は行えません。
 - **決定論的 TLS 終端 (MITM):** HTTPS のヘッダは暗号化されているため、絞るには使い捨て CA による TLS 終端（決定論的な MITM）が必要です。`header_policy.enabled` を有効にすると、許可された宛先への通信をホスト側で TLS 終端し（証明書は run ごとの動的使い捨て CA により署名）、ヘッダを絞った後、本来の宛先サーバーへ TLS 接続を再確立して転送します。再接続時も上流サーバーの証明書はシステムのルート証明書ストアで検証されるため、TLS 終端によってセキュリティ検証が緩むことはありません。HTTP/2 (h2) で受信した接続も適切に終端・ストリームごとにヘッダが絞られ、上流へ h2 で中継されます（HTTP/2 のみをサポートするクライアントも扱えます）。動的使い捨て CA 証明書は cloud-init 経由でゲスト OS の信頼ストアへ追加され、Node.js / Bun 環境に対しては環境変数 `NODE_EXTRA_CA_CERTS` 経由で伝達されます。
 - **証明書ピニングと素通し (`passthrough_https`):** 証明書ピニング（SSL Pinning）を実施しているクライアントは動的 CA 証明書を拒否するため、TLS 終端環境では通信できません。`passthrough_https` に対象ホスト名を指定することで、その宛先のみ TLS 終端を行わずに透過させることが可能です（SNI / Host ヘッダーが許可済みドメインと一致することの検証は継続されます）。通信内容は暗号化されたまま通過するためヘッダの制限は行えなくなりますが、証明書ピニングを行うクライアントを特定の宛先でのみ利用可能にできます。
 - **TLS 終端の制限事項:**

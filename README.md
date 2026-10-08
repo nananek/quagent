@@ -137,12 +137,21 @@ Open WebUI のツールサーバーなど、OpenAPI 仕様で公開された外�
 - 仕様の取得は VM 起動時に 1 回のみ行われます。取得できなかったサーバーは警告ログを出力してスキップされ、VM の起動処理自体は継続します。
 - レスポンス本文は最大 1 MiB まで取得され、画像等のテキスト以外のレスポンスはメタデータ（Content-Type とサイズ）のみを返します。
 
-## ヘッダの制限 (任意)
+## ヘッダ・本文の制限 (任意)
 
-`~/.config/quagent/config.json` の `header_policy` を有効にすると、VM から外へ出る HTTP リクエストの余計なヘッダ（Referer、Cookie、独自の `X-*` など）を落とし、User-Agent を固定します（LLM 認証プロキシは対象外）。HTTPS のヘッダを絞るには TLS の終端が必要なため、使い捨て CA が VM に信頼されます。宛先ごとの緩和（許可ヘッダの追加、User-Agent の差し替え）も設定できます。詳細は [docs/design.md](docs/design.md) を参照してください。
+`~/.config/quagent/config.json` の `header_policy` を有効にすると、VM から外へ出る HTTP リクエストの余計なヘッダ（Referer、Cookie、独自の `X-*` など）を落とし、User-Agent を固定します（LLM 認証プロキシは対象外）。また、`deny_request_body` によるリクエストボディの送信遮断や `allowed_methods` による HTTP メソッドの制限も行えます。HTTPS のヘッダや本文を検査・制限するには TLS の終端が必要なため、使い捨て CA が VM に信頼されます。宛先ごとの緩和（許可ヘッダの追加、ボディ送信の許可、メソッドの緩和）も設定できます。詳細は [docs/design.md](docs/design.md) を参照してください。
 
 ```json
-"header_policy": { "enabled": true, "user_agent": "quagent", "hosts": { "*.example.com": { "allow": ["X-Example-*"] } } }
+"header_policy": {
+  "enabled": true,
+  "user_agent": "quagent",
+  "deny_request_body": true,
+  "allowed_methods": ["GET", "HEAD"],
+  "hosts": {
+    "*.example.com": { "allow": ["X-Example-*"] },
+    "registry.example.org": { "allow_request_body": true, "allowed_methods": ["POST", "PUT"] }
+  }
+}
 ```
 
 ## PR の作成と署名
