@@ -70,7 +70,7 @@ func saveBuildSettings(s BuildSettings) {
 }
 
 func loadLast() Launch {
-	l := Launch{Recipe: image.DefaultRecipe, CPUs: 4, MemMiB: 8192}
+	l := Launch{Recipe: image.DefaultRecipe, CPUs: 4, MemMiB: 8192, PRApproval: true}
 	if b, err := os.ReadFile(lastPath()); err == nil {
 		_ = json.Unmarshal(b, &l)
 	}

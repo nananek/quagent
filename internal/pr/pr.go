@@ -88,7 +88,8 @@ type Publisher struct {
 
 func (p *Publisher) gitIO(dir string, env []string, stdin io.Reader, args ...string) (string, error) {
 	// 取り込んだ内容に由来する hooks は実行しない (bare repo にも念のため無効化)
-	pre := []string{"-c", "core.hooksPath=/dev/null"}
+	// 不正・破損した Git オブジェクトの取り込みを防ぐため transfer.fsckObjects を有効化する
+	pre := []string{"-c", "core.hooksPath=/dev/null", "-c", "transfer.fsckObjects=true"}
 	for _, c := range p.GitConfig {
 		pre = append(pre, "-c", c)
 	}
@@ -129,6 +130,9 @@ func (p *Publisher) prepare() error {
 	}
 	bare := filepath.Join(p.Work, "pr.git")
 	if _, err := p.git(p.Work, "init", "-q", "--bare", bare); err != nil {
+		return err
+	}
+	if _, err := p.git(bare, "config", "transfer.fsckObjects", "true"); err != nil {
 		return err
 	}
 	objects, err := p.git(p.Repo, "rev-parse", "--path-format=absolute", "--git-common-dir")

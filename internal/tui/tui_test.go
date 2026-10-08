@@ -101,21 +101,22 @@ func TestLastLaunchPersistence(t *testing.T) {
 
 	// デフォルト値
 	lDefault := loadLast()
-	if lDefault.CPUs != 4 || lDefault.MemMiB != 8192 {
+	if lDefault.CPUs != 4 || lDefault.MemMiB != 8192 || !lDefault.PRApproval {
 		t.Errorf("default launch: %+v", lDefault)
 	}
 
 	// 保存して再読み込み
 	saved := Launch{
-		Recipe: "arch",
-		CPUs:   12,
-		MemMiB: 32768,
-		Agent:  "claude",
+		Recipe:     "arch",
+		CPUs:       12,
+		MemMiB:     32768,
+		Agent:      "claude",
+		PRApproval: false,
 	}
 	saveLast(saved)
 
 	loaded := loadLast()
-	if loaded.Recipe != saved.Recipe || loaded.CPUs != saved.CPUs || loaded.MemMiB != saved.MemMiB || loaded.Agent != saved.Agent {
+	if loaded.Recipe != saved.Recipe || loaded.CPUs != saved.CPUs || loaded.MemMiB != saved.MemMiB || loaded.Agent != saved.Agent || loaded.PRApproval != saved.PRApproval {
 		t.Errorf("loaded launch: %+v, want %+v", loaded, saved)
 	}
 }
