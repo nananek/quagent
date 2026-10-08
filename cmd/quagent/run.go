@@ -288,10 +288,12 @@ func run(o runOpts) error {
 		}
 		cfg.Agy.Egress = egress
 		agyEgress = &agyEgressController{egress: egress}
-		// header_policy が有効でも、起動直後のユーザー情報確認 (Authorization 付き)
-		// だけは TLS 終端の対象外にして素通しする。終端すると Authorization が
-		// 落とされて userinfo が 401 になり、agy が起動できないため。
-		if headersOn {
+		// header_policy が有効でも、agy を起動するときだけ、起動直後のユーザー情報確認
+		// (Authorization 付き) は TLS 終端の対象外にして素通しする。終端すると
+		// Authorization が落とされて userinfo が 401 になり、agy が起動できないため。
+		// opencode など他のエージェントで起動するときは googleapis を素通ししない
+		// (egress も開けないので guest からは届かないが、紛らわしい表示を出さない)。
+		if headersOn && o.Agent == "agy" {
 			seen := map[string]bool{}
 			for _, p := range passthrough {
 				seen[strings.ToLower(p)] = true

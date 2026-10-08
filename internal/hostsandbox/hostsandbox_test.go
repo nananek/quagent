@@ -143,7 +143,11 @@ func TestApplyHostLandlockHelper(t *testing.T) {
 		return
 	}
 	tmp := t.TempDir()
-	_ = ApplyHostLandlock(tmp, []string{tmp, ""})
+	// workDir の下のファイル (tmp.img 想定) は親 (workDir) で既に許すので、
+	// EINVAL で全体をスキップしないことの回帰用にファイルも渡す。
+	img := filepath.Join(tmp, "tmp.img")
+	_ = os.WriteFile(img, []byte("x"), 0o600)
+	_ = ApplyHostLandlock(tmp, []string{tmp, img, ""})
 	os.Exit(0)
 }
 
