@@ -187,6 +187,29 @@ var syscallNumbers = map[string]int{
 	"open_tree":         unix.SYS_OPEN_TREE,
 }
 
+// SyscallNumber は syscall 名から番号を返す。
+func SyscallNumber(name string) (int, bool) {
+	n, ok := syscallNumbers[name]
+	return n, ok
+}
+
+// SyscallNumbers は複数の syscall 名から番号の一覧を返す。
+func SyscallNumbers(names []string) ([]int, error) {
+	seen := map[int]bool{}
+	var out []int
+	for _, n := range names {
+		nr, ok := syscallNumbers[n]
+		if !ok {
+			return nil, fmt.Errorf("未知の syscall 名: %q", n)
+		}
+		if !seen[nr] {
+			seen[nr] = true
+			out = append(out, nr)
+		}
+	}
+	return out, nil
+}
+
 // Apply は no_new_privs を立て、Landlock と seccomp をこのスレッドにかける。
 // 戻ってきたあとは、このスレッドで起動するコマンドすべてに効く。
 func (p *Policy) Apply() error {

@@ -47,6 +47,14 @@ type Spec struct {
 	// HeaderPolicy が有効なら、終端した (または平文の) リクエストのヘッダを絞り、
 	// User-Agent を固定する。
 	HeaderPolicy *headerpolicy.Policy `json:"header_policy,omitempty"`
+	// BaseDisk は backing file (base.qcow2) のパス。ホスト側ディレクトリ隔離で
+	// 読み取り許可に含めるために使う。
+	BaseDisk string `json:"base_disk,omitempty"`
+	// DataDiskPaths は追加ディスクのパス一覧。Landlock の書き込み許可に使う。
+	DataDiskPaths []string `json:"data_disk_paths,omitempty"`
+	// DisableHostSandbox を true にすると、ホスト側 QEMU サンドボックス
+	// (名前空間分離、Landlock、Seccomp、ディレクトリ隔離) を無効化する。
+	DisableHostSandbox bool `json:"disable_host_sandbox,omitempty"`
 	// QemuArgv は子 netns 内で実行する qemu のコマンドライン。
 	QemuArgv []string `json:"qemu_argv"`
 }

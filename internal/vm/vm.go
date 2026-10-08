@@ -85,8 +85,21 @@ type QemuOpts struct {
 	UEFI bool
 	// FirmwarePath は UEFI のとき使う OVMF の統合イメージ。通常は空。
 	FirmwarePath string
+	// Sandbox は QEMU 自身の seccomp サンドボックス (-sandbox on,spawn=deny 等) の指定。
+	// nil なら ProbeQemuSeccomp() で自動判定する。
+	Sandbox *bool
 	// Extra は追加の qemu 引数。
 	Extra []string
+}
+
+// ProbeQemuSeccomp はホストの qemu-system-x86_64 が -sandbox を解釈できるか調べる。
+func ProbeQemuSeccomp() bool {
+	cmd := exec.Command("qemu-system-x86_64", "-help")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), "-sandbox")
 }
 
 // UEFI に使う OVMF の統合イメージ (-bios に渡せるもの) の置き場。配布物によって
@@ -133,6 +146,15 @@ func QemuArgv(o QemuOpts) ([]string, error) {
 		"-netdev", netdev,
 		"-device", "virtio-net-pci,netdev=n0",
 		"-device", "virtio-rng-pci",
+	}
+	sandboxOn := false
+	if o.Sandbox != nil {
+		sandboxOn = *o.Sandbox
+	} else {
+		sandboxOn = ProbeQemuSeccomp()
+	}
+	if sandboxOn {
+		argv = append(argv, "-sandbox", "on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny")
 	}
 	if o.UEFI {
 		fw := o.FirmwarePath

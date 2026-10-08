@@ -118,3 +118,8 @@ func applyLandlock(paths []string, explicit bool) error {
 	}
 	return nil
 }
+
+// ApplyLandlock は書き込み・作成・削除を paths の下だけに限る。
+func ApplyLandlock(paths []string, explicit bool) error {
+	return applyLandlock(paths, explicit)
+}

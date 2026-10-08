@@ -76,3 +76,8 @@ func applySeccomp(deny []int) error {
 	}
 	return nil
 }
+
+// ApplySeccomp は現在のスレッドに seccomp フィルタをかける。
+func ApplySeccomp(deny []int) error {
+	return applySeccomp(deny)
+}

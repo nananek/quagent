@@ -14,6 +14,7 @@ import (
 	"github.com/nananek/quagent/internal/access"
 	"github.com/nananek/quagent/internal/console"
 	"github.com/nananek/quagent/internal/guest"
+	"github.com/nananek/quagent/internal/hostsandbox"
 	"github.com/nananek/quagent/internal/hostsvc"
 	"github.com/nananek/quagent/internal/image"
 	"github.com/nananek/quagent/internal/netns"
@@ -75,6 +76,11 @@ func dispatch(args []string) error {
 		return cmdExec(args[1:])
 	case sandbox.LauncherCommand:
 		return sandbox.Run(args[1:])
+	case hostsandbox.LauncherCommand:
+		if len(args) != 2 {
+			return fmt.Errorf("%s: spec のパスが必要", hostsandbox.LauncherCommand)
+		}
+		return hostsandbox.Run(args[1])
 	case attachCommand:
 		return cmdAttach(args[1:])
 	case consoleCommand:

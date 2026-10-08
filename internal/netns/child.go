@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nananek/quagent/internal/hostsandbox"
 	"github.com/nananek/quagent/internal/tlsmitm"
 )
 
@@ -252,9 +253,24 @@ func (c *child) run() error {
 		log.Printf("ssh 中継: 127.0.0.1:%d -> %s:%d", c.spec.SSHPort, tapIP, c.spec.SSHPort)
 	}
 
-	// 6. qemu を子 netns で起動
+	// 6. qemu を子 netns で起動 (ホスト側サンドボックス適用)
 	pid := strconv.Itoa(c.holder.Process.Pid)
-	c.qemu = deathCmd("nsenter", append([]string{"-t", pid, "-n", "--"}, c.spec.QemuArgv...)...)
+	if c.spec.DisableHostSandbox {
+		c.qemu = deathCmd("nsenter", append([]string{"-t", pid, "-n", "--"}, c.spec.QemuArgv...)...)
+	} else {
+		self, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("quagent の実行ファイルパスを取得できない: %w", err)
+		}
+		specPath := c.spec.file("netns.json")
+		qemuArgs := []string{
+			"-t", pid, "-n",
+			"unshare", "-p", "-f", "--mount-proc", "-i", "-u",
+			"--forward-signals", "--kill-child",
+			self, hostsandbox.LauncherCommand, specPath,
+		}
+		c.qemu = deathCmd("nsenter", qemuArgs...)
+	}
 	c.qemu.Stdout, c.qemu.Stderr = os.Stderr, os.Stderr
 	if err := c.qemu.Start(); err != nil {
 		return fmt.Errorf("qemu の起動に失敗: %w", err)

@@ -191,3 +191,33 @@ func TestMakeOverlay(t *testing.T) {
 	_ = os.WriteFile(base, []byte("fake qcow2"), 0o644)
 	_ = MakeOverlay(base, overlay)
 }
+
+func TestQemuArgvSandbox(t *testing.T) {
+	tTrue := true
+	tFalse := false
+
+	optsEnabled := QemuOpts{Disk: "disk", Seed: "seed", CPUs: 1, MemMiB: 256, ConsoleLog: "console", Sandbox: &tTrue}
+	argv, err := QemuArgv(optsEnabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := argAfter(argv, "-sandbox")
+	want := "on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny"
+	if got != want {
+		t.Fatalf("-sandbox option is %q, want %q", got, want)
+	}
+
+	optsDisabled := QemuOpts{Disk: "disk", Seed: "seed", CPUs: 1, MemMiB: 256, ConsoleLog: "console", Sandbox: &tFalse}
+	argv2, err := QemuArgv(optsDisabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := argAfter(argv2, "-sandbox"); got != "" {
+		t.Fatalf("expected no -sandbox when Sandbox is false, got %q", got)
+	}
+}
+
+func TestProbeQemuSeccomp(t *testing.T) {
+	// ProbeQemuSeccomp does not panic whether qemu is installed or not
+	_ = ProbeQemuSeccomp()
+}
