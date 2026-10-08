@@ -97,11 +97,34 @@ func ApplyHostSeccomp() error {
 	return sandbox.ApplySeccomp(deny)
 }
 
-// ApplyHostLandlock は QEMU の書き込み権限を workDir および dataDisks のみに限定する。
+// ApplyHostLandlock は QEMU の書き込み先を workDir・dataDisks と QEMU が動作に
+// 要るデバイス・一時領域に限る。Landlock は読み取りを制限しないので、ベースimage・
+// ファームウェア・共有ライブラリの読み取りはそのまま通る。書き込みだけが対象で、
+// /dev/kvm (/dev/vhost-vsock) や /dev/null への書き込みを塞ぐと QEMU が
+// "Permission denied" で起動できないため、明示的に許す。無いパスは飛ばす
+// (explicit=false。KVM の無い環境等でも起動役自体は動く)。
 func ApplyHostLandlock(workDir string, dataDisks []string) error {
-	paths := []string{workDir}
+	// /dev はディレクトリ単位で許す (Landlock の path_beneath はファイル単位の
+	// 規則を受け付けないため、/dev/null などを 1 つずつ挙げると EINVAL になる)。
+	// /dev の下への書き込みは DAC (所有者・パーミッション) でも抑えられるので、
+	// QEMU が開けるのは /dev/kvm・/dev/vhost-vsock・/dev/null など、もともと
+	// 開ける権限のあるものだけになる。
+	paths := []string{workDir,
+		"/tmp", "/var/tmp", "/dev", "/dev/shm", "/run",
+	}
 	for _, d := range dataDisks {
-		if d != "" {
+		if d == "" {
+			continue
+		}
+		if _, ok := IsSubpath(workDir, d); ok {
+			continue // workDir の下は既に許している (tmp.img など)
+		}
+		// Landlock の path_beneath はファイルに直接規則を足すと EINVAL になる
+		// ので、ファイルなら親ディレクトリを許す。1 つでも EINVAL で返すと
+		// Run が Landlock 全体をスキップ (fail-open) してしまうため。
+		if st, err := os.Stat(d); err == nil && !st.IsDir() {
+			paths = append(paths, filepath.Dir(d))
+		} else {
 			paths = append(paths, d)
 		}
 	}
@@ -305,14 +328,14 @@ func Run(specPath string) error {
 		}
 	}
 
-	// 3. ファイルシステム書き込み制限 (Landlock)
-	if err := ApplyHostLandlock(spec.WorkDir, spec.DataDiskPaths); err != nil {
-		log.Printf("[quagent:hostsandbox] Landlock 適用スキップ (未対応カーネル等): %v", err)
-	}
-
-	// 4. no_new_privs (権限昇格の恒久防止)
+	// 3. no_new_privs (権限昇格の恒久防止。Landlock の restrict_self より先に立てる)
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		log.Printf("[quagent:hostsandbox] no_new_privs 設定スキップ: %v", err)
+	}
+
+	// 4. ファイルシステム書き込み制限 (Landlock。no_new_privs の後にかける)
+	if err := ApplyHostLandlock(spec.WorkDir, spec.DataDiskPaths); err != nil {
+		log.Printf("[quagent:hostsandbox] Landlock 適用スキップ (未対応カーネル等): %v", err)
 	}
 
 	// 5. ホスト事前適用 Seccomp
