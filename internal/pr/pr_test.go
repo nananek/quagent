@@ -476,3 +476,17 @@ func TestFinishWithGH(t *testing.T) {
 		t.Fatalf("unexpected res: %+v", res2)
 	}
 }
+
+// git 呼び出し時に transfer.fsckObjects=true が有効になっていることを確かめる。
+func TestGitIOTransferFsckObjects(t *testing.T) {
+	p := &Publisher{}
+	dir := t.TempDir()
+	out, err := p.git(dir, "config", "transfer.fsckObjects")
+	if err != nil {
+		t.Fatalf("git config transfer.fsckObjects: %v", err)
+	}
+	if out != "true" {
+		t.Fatalf("transfer.fsckObjects = %q, want true", out)
+	}
+}
+
