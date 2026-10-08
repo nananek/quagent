@@ -2,6 +2,7 @@ package tui
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -127,10 +128,29 @@ func TestTheme(t *testing.T) {
 }
 
 func TestGitTop(t *testing.T) {
-	// git リポジトリ内 (/work)
-	top := gitTop("/work")
+	// git リポジトリ内: 一時ディレクトリを git init して確認する。
+	// 以前は "/work" 決め打ちだったため CI (/home/runner/work/...) で失敗した。
+	repo := t.TempDir()
+	if out, err := exec.Command("git", "init", repo).CombinedOutput(); err != nil {
+		t.Fatalf("git init %s: %v: %s", repo, err, out)
+	}
+	top := gitTop(repo)
 	if top == "" {
-		t.Fatal("expected gitTop to return non-empty repository root for /work")
+		t.Fatal("expected gitTop to return non-empty repository root for git repo")
+	}
+	// サブディレクトリからもトップレベルに解決される。
+	sub := filepath.Join(repo, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitTop(sub); got != top {
+		t.Errorf("gitTop(sub) = %q, want %q", got, top)
+	}
+
+	// git 管理外のディレクトリ
+	plain := t.TempDir()
+	if got := gitTop(plain); got != "" {
+		t.Errorf("expected empty string for non-git dir, got %q", got)
 	}
 
 	// 存在しないディレクトリ
