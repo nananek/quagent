@@ -9,6 +9,7 @@ package antigravity
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 )
@@ -47,6 +49,53 @@ func TokenFile() string {
 		return ""
 	}
 	return filepath.Join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token")
+}
+
+// CheckLogin は host の agy にログイン済みかだけを確かめる (通信なし)。
+// VM を起動する前に失敗を返せるよう、run 開始直後の検査用。
+func CheckLogin() error {
+	if _, err := exec.LookPath("agy"); err != nil {
+		return fmt.Errorf("agy が見つからない: %w", err)
+	}
+	if _, err := refreshToken(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// WarmupTimeout はホスト側の agy 起動確認の制限時間。
+const WarmupTimeout = 60 * time.Second
+
+// Warmup はホスト側で agy を短時間動かしてサブスク認証が通るか確かめる。
+// `agy models` は推論枠を消費せず OAuth 更新＋上流への到達を確認できる。
+// コマンド終了でプロセスは必ず終わる (起動しっぱなしにしない)。
+// 先にホストで起動しておかないとゲスト側で失敗することがあるため、
+// VM 起動前 (および agy への切り替え前) に呼ぶ。
+func Warmup(ctx context.Context) error {
+	if err := CheckLogin(); err != nil {
+		return err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, WarmupTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "agy", "models")
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("agy の起動確認がタイムアウトした (%s)", WarmupTimeout)
+	}
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if len(msg) > 500 {
+			msg = msg[:500] + "..."
+		}
+		if msg == "" {
+			return fmt.Errorf("agy の起動確認に失敗した: %w", err)
+		}
+		return fmt.Errorf("agy の起動確認に失敗した: %w: %s", err, msg)
+	}
+	return nil
 }
 
 // refreshToken はトークンファイルから長期の refresh_token を読む。

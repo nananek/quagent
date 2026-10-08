@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log"
 	"math/rand/v2"
@@ -145,6 +146,14 @@ func run(o runOpts) error {
 	ag, ok := agents[o.Agent]
 	if !ok {
 		return fmt.Errorf("不明なエージェント %q (使えるもの: %s)", o.Agent, strings.Join(agentNames(), ", "))
+	}
+	// サブスクで agy を起動するなら、VM を作る前にホスト側で agy を短時間
+	// 起動して認証が通るか確かめる (通ればすぐ落とす)。先に起動しておかないと
+	// ゲスト側で失敗することがあるため。失敗したら VM は作らない。
+	if o.Agent == "agy" && cfg.Agy.Subscription {
+		if err := warmupAgyHost(); err != nil {
+			return fmt.Errorf("agy のサブスクリプションを使えない: %w", err)
+		}
 	}
 	repo, err := repoRoot(o.Repo)
 	if err != nil {
@@ -571,7 +580,7 @@ runcmd:
 			return nil
 		default:
 		}
-		next, discard := o.AfterSession(cur, restartChoices())
+		next, discard := askRestart(o, cur, cfg.Agy.Subscription)
 		if next == "" {
 			discardLogs = discard
 			return nil
@@ -594,6 +603,40 @@ runcmd:
 		cur = next
 	}
 }
+
+// warmupAgyHost はホスト側で agy を短時間起動してサブスク認証が通るか確かめる
+// (通ればプロセスはすぐ終わる)。先に起動しておかないとゲスト側で失敗する
+// ことがあるため、VM 起動前と agy への切り替え前に呼ぶ。
+func warmupAgyHost() error {
+	logf("ホスト側で agy の起動確認中 (サブスク認証を通し、すぐ終了する)...")
+	if err := antigravity.Warmup(context.Background()); err != nil {
+		return err
+	}
+	logf("ホスト側の agy 起動確認 OK")
+	return nil
+}
+
+// askRestart は再起動フローの聞き取り。agy (サブスク) が選ばれたらホスト側で
+// 起動確認してから返す。確認に失敗したら VM は残したまま選び直しに戻る
+// (next が空なら終了で、discardLogs がログを残さないか)。
+func askRestart(o runOpts, cur string, agySubscription bool) (next string, discardLogs bool) {
+	for {
+		n, discard := o.AfterSession(cur, restartChoices())
+		if n == "" {
+			return "", discard
+		}
+		if n == "agy" && agySubscription {
+			if err := agyWarmup(); err != nil {
+				logf("agy の起動確認に失敗したので選び直しに戻る (%s の VM は残っている): %v", cur, err)
+				continue
+			}
+		}
+		return n, false
+	}
+}
+
+// agyWarmup はテストで差し替えられるよう変数にしておく (既定は warmupAgyHost)。
+var agyWarmup = func() error { return warmupAgyHost() }
 
 // agyEgressController は agy のサブスクリプションで一時的に開ける egress
 // (ユーザー情報確認とプロフィール画像) を管理する。
