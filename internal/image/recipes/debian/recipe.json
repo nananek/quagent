@@ -1,6 +1,0 @@
-{
-  "description": "Debian 13 (trixie)",
-  "details": "rootless docker (docker 公式の apt リポジトリ)・opencode (公式インストーラー)・Claude Code (公式インストーラー)・agy (公式インストーラー)",
-  "cloud_image_url": "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2",
-  "checksum_url": "https://cloud.debian.org/images/cloud/trixie/latest/SHA512SUMS"
-}

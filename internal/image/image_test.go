@@ -23,8 +23,8 @@ import (
 func TestFindChecksum(t *testing.T) {
 	s256 := strings.Repeat("a", 64)
 	s512 := strings.Repeat("B", 128)
-	list := s256 + "  other.qcow2\n" + s512 + " *debian.qcow2\n"
-	if got, err := findChecksum(list, "debian.qcow2"); err != nil || got != strings.ToLower(s512) {
+	list := s256 + "  other.qcow2\n" + s512 + " *arch.qcow2\n"
+	if got, err := findChecksum(list, "arch.qcow2"); err != nil || got != strings.ToLower(s512) {
 		t.Fatalf("got %q, %v", got, err)
 	}
 	if _, err := findChecksum(list, "missing.qcow2"); err == nil {
@@ -44,10 +44,13 @@ func TestBuiltinRecipesAreVerifiable(t *testing.T) {
 		if r.Source == "builtin" && r.ChecksumURL == "" {
 			t.Errorf("%s: checksum_url が無い", r.Name)
 		}
+		if r.Source == "builtin" && (r.SignatureURL == "" || r.SigningKey == "") {
+			t.Errorf("%s: 署名検証 (signature_url / signing_key) が無い", r.Name)
+		}
 	}
 }
 
-// 一覧は硬化を一番強くできる Gentoo を先頭に、Gentoo/Arch/Debian の順で出す。
+// 一覧は硬化を一番強くできる Gentoo を先頭に、Gentoo/Arch の順で出す。
 func TestRecipesOrder(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // 利用者のレシピを混ぜない
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
@@ -59,7 +62,7 @@ func TestRecipesOrder(t *testing.T) {
 	for _, r := range rs {
 		names = append(names, r.Name)
 	}
-	if got := strings.Join(names, ","); got != "gentoo,arch,debian" {
+	if got := strings.Join(names, ","); got != "gentoo,arch" {
 		t.Fatalf("並び: got %q", got)
 	}
 }
