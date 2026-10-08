@@ -489,4 +489,3 @@ func TestGitIOTransferFsckObjects(t *testing.T) {
 		t.Fatalf("transfer.fsckObjects = %q, want true", out)
 	}
 }
-
