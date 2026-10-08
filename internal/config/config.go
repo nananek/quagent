@@ -41,6 +41,15 @@ type Config struct {
 	// Sandbox は VM の中のコマンドにかける seccomp / Landlock の設定。
 	// 未指定なら既定 (compat で有効)。
 	Sandbox *sandbox.Policy `json:"sandbox,omitempty"`
+	// QemuSandbox はホスト側 QEMU プロセスにかけるサンドボックスの設定。
+	// 未指定なら既定で有効。
+	QemuSandbox *QemuSandboxPolicy `json:"qemu_sandbox,omitempty"`
+}
+
+// QemuSandboxPolicy はホスト側 QEMU プロセスのサンドボックス設定。
+type QemuSandboxPolicy struct {
+	// Enabled を false にするとホスト側 QEMU サンドボックスを無効化する (既定: true)。
+	Enabled *bool `json:"enabled,omitempty"`
 }
 
 // Clipboard はクリップボードへの入れ方。

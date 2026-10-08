@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/nananek/quagent/internal/access"
+	"github.com/nananek/quagent/internal/hostsandbox"
 	"github.com/nananek/quagent/internal/netns"
 )
 
@@ -25,6 +26,10 @@ func TestDispatchValidation(t *testing.T) {
 
 	if err := dispatch([]string{netns.ChildCommand}); err == nil {
 		t.Error("expected error for netns.ChildCommand without spec path")
+	}
+
+	if err := dispatch([]string{hostsandbox.LauncherCommand}); err == nil {
+		t.Error("expected error for hostsandbox.LauncherCommand without spec path")
 	}
 
 	if err := dispatch([]string{"image"}); err == nil {

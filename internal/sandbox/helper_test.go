@@ -44,6 +44,19 @@ func TestSandboxHelper(t *testing.T) {
 		checkLandlockMissing(os.Getenv("QUAGENT_LANDLOCK_GOOD"))
 	case "x32":
 		checkX32Rejected(&Policy{Mode: "compat"})
+	case "exported-seccomp":
+		_ = unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+		if err := ApplySeccomp([]int{unix.SYS_GETPPID}); err != nil {
+			os.Exit(3)
+		}
+		wantGetppidEPERM()
+	case "exported-landlock":
+		_ = unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+		dir := os.Getenv("QUAGENT_LANDLOCK_DIR")
+		if err := ApplyLandlock([]string{dir}, false); err != nil {
+			os.Exit(3)
+		}
+		os.Exit(0)
 	}
 }
 
@@ -255,4 +268,18 @@ func runHelper(t *testing.T, env map[string]string) {
 	if err != nil {
 		t.Fatalf("helper が失敗: %v\n%s", err, out)
 	}
+}
+
+func TestExportedApply(t *testing.T) {
+	runHelper(t, map[string]string{"QUAGENT_SANDBOX_HELPER": "exported-seccomp"})
+
+	if err := ApplyLandlock([]string{"/nonexistent/path/for/test"}, true); err == nil {
+		t.Fatal("expected error for nonexistent path")
+	}
+
+	skipIfNoLandlock(t)
+	runHelper(t, map[string]string{
+		"QUAGENT_SANDBOX_HELPER": "exported-landlock",
+		"QUAGENT_LANDLOCK_DIR":   t.TempDir(),
+	})
 }

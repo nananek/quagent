@@ -52,6 +52,9 @@ func TestLoad(t *testing.T) {
 		},
 		"clipboard": {
 			"method": "tmux"
+		},
+		"qemu_sandbox": {
+			"enabled": false
 		}
 	}`
 	if err := os.WriteFile(cfgFile, []byte(validJSON), 0o644); err != nil {
@@ -70,6 +73,9 @@ func TestLoad(t *testing.T) {
 	}
 	if !cfg.Agy.Subscription {
 		t.Errorf("expected agy subscription true")
+	}
+	if cfg.QemuSandbox == nil || cfg.QemuSandbox.Enabled == nil || *cfg.QemuSandbox.Enabled != false {
+		t.Errorf("expected qemu_sandbox.enabled false, got %+v", cfg.QemuSandbox)
 	}
 
 	// 3. 不正な JSON

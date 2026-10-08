@@ -1,6 +1,7 @@
 package netns
 
 import (
+	"encoding/json"
 	"net"
 	"path/filepath"
 	"strings"
@@ -101,5 +102,26 @@ func TestAddHostfwd(t *testing.T) {
 
 	if err := addHostfwd(sock, 8080, "10.0.2.15"); err != nil {
 		t.Fatalf("addHostfwd failed: %v", err)
+	}
+}
+
+func TestSpecSandboxFields(t *testing.T) {
+	spec := Spec{
+		WorkDir:            "/work",
+		BaseDisk:           "/images/base.qcow2",
+		DataDiskPaths:      []string{"/disk1", "/disk2"},
+		DisableHostSandbox: true,
+		QemuArgv:           []string{"qemu-system-x86_64"},
+	}
+	b, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Spec
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.BaseDisk != spec.BaseDisk || len(got.DataDiskPaths) != 2 || !got.DisableHostSandbox {
+		t.Fatalf("Spec roundtrip mismatch: %+v", got)
 	}
 }

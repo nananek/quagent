@@ -188,6 +188,31 @@ func TestRunWithValidation(t *testing.T) {
 	}
 }
 
+func TestSyscallNumber(t *testing.T) {
+	nr, ok := SyscallNumber("bpf")
+	if !ok || nr != unix.SYS_BPF {
+		t.Fatalf("SyscallNumber(bpf) = (%d, %v), want (%d, true)", nr, ok, unix.SYS_BPF)
+	}
+	_, ok = SyscallNumber("nonexistent_syscall")
+	if ok {
+		t.Fatal("expected false for nonexistent_syscall")
+	}
+}
+
+func TestSyscallNumbers(t *testing.T) {
+	nums, err := SyscallNumbers([]string{"bpf", "ptrace", "bpf"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nums) != 2 {
+		t.Fatalf("expected dedup length 2, got %d", len(nums))
+	}
+	_, err = SyscallNumbers([]string{"bpf", "unknown_sc"})
+	if err == nil {
+		t.Fatal("expected error for unknown syscall")
+	}
+}
+
 func contains(xs []int, v int) bool {
 	for _, x := range xs {
 		if x == v {

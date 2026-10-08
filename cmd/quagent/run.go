@@ -436,7 +436,22 @@ runcmd:
 		return err
 	}
 	logf("VM を起動 (base=%s, allow=%v)", filepath.Base(base), o.Allow)
-	spec := netns.Spec{WorkDir: work, SSHPort: sshPort, DNS: dns, Allow: o.Allow, QemuArgv: qemu}
+	var dataDiskPaths []string
+	for _, d := range disks {
+		dataDiskPaths = append(dataDiskPaths, d.Path)
+	}
+	spec := netns.Spec{
+		WorkDir: work, SSHPort: sshPort, DNS: dns, Allow: o.Allow, QemuArgv: qemu,
+		BaseDisk: base, DataDiskPaths: dataDiskPaths,
+	}
+	if cfg.QemuSandbox != nil && cfg.QemuSandbox.Enabled != nil && !*cfg.QemuSandbox.Enabled {
+		spec.DisableHostSandbox = true
+	}
+	if spec.DisableHostSandbox {
+		logf("QEMU サンドボックス: 無効")
+	} else {
+		logf("QEMU サンドボックス: 有効 (名前空間分離、ディレクトリ最小化、Landlock、Seccomp)")
+	}
 	if headersOn {
 		keyPEM, err := ca.KeyPEM()
 		if err != nil {
