@@ -70,7 +70,7 @@ func tmpRuncmd(uid string) string {
 // 隔離 (noexec 等) や容量制限が効かないので、先にマウントを確かめる。
 func copyInTmp(g vmGuest, dir string) error {
 	if out, err := g.sh("grep -q ' /work/.tmp ' /proc/mounts", nil); err != nil {
-		return fmt.Errorf("/work/.tmp が VM でマウントされていない (cloud-init の準備に失敗): %v: %s", err, out)
+		return fmt.Errorf("/work/.tmp が VM でマウントされていない (cloud-init の準備に失敗): %v: %s\nVM 内の診断:\n%s", err, out, diagTmpMount(g))
 	}
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
@@ -118,6 +118,13 @@ func copyInTmp(g vmGuest, dir string) error {
 		return fmt.Errorf(".tmp を VM へ渡せない: %v: %s", err, out.String())
 	}
 	return nil
+}
+
+// diagTmpMount は /work/.tmp のマウント失敗時に VM 内の手がかりを集める
+// (読み取り専用の確認コマンドのみ)。
+func diagTmpMount(g vmGuest) string {
+	out, _ := g.sh("echo '--- cloud-init status:'; cloud-init status --long 2>&1 | head -n 20; echo '--- lsblk:'; lsblk -o NAME,SIZE,TYPE,MOUNTPOINTS,SERIAL 2>&1; echo '--- by-id:'; ls -l /dev/disk/by-id/ 2>&1; echo '--- work:'; ls -ld /work /work/.tmp 2>&1; df -h /work/.tmp 2>&1; echo '--- mounts:'; grep -E 'work|vdb|vdc' /proc/mounts 2>&1; echo '--- cloud-init tmp:'; grep -a -i 'tmp' /var/log/cloud-init-output.log 2>&1 | tail -n 20", nil)
+	return string(out)
 }
 
 // collectTmp は VM の /work/.tmp を host の .tmp へ回収する。
