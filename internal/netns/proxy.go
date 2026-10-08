@@ -125,7 +125,7 @@ func (p *webProxy) handleTLS(c net.Conn, dst string) {
 		p.block("SNI " + name)
 		return
 	}
-	if p.mitm != nil && !p.terminates(name) {
+	if p.mitm != nil && p.terminates(name) {
 		// ClientHello で読んだ分を戻してから終端し、平文の HTTP を点検する。
 		_ = c.SetDeadline(time.Time{})
 		p.terminate(&replayConn{Conn: c, r: io.MultiReader(bytes.NewReader(cr.buf), c)}, dst, name)
