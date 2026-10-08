@@ -28,10 +28,6 @@ func (g Grant) active(now time.Time) bool {
 type control struct {
 	Seq    int     `json:"seq"`
 	Grants []Grant `json:"grants"`
-	// InspectID は子が送った点検依頼 (Event.Inspect) への返答。同じ ID で返す。
-	InspectID int    `json:"inspect_id,omitempty"`
-	Allow     bool   `json:"allow,omitempty"`
-	Reason    string `json:"reason,omitempty"`
 }
 
 // Event はランチャ -> 親 (stdout、1 行 1 JSON)。
@@ -42,10 +38,6 @@ type Event struct {
 	Denied string `json:"denied,omitempty"`
 	// Blocked は透明プロキシが許可外の名前 (SNI/Host) で止めた Web 接続。
 	Blocked string `json:"blocked,omitempty"`
-	// Inspect は透明プロキシが TLS 終端して取り出した HTTPS リクエストの点検依頼。
-	Inspect *InspectRequest `json:"inspect,omitempty"`
-	// InspectID は Inspect の識別子。親は control.InspectID に同じ値を返す。
-	InspectID int `json:"inspect_id,omitempty"`
 }
 
 // egress は許可の状態と nft の allow set を同期させる。

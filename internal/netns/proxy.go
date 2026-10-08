@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nananek/quagent/internal/headerpolicy"
 	"github.com/nananek/quagent/internal/tlsmitm"
 	"golang.org/x/sys/unix"
 )
@@ -34,18 +35,16 @@ type webProxy struct {
 	// sem は同時に扱う Web 接続の上限。溢れた分は切って guest に任せる。
 	sem chan struct{}
 
-	// mitm が nil でなければ、許可した TLS 接続を終端し、中身を点検してから
-	// 本来のサーバーへ張り直す (内部 HTTPS のコンテンツガード)。
+	// mitm が nil でなければ、許可した TLS 接続を終端し、ヘッダを絞ってから
+	// 本来のサーバーへ張り直す。
 	mitm *tlsmitm.CA
 	// passthrough は TLS 終端せず素通しする行き先のパターン ("example.com" か
 	// "*.example.com")。証明書を固定 (pinning) するクライアント向けで、SNI/Host の
 	// 確認だけは続ける。mitm が nil のときは使わない。
 	passthrough []string
-	// inspect は終端した HTTPS リクエストを点検する。通すなら nil、止めるなら理由。
-	// nil なら点検せず通す (終端はするが中身は見ない)。
-	inspect func(InspectRequest) error
-	// inspectLimit は 1 リクエストで点検のために読む本文の上限 (バイト)。
-	inspectLimit int
+	// headers が nil でなければ、転送するリクエストのヘッダを絞り User-Agent を固定する
+	// (終端した HTTPS と、平文の HTTP が対象。素通しする接続の中身は見えない)。
+	headers *headerpolicy.Policy
 	// upstreamRoots は張り直す先の証明書を検証するルート。nil なら system。
 	upstreamRoots *x509.CertPool
 	// dial は子 netns の中に外向き接続を張る。既定は dialInNetns (テストで差し替える)。
@@ -146,16 +145,15 @@ func (p *webProxy) terminates(name string) bool {
 	return true
 }
 
-// handleHTTP は 80 の接続を扱う。点検が有効なら Host を確かめたうえで中身も
-// 点検する (点検が無いときは従来どおり Host だけ確かめて素通しする)。80 を点検
-// しないと、許可した行き先へ平文で持ち出す経路が残る。
+// handleHTTP は 80 の接続を扱う。ヘッダの制限が有効なら Host を確かめたうえで
+// リクエストごとにヘッダを絞る (無いときは Host だけ確かめて素通しする)。
 func (p *webProxy) handleHTTP(c net.Conn, dst string) {
-	if p.inspect != nil {
+	if p.headers != nil {
 		_ = c.SetDeadline(time.Time{})
-		p.serveInspect(c, bufio.NewReader(c), dst, "", false)
+		p.serveHTTP1(c, bufio.NewReader(c), dst, "", false)
 		return
 	}
-	// 点検で読んだ分 (リクエストヘッダ) を覚えておき、そのまま転送する。
+	// 確認で読んだ分 (リクエストヘッダ) を覚えておき、そのまま転送する。
 	cr := &captureReader{r: c}
 	name, err := readHost(bufio.NewReader(cr))
 	if err != nil {

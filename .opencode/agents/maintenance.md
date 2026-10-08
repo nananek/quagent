@@ -135,7 +135,7 @@ permissions:
 
 ## 設定 (~/.config/quagent/config.json)
 
-- `providers`（`upstream` / `secret_env` / `secret_file` / `secret_command`）、`opencode.model`、`claude`（`model` / `subscription` / `theme`）、`clipboard`、`guard` などの設定を確認・編集します。`README.md` の該当セクションおよび `docs/design.md` の説明に準拠してください。
+- `providers`（`upstream` / `secret_env` / `secret_file` / `secret_command`）、`opencode.model`、`claude`（`model` / `subscription` / `theme`）、`clipboard`、`header_policy` などの設定を確認・編集します。`README.md` の該当セクションおよび `docs/design.md` の説明に準拠してください。
 - API キーや認証トークンなどの機密情報は `config.json` 内に直接記述してはいけません。安全な取得方法（`secret_command` 等）を利用するよう案内してください。
 - ファイルを編集した後は再度読み込み、JSON の構文が破損していないことを検証してください。
 

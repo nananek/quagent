@@ -7,7 +7,6 @@
 package console
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -44,13 +43,6 @@ type Msg struct {
 	Base   string `json:"base,omitempty"`
 	Title  string `json:"title,omitempty"`
 	Body   string `json:"body,omitempty"`
-
-	// コンテンツガードの確認 (guardrequest / guardsettled) の内容。
-	Provider string   `json:"provider,omitempty"`
-	Method   string   `json:"method,omitempty"`
-	URL      string   `json:"url,omitempty"`
-	Evidence string   `json:"evidence,omitempty"`
-	Headers  []string `json:"headers,omitempty"`
 }
 
 const (
@@ -85,11 +77,6 @@ type Server struct {
 	prMu      sync.Mutex
 	prNextID  int
 	prPending []*prRequest
-
-	// コンテンツガードの確認。同じくこの Server が直接待つ。
-	guardMu      sync.Mutex
-	guardNextID  int
-	guardPending []*guardRequest
 }
 
 // PRInfo は承認コンソールに諮る PR 作成の内容。
@@ -103,27 +90,6 @@ type PRInfo struct {
 type prRequest struct {
 	id       int
 	info     PRInfo
-	created  time.Time
-	done     chan struct{}
-	status   access.Status
-	approved bool
-}
-
-// GuardInfo はコンテンツガードが承認コンソールに諮るリクエストの要約。
-type GuardInfo struct {
-	Provider string
-	Method   string
-	URL      string
-	Reason   string
-	// Evidence はローカル LLM が「これが機密だ」と指摘した該当箇所。
-	Evidence string
-	Headers  []string
-	Body     string
-}
-
-type guardRequest struct {
-	id       int
-	info     GuardInfo
 	created  time.Time
 	done     chan struct{}
 	status   access.Status
@@ -218,8 +184,6 @@ func (s *Server) serve(c net.Conn) {
 			s.clipDecide(msg.ID, msg.Status == access.Approved)
 		case "prdecide":
 			s.settlePR(msg.ID, msg.Status)
-		case "guarddecide":
-			s.settleGuard(msg.ID, msg.Status)
 		case "quit":
 			s.quitOnce.Do(func() { close(s.Quit) })
 		}
@@ -245,11 +209,6 @@ func (s *Server) register(cl *client) {
 		_ = s.send(cl, prRequestMsg(r))
 	}
 	s.prMu.Unlock()
-	s.guardMu.Lock()
-	for _, r := range s.guardPending {
-		_ = s.send(cl, guardRequestMsg(r))
-	}
-	s.guardMu.Unlock()
 	s.clients[cl] = true
 }
 
@@ -315,70 +274,6 @@ func (s *Server) settlePR(id int, status access.Status) {
 func prRequestMsg(r *prRequest) Msg {
 	return Msg{Type: "prrequest", ID: r.id, Branch: r.info.Branch, Base: r.info.Base,
 		Title: r.info.Title, Body: r.info.Body,
-		Deadline: r.created.Add(access.DecisionTimeout).Format("15:04:05")}
-}
-
-// AskGuard はコンテンツガードが疑わしいと判定したリクエストを承認コンソールに諮り、
-// 通すか止めるかを待つ。通すなら nil、止める (拒否・時間切れ・終了・ctx 終了) なら理由を返す。
-func (s *Server) AskGuard(ctx context.Context, info GuardInfo) error {
-	req := &guardRequest{info: info, created: time.Now(), done: make(chan struct{})}
-	s.guardMu.Lock()
-	s.guardNextID++
-	req.id = s.guardNextID
-	s.guardPending = append(s.guardPending, req)
-	s.guardMu.Unlock()
-	s.broadcast(guardRequestMsg(req))
-
-	t := time.NewTimer(access.DecisionTimeout)
-	defer t.Stop()
-	select {
-	case <-req.done:
-	case <-t.C:
-		s.settleGuard(req.id, access.TimedOut)
-		<-req.done
-	case <-ctx.Done():
-		s.settleGuard(req.id, access.Denied)
-		return ctx.Err()
-	case <-s.Quit:
-		s.settleGuard(req.id, access.Denied)
-		return fmt.Errorf("終了したので通さなかった")
-	}
-	if req.approved {
-		return nil
-	}
-	if req.status == access.TimedOut {
-		return fmt.Errorf("%s 以内に応答がなかったので止めた", access.DecisionTimeout)
-	}
-	return fmt.Errorf("通さないと決めた")
-}
-
-// settleGuard は承認待ちのコンテンツガードの確認を決着させ、UI に知らせる。既に決着していれば何もしない。
-func (s *Server) settleGuard(id int, status access.Status) {
-	s.guardMu.Lock()
-	idx := -1
-	for i, r := range s.guardPending {
-		if r.id == id {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		s.guardMu.Unlock()
-		return
-	}
-	req := s.guardPending[idx]
-	s.guardPending = append(s.guardPending[:idx], s.guardPending[idx+1:]...)
-	req.status = status
-	req.approved = status == access.Approved
-	s.guardMu.Unlock()
-	close(req.done)
-	s.broadcast(Msg{Type: "guardsettled", ID: id, Status: status})
-}
-
-func guardRequestMsg(r *guardRequest) Msg {
-	return Msg{Type: "guardrequest", ID: r.id, Provider: r.info.Provider, Method: r.info.Method,
-		URL: r.info.URL, Reason: r.info.Reason, Evidence: r.info.Evidence,
-		Headers: r.info.Headers, Body: r.info.Body,
 		Deadline: r.created.Add(access.DecisionTimeout).Format("15:04:05")}
 }
 

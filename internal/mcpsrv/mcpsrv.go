@@ -11,7 +11,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/nananek/quagent/internal/access"
-	"github.com/nananek/quagent/internal/guard"
 	"github.com/nananek/quagent/internal/pr"
 )
 
@@ -103,28 +102,6 @@ func describe(r access.Result) resultOut {
 	return out
 }
 
-// guardPR は PR のタイトル・本文をコンテンツガードに通す。LLM プロキシと同じ判定を
-// 使うので、疑わしければ承認コンソールで人間が決める。g が nil なら何もしない。
-// PR は host の gh (host のネットワーク) に出るので、ここを通さないと egress の
-// 許可制もコンテンツガードもすり抜けて任意のテキストを持ち出せてしまう。
-func guardPR(ctx context.Context, g *guard.Guard, in prIn) error {
-	if g == nil {
-		return nil
-	}
-	body := in.Title
-	if in.Body != "" {
-		body += "\n\n" + in.Body
-	}
-	return g.Check(ctx, guard.Request{
-		Provider: "pr",
-		Method:   http.MethodPost,
-		Host:     "github.com",
-		Path:     "/pull/new/" + in.Branch,
-		Headers:  http.Header{"Content-Type": {"text/markdown; charset=utf-8"}},
-		Body:     []byte(body),
-	})
-}
-
 type prIn struct {
 	Branch string `json:"branch" jsonschema:"Branch in /work that holds your commits. Must not be a protected branch (main, master, develop by default)."`
 	Title  string `json:"title" jsonschema:"Pull request title"`
@@ -137,10 +114,9 @@ type PRPublisher interface {
 	Publish(pr.Request) (pr.Result, error)
 }
 
-// Handler は MCP サーバーの HTTP ハンドラを返す。g が nil でなければ、PR の
-// タイトル・本文も LLM プロキシと同じコンテンツガードに通す。extra は組み込みの
-// ツールに加えて登録するツール (OpenAPI のツールサーバーなど)。
-func Handler(m *access.Manager, pub PRPublisher, g *guard.Guard, logf func(string), extra ...func(*mcp.Server)) http.Handler {
+// Handler は MCP サーバーの HTTP ハンドラを返す。extra は組み込みのツールに加えて
+// 登録するツール (OpenAPI のツールサーバーなど)。
+func Handler(m *access.Manager, pub PRPublisher, logf func(string), extra ...func(*mcp.Server)) http.Handler {
 	s := mcp.NewServer(&mcp.Implementation{Name: "quagent", Version: "0.1.0"},
 		&mcp.ServerOptions{Instructions: instructions})
 	for _, register := range extra {
@@ -210,10 +186,6 @@ func Handler(m *access.Manager, pub PRPublisher, g *guard.Guard, logf func(strin
 			"The host fetches the branch, signs the commits, pushes it and opens the PR (you have no GitHub credentials and cannot push yourself). " +
 			"Call again with the same branch after adding commits to update the PR. Do not rewrite already-published commits.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in prIn) (*mcp.CallToolResult, pr.Result, error) {
-		if err := guardPR(ctx, g, in); err != nil {
-			logf("PR の内容がコンテンツガードで止まった (" + in.Branch + "): " + err.Error())
-			return nil, pr.Result{}, err
-		}
 		res, err := pub.Publish(pr.Request{Branch: in.Branch, Title: in.Title, Body: in.Body, Base: in.Base})
 		if err != nil {
 			logf("PR の作成に失敗 (" + in.Branch + "): " + err.Error())

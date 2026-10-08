@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/nananek/quagent/internal/config"
-	"github.com/nananek/quagent/internal/guard"
 )
 
 // Prefix は窓口上のルートの前置き。guest からは <窓口>/llm/<id>/... で使う。
@@ -72,8 +71,7 @@ func allowed(rules []rule, method, path string) bool {
 // Register は providers の転送ルートを mux に登録し、登録した provider ID を返す。
 // 秘密は起動時に一度だけ取り出す (secret_command の対話を run 開始時に済ませるため)。
 // 許可していない操作は upstream へ送らず 403 を返し、denied に知らせる (nil 可)。
-// g が nil でなければ、転送する前にローカル LLM でリクエストの中身を点検する。
-func Register(mux *http.ServeMux, providers map[string]config.Provider, logger *log.Logger, denied func(string), g *guard.Guard) ([]string, error) {
+func Register(mux *http.ServeMux, providers map[string]config.Provider, logger *log.Logger, denied func(string)) ([]string, error) {
 	registers := map[string]secretSource{}
 	for id, p := range providers {
 		p := p
@@ -89,7 +87,7 @@ func Register(mux *http.ServeMux, providers map[string]config.Provider, logger *
 			allow:    p.Allow,
 		}
 	}
-	return registerAll(mux, registers, logger, denied, g, nil)
+	return registerAll(mux, registers, logger, denied, nil)
 }
 
 // secretSource は upstream に付ける秘密の出どころ。
@@ -106,14 +104,14 @@ type secretSource struct {
 // RegisterDynamic は秘密を作り直しながら使う provider を 1 つ登録する
 // (サブスクリプションのように短命トークンで回すもの用)。onResponse が
 // nil でなければ upstream の応答ごとに呼ぶ (成功を検知して後始末する用)。
-func RegisterDynamic(mux *http.ServeMux, id, upstream, header string, secret func() (string, error), allow []string, logger *log.Logger, denied func(string), g *guard.Guard, onResponse func(id, method, path string, status int)) error {
+func RegisterDynamic(mux *http.ServeMux, id, upstream, header string, secret func() (string, error), allow []string, logger *log.Logger, denied func(string), onResponse func(id, method, path string, status int)) error {
 	_, err := registerAll(mux, map[string]secretSource{
 		id: {upstream: upstream, header: header, secret: secret, allow: allow},
-	}, logger, denied, g, onResponse)
+	}, logger, denied, onResponse)
 	return err
 }
 
-func registerAll(mux *http.ServeMux, registers map[string]secretSource, logger *log.Logger, denied func(string), g *guard.Guard, onResponse func(id, method, path string, status int)) ([]string, error) {
+func registerAll(mux *http.ServeMux, registers map[string]secretSource, logger *log.Logger, denied func(string), onResponse func(id, method, path string, status int)) ([]string, error) {
 	var ids []string
 	for id, reg := range registers {
 		up, err := url.Parse(reg.upstream)
@@ -133,17 +131,15 @@ func registerAll(mux *http.ServeMux, registers map[string]secretSource, logger *
 			header = "Authorization"
 		}
 		h := handler(id, up, header, reg.secret, logger, onResponse)
-		mux.Handle(Prefix+id+"/", http.MaxBytesHandler(gate(id, up.Host, rules, h, logger, denied, g), 32<<20))
+		mux.Handle(Prefix+id+"/", http.MaxBytesHandler(gate(id, rules, h, logger, denied), 32<<20))
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
 	return ids, nil
 }
 
-// gate は rules に無い操作を upstream へ送らずに断り、g があれば中身を点検する。
-// upstreamHost は実際の転送先 (設定の upstream)。r.Host は VM が決められるので
-// 点検や承認の表示には使わない。
-func gate(id, upstreamHost string, rules []rule, next http.Handler, logger *log.Logger, denied func(string), g *guard.Guard) http.Handler {
+// gate は rules に無い操作を upstream へ送らずに断る。
+func gate(id string, rules []rule, next http.Handler, logger *log.Logger, denied func(string)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rest := strings.TrimPrefix(r.URL.Path, Prefix+id)
 		if !allowed(rules, r.Method, rest) {
@@ -153,32 +149,6 @@ func gate(id, upstreamHost string, rules []rule, next http.Handler, logger *log.
 			}
 			http.Error(w, fmt.Sprintf("quagent: %s %s is not allowed by the LLM proxy (only inference endpoints are forwarded)", r.Method, rest), http.StatusForbidden)
 			return
-		}
-		if g != nil {
-			body, truncated, err := guard.PeekBody(r, g.InspectLimit())
-			if err != nil {
-				logger.Printf("llm %s 本文を読めない (%v) -> 403", id, err)
-				if denied != nil {
-					denied(fmt.Sprintf("%s %s %q: 本文を読めない: %v", id, r.Method, rest, err))
-				}
-				http.Error(w, "quagent: the request body could not be inspected, so it was not forwarded", http.StatusForbidden)
-				return
-			}
-			req := guard.RequestFrom(r, id, body, truncated)
-			req.Host = upstreamHost
-			// 転送前に落とすヘッダ (窓口の合言葉など) はローカル LLM にも見せない
-			req.Headers = r.Header.Clone()
-			for _, h := range strippedHeaders {
-				req.Headers.Del(h)
-			}
-			if err := g.Check(r.Context(), req); err != nil {
-				logger.Printf("llm %s コンテンツガードが止めた %s %q: %v", id, r.Method, rest, err)
-				if denied != nil {
-					denied(fmt.Sprintf("%s %s %q: %v", id, r.Method, rest, err))
-				}
-				http.Error(w, "quagent: blocked by the request content guard: "+err.Error(), http.StatusForbidden)
-				return
-			}
 		}
 		next.ServeHTTP(w, r)
 	})

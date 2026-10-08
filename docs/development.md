@@ -32,7 +32,7 @@ make build
 - `internal/sandbox` … VM 内部の追加防御層（seccomp / Landlock サンドボックス）
 - `internal/guest` / `internal/hostsvc` … vsock のゲスト側レシーバおよびホスト側サービス
 - `internal/access` / `internal/mcpsrv` / `internal/console` … ネットワークアクセス申請・承認コンソール・MCP サーバー
-- `internal/authproxy` / `internal/guard` / `internal/tlsmitm` … LLM 認証プロキシ、ローカル LLM コンテンツガード、動的使い捨て CA
+- `internal/authproxy` / `internal/headerpolicy` / `internal/tlsmitm` … LLM 認証プロキシ、ヘッダ制限ポリシー、動的使い捨て CA
 - `internal/pr` … VM 内コミットの取り込みとホスト側での再署名・PR 作成
 - `internal/config` / `internal/paths` / `internal/tui` … 設定管理、パス解決、起動・終了 TUI
 
