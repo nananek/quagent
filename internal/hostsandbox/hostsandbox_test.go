@@ -92,6 +92,11 @@ func TestHelperIsolateHome(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(work, "overlay.qcow2"), []byte("overlay"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// work 配下のデータディスク (tmp.img 想定)。隔離で 0 バイトに
+	// 切り詰められないことの回帰用。
+	if err := os.WriteFile(filepath.Join(work, "tmp.img"), []byte("tmpdisk"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(img, []byte("base_image"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -99,8 +104,9 @@ func TestHelperIsolateHome(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// IsolateHome を実行
-	if err := IsolateHome(home, []string{img}, []string{work}); err != nil {
+	// IsolateHome を実行 (work 配下の tmp.img は別掲しない)
+	rw := isolationRWPaths(work, []string{filepath.Join(work, "tmp.img")})
+	if err := IsolateHome(home, []string{img}, rw); err != nil {
 		t.Fatalf("IsolateHome failed: %v", err)
 	}
 
@@ -120,12 +126,34 @@ func TestHelperIsolateHome(t *testing.T) {
 		t.Fatalf("work read failed: %v, content: %q", err, string(bWork))
 	}
 
+	// 3. tmp.img は中身もサイズも変わらないこと (0 バイト化の回帰)
+	bTmp, err := os.ReadFile(filepath.Join(work, "tmp.img"))
+	if err != nil || string(bTmp) != "tmpdisk" {
+		t.Fatalf("tmp.img changed by isolation: %v, content: %q", err, string(bTmp))
+	}
+
 	os.Exit(0)
 }
 
 func TestIsolateHomeEmpty(t *testing.T) {
 	if err := IsolateHome("", nil, nil); err != nil {
 		t.Fatalf("IsolateHome(\"\") error = %v", err)
+	}
+}
+
+func TestIsolationRWPaths(t *testing.T) {
+	work := "/home/u/.local/state/quagent/runs/run1"
+	inside := filepath.Join(work, "tmp.img")
+	outside := "/var/tmp/disk.img"
+	got := isolationRWPaths(work, []string{inside, outside, ""})
+	want := []string{work, outside}
+	if len(got) != len(want) {
+		t.Fatalf("isolationRWPaths = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("isolationRWPaths = %q, want %q", got, want)
+		}
 	}
 }
 

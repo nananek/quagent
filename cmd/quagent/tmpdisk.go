@@ -56,15 +56,22 @@ func prepareTmp(repo, work string) (dir, img string, err error) {
 
 // tmpRuncmd はディスクを VM の /work/.tmp にする cloud-init の runcmd (受け口の起動前)。
 // 置くのはテキストの想定なので、実行・setuid・デバイスファイルは使えないようにする。
+// デバイスの出現を待ってから mkfs する (udev が遅れると mkfs が失敗し、
+// mkdir ごと実行されず /work/.tmp が無いまま進んでしまうため)。最後に
+// /proc/mounts でマウントを確かめ、失敗なら cloud-init を失敗させる。
 func tmpRuncmd(uid string) string {
 	dev := "/dev/disk/by-id/virtio-" + tmpSerial
-	return fmt.Sprintf("  - [sh, -c, \"mkfs.ext4 -q -L %s %s && mkdir -p /work/.tmp && mount -o nosuid,nodev,noexec %s /work/.tmp && rmdir /work/.tmp/lost+found && chown %s:%s /work/.tmp\"]\n",
-		tmpSerial, dev, dev, uid, uid)
+	return fmt.Sprintf("  - [sh, -c, \"mkdir -p /work/.tmp && dev=%s && for i in $(seq 1 30); do [ -b $dev ] && break; sleep 1; done && mkfs.ext4 -q -L %s $dev && mount -o nosuid,nodev,noexec $dev /work/.tmp && rmdir /work/.tmp/lost+found && chown %s:%s /work/.tmp && grep -q ' /work/.tmp ' /proc/mounts\"]\n",
+		dev, tmpSerial, uid, uid)
 }
 
 // copyInTmp は host の .tmp の通常ファイルとディレクトリを VM の /work/.tmp へ渡す。
-// リンクなどは渡さない。
+// リンクなどは渡さない。マウントされていない plain のディレクトリに書くと
+// 隔離 (noexec 等) や容量制限が効かないので、先にマウントを確かめる。
 func copyInTmp(g vmGuest, dir string) error {
+	if out, err := g.sh("grep -q ' /work/.tmp ' /proc/mounts", nil); err != nil {
+		return fmt.Errorf("/work/.tmp が VM でマウントされていない (cloud-init の準備に失敗): %v: %s\nVM 内の診断:\n%s", err, out, diagTmpMount(g))
+	}
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	var total int64
@@ -111,6 +118,13 @@ func copyInTmp(g vmGuest, dir string) error {
 		return fmt.Errorf(".tmp を VM へ渡せない: %v: %s", err, out.String())
 	}
 	return nil
+}
+
+// diagTmpMount は /work/.tmp のマウント失敗時に VM 内の手がかりを集める
+// (読み取り専用の確認コマンドのみ)。
+func diagTmpMount(g vmGuest) string {
+	out, _ := g.sh("echo '--- cloud-init status:'; cloud-init status --long 2>&1 | head -n 20; echo '--- lsblk:'; lsblk -o NAME,SIZE,TYPE,MOUNTPOINTS,SERIAL 2>&1; echo '--- by-id:'; ls -l /dev/disk/by-id/ 2>&1; echo '--- work:'; ls -ld /work /work/.tmp 2>&1; df -h /work/.tmp 2>&1; echo '--- mounts:'; grep -E 'work|vdb|vdc' /proc/mounts 2>&1; echo '--- cloud-init tmp:'; grep -a -i 'tmp' /var/log/cloud-init-output.log 2>&1 | tail -n 20", nil)
+	return string(out)
 }
 
 // collectTmp は VM の /work/.tmp を host の .tmp へ回収する。
