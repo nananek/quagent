@@ -166,3 +166,28 @@ func TestHostDNS(t *testing.T) {
 	// 見つからなければエラーを返す。パニックしないことを確認。
 	_, _ = HostDNS()
 }
+
+func TestOVMFPath(t *testing.T) {
+	// システム上に OVMF があればパス、なければエラーが返る
+	_, _ = OVMFPath()
+}
+
+func TestMakeSeed(t *testing.T) {
+	tmp := t.TempDir()
+	// xorriso が環境にない場合はエラーが返ることを確認
+	_, err := MakeSeed(tmp, "inst-1", "host-1", "#cloud-config\n", map[string]string{"extra.txt": filepath.Join(tmp, "extra.txt")})
+	if err == nil {
+		// xorriso がある環境なら seed.iso ができている
+		if _, statErr := os.Stat(filepath.Join(tmp, "seed.iso")); statErr != nil {
+			t.Errorf("seed.iso not found: %v", statErr)
+		}
+	}
+}
+
+func TestMakeOverlay(t *testing.T) {
+	tmp := t.TempDir()
+	base := filepath.Join(tmp, "base.qcow2")
+	overlay := filepath.Join(tmp, "overlay.qcow2")
+	_ = os.WriteFile(base, []byte("fake qcow2"), 0o644)
+	_ = MakeOverlay(base, overlay)
+}

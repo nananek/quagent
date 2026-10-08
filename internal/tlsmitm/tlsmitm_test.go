@@ -105,3 +105,49 @@ func TestLeafUsableInTLS(t *testing.T) {
 		t.Fatal("PrivateKey が無い")
 	}
 }
+
+func TestLeafEmptyName(t *testing.T) {
+	ca, err := NewCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ca.Leaf(""); err == nil {
+		t.Fatal("expected error for empty leaf name")
+	}
+}
+
+func TestFromPEMInvalid(t *testing.T) {
+	ca, err := NewCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := ca.KeyPEM()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 壊れた証明書PEM
+	if _, err := FromPEM([]byte("invalid pem"), key); err == nil {
+		t.Fatal("expected error for invalid cert PEM")
+	}
+
+	// 壊れた鍵PEM
+	if _, err := FromPEM(ca.CertPEM(), []byte("invalid key pem")); err == nil {
+		t.Fatal("expected error for invalid key PEM")
+	}
+}
+
+func TestVerifyChainInvalidCA(t *testing.T) {
+	ca, err := NewCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := ca.Leaf("example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := VerifyChain([]byte("not a valid ca"), c, "example.com"); err == nil {
+		t.Fatal("expected error for invalid CA PEM")
+	}
+}

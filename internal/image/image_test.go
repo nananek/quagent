@@ -472,3 +472,160 @@ func TestVerifyChecksum(t *testing.T) {
 		t.Fatal("expected error on mismatched hash")
 	}
 }
+
+func TestVerifyFile(t *testing.T) {
+	tmp := t.TempDir()
+	filePath := filepath.Join(tmp, "test.qcow2")
+	content := []byte("fake qcow2 image content")
+	if err := os.WriteFile(filePath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := sha256.Sum256(content)
+	sum256 := hex.EncodeToString(h[:])
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(sum256 + "  test.qcow2\n"))
+	}))
+	defer srv.Close()
+
+	r := Recipe{
+		CloudImageURL: "https://example.com/test.qcow2",
+		ChecksumURL:   srv.URL + "/checksums.sha256",
+	}
+
+	// 1. 正常系
+	if err := verifyFile(r, filePath); err != nil {
+		t.Fatalf("verifyFile failed: %v", err)
+	}
+
+	// 2. 存在しないファイル
+	if err := verifyFile(r, filepath.Join(tmp, "nonexistent.qcow2")); err == nil {
+		t.Fatal("expected error for nonexistent file")
+	}
+
+	// 3. ハッシュ不一致
+	rBad := Recipe{
+		CloudImageURL: "https://example.com/bad.qcow2",
+		ChecksumURL:   srv.URL + "/checksums.sha256",
+	}
+	badFile := filepath.Join(tmp, "bad.qcow2")
+	if err := os.WriteFile(badFile, []byte("different content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyFile(rBad, badFile); err == nil {
+		t.Fatal("expected error for bad file")
+	}
+}
+
+func TestRunWithTimeout(t *testing.T) {
+	// 1. 正常終了
+	cmd := exec.Command("echo", "hello")
+	out, err := runWithTimeout(cmd, 2*time.Second)
+	if err != nil || !strings.Contains(string(out), "hello") {
+		t.Fatalf("runWithTimeout failed: out=%q, err=%v", string(out), err)
+	}
+
+	// 2. タイムアウト
+	cmdSlow := exec.Command("sleep", "2")
+	_, err = runWithTimeout(cmdSlow, 50*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "タイムアウト") {
+		t.Fatalf("expected timeout error, got %v", err)
+	}
+}
+
+func TestBuildErrors(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+
+	// 1. 差分更新 (Incremental) でベースイメージが無い
+	r := Recipe{Name: "gentoo"}
+	var buf bytes.Buffer
+	_, err := Build(r, BuildOpts{Incremental: true}, &buf)
+	if err == nil || !strings.Contains(err.Error(), "差分更新には前回のイメージが要る") {
+		t.Fatalf("expected incremental error, got %v", err)
+	}
+
+	// 2. resolveLatest が失敗する
+	rFail := Recipe{
+		Name:          "custom",
+		LatestURL:     "http://127.0.0.1:0/latest",
+		CloudImageURL: "https://example.com/image-{{latest}}.qcow2",
+	}
+	_, err = Build(rFail, BuildOpts{Incremental: false}, &buf)
+	if err == nil {
+		t.Fatal("expected error on failed resolveLatest")
+	}
+}
+
+func TestReadRecipeInvalid(t *testing.T) {
+	// 1. recipe.json が存在しない
+	fsysNoRecipe := fstest.MapFS{
+		"user-data.yaml": &fstest.MapFile{Data: []byte("#cloud-config\n")},
+	}
+	if _, err := readRecipe(fsysNoRecipe, "dir", "test"); err == nil {
+		t.Fatal("expected error when recipe.json is missing")
+	}
+
+	// 2. 不正な JSON
+	fsysBadJSON := fstest.MapFS{
+		"recipe.json":    &fstest.MapFile{Data: []byte("not valid json")},
+		"user-data.yaml": &fstest.MapFile{Data: []byte("#cloud-config\n")},
+	}
+	if _, err := readRecipe(fsysBadJSON, "dir", "test"); err == nil {
+		t.Fatal("expected error on invalid recipe.json")
+	}
+
+	// 3. user-data.yaml が存在しない
+	fsysNoUserData := fstest.MapFS{
+		"recipe.json": &fstest.MapFile{Data: []byte(`{"cloud_image_url":"https://example.com/img.qcow2"}`)},
+	}
+	if _, err := readRecipe(fsysNoUserData, "dir", "test"); err == nil {
+		t.Fatal("expected error when user-data.yaml is missing")
+	}
+}
+
+func TestRecipesWithUserDir(t *testing.T) {
+	cfg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfg)
+	recipesDir := RecipesDir()
+	userRecipeDir := filepath.Join(recipesDir, "mycustom")
+	if err := os.MkdirAll(userRecipeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// ディレクトリ以外のファイルも置いてみる (!e.IsDir() のカバレッジ)
+	if err := os.WriteFile(filepath.Join(recipesDir, "ignored.txt"), []byte("ignore me"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// ユーザー定義レシピを作成
+	recipeJSON := `{"cloud_image_url":"https://example.com/custom.qcow2","checksum_url":"https://example.com/custom.sha256"}`
+	if err := os.WriteFile(filepath.Join(userRecipeDir, "recipe.json"), []byte(recipeJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userRecipeDir, "user-data.yaml"), []byte("#cloud-config\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rs, err := Recipes()
+	if err != nil {
+		t.Fatalf("Recipes() failed: %v", err)
+	}
+	found := false
+	for _, r := range rs {
+		if r.Name == "mycustom" {
+			found = true
+			if r.Source != userRecipeDir {
+				t.Errorf("Source = %q, want %q", r.Source, userRecipeDir)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("user recipe 'mycustom' was not found in Recipes()")
+	}
+
+	// FindRecipe でも見つかる
+	r, err := FindRecipe("mycustom")
+	if err != nil || r.Name != "mycustom" {
+		t.Fatalf("FindRecipe(mycustom) failed: %v", err)
+	}
+}

@@ -393,3 +393,86 @@ func TestPublishRejectsForeignExistingBranch(t *testing.T) {
 		t.Fatal("他人のブランチが変わった")
 	}
 }
+
+func TestCheckBranch(t *testing.T) {
+	p := &Publisher{
+		Work:      t.TempDir(),
+		Protected: []string{"main", "master"},
+	}
+	// 正常系
+	if err := p.CheckBranch("feature/branch-1"); err != nil {
+		t.Errorf("CheckBranch(feature/branch-1) = %v", err)
+	}
+
+	// 空文字
+	if err := p.CheckBranch(""); err == nil {
+		t.Error("expected error for empty branch name")
+	}
+
+	// - 始まり
+	if err := p.CheckBranch("-b"); err == nil {
+		t.Error("expected error for branch starting with -")
+	}
+
+	// 保護ブランチ
+	if err := p.CheckBranch("main"); err == nil {
+		t.Error("expected error for protected branch main")
+	}
+}
+
+func TestLastLine(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"", ""},
+		{"single line", "single line"},
+		{"line1\nline2", "line2"},
+		{"line1\nline2\n", "line2"},
+		{"line1\n  line2", "  line2"},
+	}
+	for _, c := range cases {
+		if got := lastLine(c.in); got != c.want {
+			t.Errorf("lastLine(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestFinishWithGH(t *testing.T) {
+	p := &Publisher{
+		Repo: t.TempDir(),
+	}
+
+	// 1. 既存のOPENなPRがある場合
+	p.GH = func(dir string, args ...string) ([]byte, error) {
+		if args[0] == "pr" && args[1] == "view" {
+			return []byte("https://github.com/org/repo/pull/123\n"), nil
+		}
+		return nil, fmt.Errorf("unexpected args: %v", args)
+	}
+	res, err := p.finish(Request{Branch: "feature"}, "main", "commit1", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.URL != "https://github.com/org/repo/pull/123" || res.Created {
+		t.Fatalf("unexpected res: %+v", res)
+	}
+
+	// 2. 新規PR作成の場合
+	p.GH = func(dir string, args ...string) ([]byte, error) {
+		if args[0] == "pr" && args[1] == "view" {
+			return nil, fmt.Errorf("no pr")
+		}
+		if args[0] == "pr" && args[1] == "create" {
+			return []byte("Creating pull request...\nhttps://github.com/org/repo/pull/456\n"), nil
+		}
+		return nil, fmt.Errorf("unexpected args: %v", args)
+	}
+	res2, err := p.finish(Request{Branch: "new-feature", Title: "title", Body: "body"}, "main", "commit2", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.URL != "https://github.com/org/repo/pull/456" || !res2.Created {
+		t.Fatalf("unexpected res: %+v", res2)
+	}
+}

@@ -125,3 +125,33 @@ func TestTheme(t *testing.T) {
 		t.Fatal("theme() returned nil")
 	}
 }
+
+func TestGitTop(t *testing.T) {
+	// git リポジトリ内 (/work)
+	top := gitTop("/work")
+	if top == "" {
+		t.Fatal("expected gitTop to return non-empty repository root for /work")
+	}
+
+	// 存在しないディレクトリ
+	nonExistent := filepath.Join(t.TempDir(), "nonexistent")
+	if got := gitTop(nonExistent); got != "" {
+		t.Errorf("expected empty string for nonexistent dir, got %q", got)
+	}
+}
+
+func TestHasAnyImage(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	// 初期状態: イメージなし
+	if hasAnyImage() {
+		t.Error("expected hasAnyImage = false when no images exist")
+	}
+
+	// 1つ作成
+	dir := paths.ImagesDir()
+	_ = os.MkdirAll(dir, 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "base-gentoo-20261008-120000.qcow2"), []byte("data"), 0o644)
+	if !hasAnyImage() {
+		t.Error("expected hasAnyImage = true when an image exists")
+	}
+}

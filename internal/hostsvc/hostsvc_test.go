@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mdlayher/vsock"
 )
 
 func TestTokenRequired(t *testing.T) {
@@ -217,4 +219,68 @@ func TestReleaseConnCloseOnce(t *testing.T) {
 	if releases != 1 {
 		t.Errorf("expected release to be called exactly once, got %d", releases)
 	}
+}
+
+type mockVsockConn struct {
+	net.Conn
+	addr *vsock.Addr
+}
+
+func (c *mockVsockConn) RemoteAddr() net.Addr { return c.addr }
+
+type mockListener struct {
+	conns chan net.Conn
+}
+
+func (m *mockListener) Accept() (net.Conn, error) {
+	c, ok := <-m.conns
+	if !ok {
+		return nil, net.ErrClosed
+	}
+	return c, nil
+}
+
+func (m *mockListener) Close() error   { close(m.conns); return nil }
+func (m *mockListener) Addr() net.Addr { return &vsock.Addr{} }
+
+func TestGuardListener(t *testing.T) {
+	ml := &mockListener{conns: make(chan net.Conn, 5)}
+	gl := &guardListener{
+		Listener: ml,
+		cid:      10,
+		sem:      make(chan struct{}, 1), // 同時接続上限 1
+	}
+
+	p1, p2 := net.Pipe()
+	p3, p4 := net.Pipe()
+	p5, p6 := net.Pipe()
+
+	defer p1.Close()
+	defer p3.Close()
+	defer p5.Close()
+
+	// 1. 別の CID (5) -> スキップされて破棄
+	ml.conns <- &mockVsockConn{Conn: p2, addr: &vsock.Addr{ContextID: 5}}
+	// 2. 正しい CID (10) -> 接続成功
+	ml.conns <- &mockVsockConn{Conn: p4, addr: &vsock.Addr{ContextID: 10}}
+
+	c, err := gl.Accept()
+	if err != nil {
+		t.Fatalf("Accept() error: %v", err)
+	}
+	if c == nil {
+		t.Fatal("expected non-nil conn")
+	}
+
+	// 3. セマフォ上限に達しているため、次の接続 (CID 10) は拒否されてCloseされる
+	// 別スレッドで Close させて Accept を終了可能にする
+	ml.conns <- &mockVsockConn{Conn: p6, addr: &vsock.Addr{ContextID: 10}}
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		ml.Close()
+	}()
+	_, _ = gl.Accept()
+
+	// c をクローズするとセマフォが解放される
+	_ = c.Close()
 }

@@ -111,6 +111,83 @@ func TestLoadModeOnlyStaysOn(t *testing.T) {
 	}
 }
 
+func TestLoadInvalidJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bad.json")
+	if err := os.WriteFile(path, []byte(`{invalid`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestLoadInvalidMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "badmode.json")
+	if err := os.WriteFile(path, []byte(`{"mode":"invalid"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for invalid mode in Load")
+	}
+}
+
+func TestPolicyJSON(t *testing.T) {
+	p := &Policy{
+		Mode:      "compat",
+		ExtraDeny: []string{"chroot"},
+	}
+	b, err := p.JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) == 0 {
+		t.Fatal("expected non-empty JSON")
+	}
+}
+
+func TestPolicyReadWritePaths(t *testing.T) {
+	// 1. 明示パスあり
+	explicit := &Policy{ReadWritePaths: []string{"/custom/path"}}
+	paths, isExplicit := explicit.readWritePaths()
+	if !isExplicit || len(paths) != 1 || paths[0] != "/custom/path" {
+		t.Fatalf("explicit paths = %v, %v", paths, isExplicit)
+	}
+
+	// 2. 既定パス
+	def := &Policy{}
+	defPaths, isExplicitDef := def.readWritePaths()
+	if isExplicitDef {
+		t.Fatal("expected isExplicit = false for default paths")
+	}
+	foundWork := false
+	for _, p := range defPaths {
+		if p == "/work" {
+			foundWork = true
+			break
+		}
+	}
+	if !foundWork {
+		t.Fatalf("expected /work in default paths, got %v", defPaths)
+	}
+}
+
+func TestRunWithValidation(t *testing.T) {
+	// 1. 空のargv
+	if err := RunWith(nil, ""); err == nil {
+		t.Fatal("expected error for nil argv")
+	}
+	if err := RunWith([]string{"--"}, ""); err == nil {
+		t.Fatal("expected error for argv containing only '--'")
+	}
+
+	// 2. 壊れた設定ファイルパス
+	badPath := filepath.Join(t.TempDir(), "bad.json")
+	_ = os.WriteFile(badPath, []byte(`{invalid`), 0o644)
+	if err := RunWith([]string{"echo"}, badPath); err == nil {
+		t.Fatal("expected error for invalid config in RunWith")
+	}
+}
+
 func contains(xs []int, v int) bool {
 	for _, x := range xs {
 		if x == v {

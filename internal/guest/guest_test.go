@@ -114,3 +114,52 @@ func TestReadEnvFile(t *testing.T) {
 		t.Fatalf("vars = %v", vars)
 	}
 }
+
+func TestProtoReadWriteFrame(t *testing.T) {
+	var buf bytes.Buffer
+	fw := &frameWriter{w: &buf}
+
+	// 1. 正常なフレーム書き込みと読み込み
+	if err := fw.write(fStdout, []byte("hello world")); err != nil {
+		t.Fatal(err)
+	}
+	tType, data, err := readFrame(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tType != fStdout || string(data) != "hello world" {
+		t.Fatalf("got (%d, %q), want (%d, 'hello world')", tType, data, fStdout)
+	}
+
+	// 2. 枠上限を超えたサイズ
+	var overBuf bytes.Buffer
+	var hdr [5]byte
+	hdr[0] = fStdout
+	// maxFrame (1<<20) + 1
+	hdr[1] = 0x00
+	hdr[2] = 0x10
+	hdr[3] = 0x00
+	hdr[4] = 0x01
+	overBuf.Write(hdr[:])
+	if _, _, err := readFrame(&overBuf); err == nil || !strings.Contains(err.Error(), "枠が大きすぎる") {
+		t.Fatalf("expected overflow error, got %v", err)
+	}
+}
+
+func TestFrameStream(t *testing.T) {
+	var buf bytes.Buffer
+	fw := &frameWriter{w: &buf}
+	stream := frameStream{fw: fw, t: fStderr}
+
+	n, err := stream.Write([]byte("error output"))
+	if err != nil || n != 12 {
+		t.Fatalf("Write() = %d, %v", n, err)
+	}
+	tType, data, err := readFrame(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tType != fStderr || string(data) != "error output" {
+		t.Fatalf("got (%d, %q), want (%d, 'error output')", tType, data, fStderr)
+	}
+}

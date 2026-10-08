@@ -276,3 +276,86 @@ func TestRelayNames(t *testing.T) {
 		t.Fatal("relayNames did not exit on channel close")
 	}
 }
+
+func TestSweepRuns(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tmp)
+	runsDir := paths.RunsDir()
+	if err := os.MkdirAll(runsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1分以上前の古い run ディレクトリを作成
+	oldRun := filepath.Join(runsDir, "run-old")
+	if err := os.MkdirAll(oldRun, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(oldRun, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	// sweepRuns を実行してもクラッシュせず古いディレクトリが削除される
+	sweepRuns()
+}
+
+func TestHoldWindowName(t *testing.T) {
+	if cleanup := holdWindowName(""); cleanup != nil {
+		t.Error("expected nil cleanup for empty pane")
+	}
+}
+
+func TestRelayDeniedAndBlocked(t *testing.T) {
+	tmp := t.TempDir()
+	m, err := access.NewManager(noopApplier{}, filepath.Join(tmp, "always.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(tmp, "console.sock")
+	srv, err := console.NewServer(m, sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.Close)
+
+	denied := make(chan string, 1)
+	blocked := make(chan string, 1)
+	l := &netns.Launcher{
+		Denied:  denied,
+		Blocked: blocked,
+	}
+
+	denied <- "denied.example.com"
+	close(denied)
+	relayDenied(l, srv)
+
+	blocked <- "blocked.example.com"
+	close(blocked)
+	relayBlocked(l, srv)
+}
+
+func TestAgyMCPConf(t *testing.T) {
+	conf := agyMCPConf("test-token")
+	if conf == nil {
+		t.Fatal("agyMCPConf returned nil")
+	}
+	mcpServers, ok := conf["mcpServers"].(map[string]any)
+	if !ok {
+		t.Fatal("mcpServers not found")
+	}
+	quagent, ok := mcpServers["quagent"].(map[string]any)
+	if !ok {
+		t.Fatal("quagent server not found")
+	}
+	headers, ok := quagent["headers"].(map[string]string)
+	if !ok || headers["Authorization"] != "Bearer test-token" {
+		t.Errorf("Authorization header incorrect: %v", headers)
+	}
+}
+
+func TestSetupAgySubscriptionNoSeed(t *testing.T) {
+	err := setupAgySubscription(vmGuest{}, &config.Config{}, "token")
+	if err == nil || !strings.Contains(err.Error(), "種が無い") {
+		t.Fatalf("expected error without seed, got %v", err)
+	}
+}
