@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -318,6 +319,18 @@ func TestWebProxyBlock(t *testing.T) {
 	}
 }
 
+type dummyConn struct {
+	io.Reader
+	io.Writer
+}
+
+func (d *dummyConn) Close() error                       { return nil }
+func (d *dummyConn) LocalAddr() net.Addr                { return &net.TCPAddr{} }
+func (d *dummyConn) RemoteAddr() net.Addr               { return &net.TCPAddr{} }
+func (d *dummyConn) SetDeadline(t time.Time) error      { return nil }
+func (d *dummyConn) SetReadDeadline(t time.Time) error  { return nil }
+func (d *dummyConn) SetWriteDeadline(t time.Time) error { return nil }
+
 func TestHandleTLS(t *testing.T) {
 	// 1. 壊れたデータ -> block
 	var blockedReason string
@@ -325,13 +338,7 @@ func TestHandleTLS(t *testing.T) {
 		blocked: func(reason string) { blockedReason = reason },
 		allowed: func(name string) bool { return true },
 	}
-	c1, c2 := net.Pipe()
-	go func() {
-		_, _ = c2.Write([]byte("not a tls record"))
-		_ = c2.Close()
-	}()
-	p.handleTLS(c1, "203.0.113.1:443")
-	_ = c1.Close()
+	p.handleTLS(&dummyConn{Reader: bytes.NewReader([]byte("not a tls record")), Writer: io.Discard}, "203.0.113.1:443")
 	if !strings.Contains(blockedReason, "SNI 203.0.113.1") {
 		t.Errorf("expected blocked reason for bad TLS, got %q", blockedReason)
 	}
@@ -342,13 +349,7 @@ func TestHandleTLS(t *testing.T) {
 		blocked: func(reason string) { blockedReason = reason },
 		allowed: func(name string) bool { return name == "good.com" },
 	}
-	c1, c2 = net.Pipe()
-	go func() {
-		_, _ = c2.Write(tlsRecord(clientHello("evil.com")))
-		_ = c2.Close()
-	}()
-	p.handleTLS(c1, "203.0.113.1:443")
-	_ = c1.Close()
+	p.handleTLS(&dummyConn{Reader: bytes.NewReader(tlsRecord(clientHello("evil.com"))), Writer: io.Discard}, "203.0.113.1:443")
 	if blockedReason != "SNI evil.com" {
 		t.Errorf("expected blocked SNI evil.com, got %q", blockedReason)
 	}
@@ -360,18 +361,10 @@ func TestHandleTLS(t *testing.T) {
 		passthrough: []string{"good.com"},
 		dial: func(network, addr string, mark int) (net.Conn, error) {
 			dialed = true
-			up1, up2 := net.Pipe()
-			go func() { _ = up2.Close() }()
-			return up1, nil
+			return &dummyConn{Reader: bytes.NewReader(nil), Writer: io.Discard}, nil
 		},
 	}
-	c1, c2 = net.Pipe()
-	go func() {
-		_, _ = c2.Write(tlsRecord(clientHello("good.com")))
-		_ = c2.Close()
-	}()
-	p.handleTLS(c1, "203.0.113.1:443")
-	_ = c1.Close()
+	p.handleTLS(&dummyConn{Reader: bytes.NewReader(tlsRecord(clientHello("good.com"))), Writer: io.Discard}, "203.0.113.1:443")
 	if !dialed {
 		t.Error("expected dial to be called for allowed passthrough SNI")
 	}
@@ -384,13 +377,7 @@ func TestHandleHTTP(t *testing.T) {
 		blocked: func(reason string) { blockedReason = reason },
 		allowed: func(name string) bool { return true },
 	}
-	c1, c2 := net.Pipe()
-	go func() {
-		_, _ = c2.Write([]byte("GARBAGE\r\n\r\n"))
-		_ = c2.Close()
-	}()
-	p.handleHTTP(c1, "203.0.113.1:80")
-	_ = c1.Close()
+	p.handleHTTP(&dummyConn{Reader: bytes.NewReader([]byte("GARBAGE\r\n\r\n")), Writer: io.Discard}, "203.0.113.1:80")
 	if !strings.Contains(blockedReason, "Host 203.0.113.1") {
 		t.Errorf("expected blocked reason for bad HTTP, got %q", blockedReason)
 	}
@@ -401,13 +388,7 @@ func TestHandleHTTP(t *testing.T) {
 		blocked: func(reason string) { blockedReason = reason },
 		allowed: func(name string) bool { return name == "good.com" },
 	}
-	c1, c2 = net.Pipe()
-	go func() {
-		_, _ = c2.Write([]byte("GET / HTTP/1.1\r\nHost: evil.com\r\n\r\n"))
-		_ = c2.Close()
-	}()
-	p.handleHTTP(c1, "203.0.113.1:80")
-	_ = c1.Close()
+	p.handleHTTP(&dummyConn{Reader: bytes.NewReader([]byte("GET / HTTP/1.1\r\nHost: evil.com\r\n\r\n")), Writer: io.Discard}, "203.0.113.1:80")
 	if blockedReason != "Host evil.com" {
 		t.Errorf("expected blocked Host evil.com, got %q", blockedReason)
 	}
@@ -418,19 +399,106 @@ func TestHandleHTTP(t *testing.T) {
 		allowed: func(name string) bool { return name == "good.com" },
 		dial: func(network, addr string, mark int) (net.Conn, error) {
 			dialed = true
-			up1, up2 := net.Pipe()
-			go func() { _ = up2.Close() }()
-			return up1, nil
+			return &dummyConn{Reader: bytes.NewReader(nil), Writer: io.Discard}, nil
 		},
 	}
-	c1, c2 = net.Pipe()
-	go func() {
-		_, _ = c2.Write([]byte("GET / HTTP/1.1\r\nHost: good.com\r\n\r\n"))
-		_ = c2.Close()
-	}()
-	p.handleHTTP(c1, "203.0.113.1:80")
-	_ = c1.Close()
+	p.handleHTTP(&dummyConn{Reader: bytes.NewReader([]byte("GET / HTTP/1.1\r\nHost: good.com\r\n\r\n")), Writer: io.Discard}, "203.0.113.1:80")
 	if !dialed {
 		t.Error("expected dial to be called for allowed Host")
+	}
+}
+
+func TestTerminates(t *testing.T) {
+	p := &webProxy{
+		passthrough: []string{"*.github.com", "api.example.com"},
+	}
+
+	// passthrough にマッチするものは terminates == false
+	if p.terminates("api.github.com") {
+		t.Error("expected terminates = false for api.github.com")
+	}
+	if p.terminates("api.example.com") {
+		t.Error("expected terminates = false for api.example.com")
+	}
+
+	// マッチしないものは terminates == true
+	if !p.terminates("other.example.com") {
+		t.Error("expected terminates = true for other.example.com")
+	}
+}
+
+func TestWriteHTTP1Error(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writeHTTP1Error(&buf, http.StatusForbidden, "access denied"); err != nil {
+		t.Fatalf("writeHTTP1Error error: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(&buf), nil)
+	if err != nil {
+		t.Fatalf("ReadResponse error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("StatusCode = %d, want 403", resp.StatusCode)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(b), "access denied") {
+		t.Errorf("body = %q, want 'access denied'", string(b))
+	}
+}
+
+func TestIsUpgrade(t *testing.T) {
+	req, _ := http.NewRequest("GET", "http://example.com/ws", nil)
+	if isUpgrade(req) {
+		t.Error("expected isUpgrade = false without headers")
+	}
+
+	req.Header.Set("Upgrade", "websocket")
+	if isUpgrade(req) {
+		t.Error("expected isUpgrade = false with only Upgrade header")
+	}
+
+	req.Header.Set("Connection", "Upgrade")
+	if !isUpgrade(req) {
+		t.Error("expected isUpgrade = true with both Upgrade and Connection: Upgrade")
+	}
+}
+
+func TestRemoveHopHeaders(t *testing.T) {
+	h := http.Header{}
+	h.Set("Connection", "X-Custom, Keep-Alive")
+	h.Set("X-Custom", "val")
+	h.Set("Keep-Alive", "timeout=5")
+	h.Set("Te", "trailers")
+	h.Set("Accept", "text/plain")
+
+	removeHopHeaders(h)
+
+	if h.Get("X-Custom") != "" {
+		t.Errorf("expected X-Custom to be removed, got %q", h.Get("X-Custom"))
+	}
+	if h.Get("Keep-Alive") != "" {
+		t.Errorf("expected Keep-Alive to be removed, got %q", h.Get("Keep-Alive"))
+	}
+	if h.Get("Te") != "" {
+		t.Errorf("expected Te to be removed, got %q", h.Get("Te"))
+	}
+	if h.Get("Accept") != "text/plain" {
+		t.Errorf("expected Accept to remain, got %q", h.Get("Accept"))
+	}
+}
+
+func TestNormalizeRequest(t *testing.T) {
+	req, _ := http.NewRequest("GET", "/path", nil)
+	normalizeRequest(req, "example.com", true)
+	if req.URL.Scheme != "https" || req.URL.Host != "example.com" || req.Host != "example.com" {
+		t.Errorf("secure normalizeRequest unexpected: URL=%v Host=%q", req.URL, req.Host)
+	}
+
+	reqPlain, _ := http.NewRequest("GET", "/path", nil)
+	normalizeRequest(reqPlain, "example.com", false)
+	if reqPlain.URL.Scheme != "http" || reqPlain.URL.Host != "example.com" || reqPlain.Host != "example.com" {
+		t.Errorf("plain normalizeRequest unexpected: URL=%v Host=%q", reqPlain.URL, reqPlain.Host)
 	}
 }

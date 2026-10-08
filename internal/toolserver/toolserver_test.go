@@ -257,3 +257,82 @@ func TestToolName(t *testing.T) {
 		t.Errorf("長さ = %d", len(long))
 	}
 }
+
+func TestConvertErrors(t *testing.T) {
+	// 1. paths がない
+	if _, err := convert("srv", map[string]any{}); err == nil {
+		t.Error("expected error for spec without paths")
+	}
+
+	// 2. paths はあるが operation がない
+	if _, err := convert("srv", map[string]any{"paths": map[string]any{"/test": map[string]any{}}}); err == nil {
+		t.Error("expected error for spec without valid operations")
+	}
+}
+
+func TestConvertDuplicateOperations(t *testing.T) {
+	spec := map[string]any{
+		"paths": map[string]any{
+			"/item": map[string]any{
+				"get": map[string]any{"operationId": "item"},
+			},
+			"/item_alt": map[string]any{
+				"get": map[string]any{"operationId": "item"},
+			},
+		},
+	}
+	ops, err := convert("srv", spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 2 {
+		t.Fatalf("expected 2 operations, got %d", len(ops))
+	}
+	if ops["srv__item"] == nil || ops["srv__item_2"] == nil {
+		t.Fatalf("expected srv__item and srv__item_2, got keys: %v", ops)
+	}
+}
+
+func TestIsText(t *testing.T) {
+	tests := []struct {
+		ctype string
+		data  []byte
+		want  bool
+	}{
+		{"text/plain", []byte("hello"), true},
+		{"text/html; charset=utf-8", []byte("<h1>hi</h1>"), true},
+		{"application/json", []byte(`{}`), true},
+		{"application/vnd.api+json", []byte(`{}`), true},
+		{"image/png", []byte{0x89, 'P', 'N', 'G'}, false},
+		{"application/octet-stream", []byte{0, 1, 2}, false},
+		{"", []byte("plain ascii text"), true},
+		{"", []byte{0, 1, 2}, false},
+	}
+	for _, tt := range tests {
+		if got := isText(tt.ctype, tt.data); got != tt.want {
+			t.Errorf("isText(%q) = %v, want %v", tt.ctype, got, tt.want)
+		}
+	}
+}
+
+func TestFormEncodeInvalid(t *testing.T) {
+	if _, err := formEncode(json.RawMessage(`"not an object"`)); err == nil {
+		t.Error("expected error for non-object JSON in formEncode")
+	}
+}
+
+func TestUserAgentOverride(t *testing.T) {
+	orig := UserAgent
+	defer func() { UserAgent = orig }()
+	UserAgent = "custom-agent/1.0"
+
+	ts, last := newToolServer(t, "")
+	s, err := Load(context.Background(), "tools", config.ToolServer{URL: ts.URL}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = call(s, "tools__blob", "")
+	if got := last().header.Get("User-Agent"); got != "custom-agent/1.0" {
+		t.Errorf("User-Agent = %q, want custom-agent/1.0", got)
+	}
+}

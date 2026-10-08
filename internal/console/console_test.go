@@ -1,10 +1,13 @@
 package console
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -235,5 +238,194 @@ func TestServerBacklog(t *testing.T) {
 	s.mu.Unlock()
 	if backlogCount != 1 {
 		t.Errorf("expected backlog count 1, got %d", backlogCount)
+	}
+}
+
+func TestConsoleClient(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "console-client.sock")
+	m, err := access.NewManager(noApply{}, filepath.Join(t.TempDir(), "always.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(m, sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+
+	c, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	enc := json.NewEncoder(c)
+	dec := json.NewDecoder(c)
+
+	if err := enc.Encode(Msg{Type: "ui"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// サーバーからログを送信すると受信できること
+	s.Log("test message")
+	var msg Msg
+	if err := dec.Decode(&msg); err != nil {
+		t.Fatal(err)
+	}
+	if msg.Type != "log" || !strings.HasSuffix(msg.Text, "test message") {
+		t.Fatalf("unexpected received msg: %+v", msg)
+	}
+}
+
+func TestClipboardSinkFailure(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "console-clip-fail.sock")
+	m, err := access.NewManager(noApply{}, filepath.Join(t.TempDir(), "always.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(m, sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+
+	// sink が失敗する場合
+	s.Clipboard = func([]byte) error {
+		return fmt.Errorf("copy failed")
+	}
+
+	s.onClipboard(Msg{Data: []byte("fail test")})
+	if s.clip.pending == nil {
+		t.Fatal("expected pending clip request")
+	}
+	clipID := s.clip.pending.id
+	s.clipDecide(clipID, true)
+
+	if s.clip.pending != nil {
+		t.Fatal("pending should be nil after settle")
+	}
+}
+
+func TestTruncateRunes(t *testing.T) {
+	if got := truncateRunes("short", 10); got != "short" {
+		t.Errorf("truncateRunes(short) = %q, want short", got)
+	}
+	if got := truncateRunes("1234567890", 5); got != "12345…" {
+		t.Errorf("truncateRunes(1234567890, 5) = %q, want 12345…", got)
+	}
+}
+
+func TestClientUIPromptAndOnLine(t *testing.T) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	ui := &clientUI{enc: enc}
+
+	// 1. 空のキュー
+	if p := ui.prompt(); p != "" {
+		t.Errorf("empty queue prompt = %q, want empty", p)
+	}
+
+	// 2. quit フロー
+	if done := ui.onLine("quit"); done || !ui.quiting {
+		t.Fatalf("onLine(quit) expected quiting=true, done=false")
+	}
+	buf.Reset()
+	if done := ui.onLine("y"); !done {
+		t.Fatalf("onLine(y) expected done=true")
+	}
+
+	// 3. clip 要求
+	ui.quiting = false
+	ui.queue = []Msg{{Type: "clip", ID: 1, Text: "clip test"}}
+	if !strings.Contains(ui.prompt(), "[y] コピーする") {
+		t.Errorf("clip prompt = %q", ui.prompt())
+	}
+	buf.Reset()
+	ui.onLine("y")
+	var m Msg
+	_ = json.Unmarshal(buf.Bytes(), &m)
+	if m.Type != "clipdecide" || m.Status != access.Approved {
+		t.Errorf("expected approved clipdecide, got %+v", m)
+	}
+
+	// 4. prrequest 要求
+	ui.queue = []Msg{{Type: "prrequest", ID: 2, Title: "PR Title"}}
+	if !strings.Contains(ui.prompt(), "[y] 承認して PR を作る") {
+		t.Errorf("prrequest prompt = %q", ui.prompt())
+	}
+	buf.Reset()
+	ui.onLine("n")
+	_ = json.Unmarshal(buf.Bytes(), &m)
+	if m.Type != "prdecide" || m.Status != access.Denied {
+		t.Errorf("expected denied prdecide, got %+v", m)
+	}
+
+	// 5. request 申請と決定 (1, 2, 3, d, q)
+	ui.queue = []Msg{{Type: "request", ID: 3, Domains: []string{"example.com"}}}
+	buf.Reset()
+	ui.onLine("1")
+	_ = json.Unmarshal(buf.Bytes(), &m)
+	if m.Type != "decide" || m.Kind != access.Once {
+		t.Errorf("expected decide Once, got %+v", m)
+	}
+
+	buf.Reset()
+	ui.onLine("2")
+	_ = json.Unmarshal(buf.Bytes(), &m)
+	if m.Type != "decide" || m.Kind != access.Session {
+		t.Errorf("expected decide Session, got %+v", m)
+	}
+
+	buf.Reset()
+	ui.onLine("3")
+	_ = json.Unmarshal(buf.Bytes(), &m)
+	if m.Type != "decide" || m.Kind != access.Always {
+		t.Errorf("expected decide Always, got %+v", m)
+	}
+
+	buf.Reset()
+	ui.onLine("d")
+	_ = json.Unmarshal(buf.Bytes(), &m)
+	if m.Type != "decide" || m.Status != access.Denied {
+		t.Errorf("expected decide Denied, got %+v", m)
+	}
+
+	// 質問
+	ui.onLine("q")
+	if !ui.asking || !strings.Contains(ui.prompt(), "エージェントへの質問") {
+		t.Errorf("asking state or prompt unexpected: %q", ui.prompt())
+	}
+	buf.Reset()
+	ui.onLine("何に使うの?")
+	_ = json.Unmarshal(buf.Bytes(), &m)
+	if m.Type != "decide" || m.Status != access.Question || m.Question != "何に使うの?" {
+		t.Errorf("expected question decision, got %+v", m)
+	}
+}
+
+func TestClientUIOnMsg(t *testing.T) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	ui := &clientUI{enc: enc}
+
+	// 1. log メッセージ
+	ui.onMsg(Msg{Type: "log", Text: "some log"})
+
+	// 2. request 追加
+	ui.onMsg(Msg{Type: "request", ID: 10, Domains: []string{"test.com"}, Reason: "fetch"})
+	if len(ui.queue) != 1 {
+		t.Fatalf("expected 1 item in queue, got %d", len(ui.queue))
+	}
+
+	// 重複追加は無視される
+	ui.onMsg(Msg{Type: "request", ID: 10})
+	if len(ui.queue) != 1 {
+		t.Fatalf("expected duplicate to be ignored, got %d", len(ui.queue))
+	}
+
+	// 3. settled でキューから削除される
+	ui.onMsg(Msg{Type: "settled", ID: 10, Status: access.Approved})
+	if len(ui.queue) != 0 {
+		t.Fatalf("expected queue to be empty after settled, got %d", len(ui.queue))
 	}
 }
