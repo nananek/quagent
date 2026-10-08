@@ -266,6 +266,25 @@ func maskSensitiveFallback(home string) error {
 	return nil
 }
 
+// isolationRWPaths はホーム隔離で書き込み可として戻すパスを返す。
+// workDir 配下のデータディスク (tmp.img など) は workDir の bind に含まれる
+// ので別掲しない。別掲すると、戻すとき IsolateHome が空ファイルを作ってから
+// mount --move するため、その空ファイル作成で実ファイルが 0 バイトに
+// 切り詰められてしまう (QEMU には 0B のディスクが見える)。
+func isolationRWPaths(workDir string, dataDisks []string) []string {
+	rwPaths := []string{workDir}
+	for _, d := range dataDisks {
+		if d == "" {
+			continue
+		}
+		if _, ok := IsSubpath(workDir, d); ok {
+			continue
+		}
+		rwPaths = append(rwPaths, d)
+	}
+	return rwPaths
+}
+
 // Spec は netns.Spec の一部フィールド (json 互換)。
 type Spec struct {
 	WorkDir            string   `json:"work_dir"`
@@ -320,8 +339,7 @@ func Run(specPath string) error {
 		imagesDir := filepath.Join(home, ".local/share/quagent/images")
 		roPaths = append(roPaths, imagesDir)
 
-		rwPaths := []string{spec.WorkDir}
-		rwPaths = append(rwPaths, spec.DataDiskPaths...)
+		rwPaths := isolationRWPaths(spec.WorkDir, spec.DataDiskPaths)
 
 		if err := IsolateHome(home, roPaths, rwPaths); err != nil {
 			log.Printf("[quagent:hostsandbox] ホーム隔離フォールバック: %v", err)
