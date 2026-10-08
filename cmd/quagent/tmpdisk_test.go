@@ -77,8 +77,16 @@ func TestExtractTarRejectsEscape(t *testing.T) {
 
 func TestTmpRuncmd(t *testing.T) {
 	cmd := tmpRuncmd("1000")
-	if !strings.Contains(cmd, "mkfs.ext4") || !strings.Contains(cmd, "mount -o nosuid,nodev,noexec") || !strings.Contains(cmd, "chown 1000:1000") {
-		t.Errorf("tmpRuncmd unexpected: %s", cmd)
+	for _, want := range []string{
+		"mkfs.ext4", "mount -o nosuid,nodev,noexec", "chown 1000:1000",
+		"mkdir -p /work/.tmp", "[ -b $dev ]", "grep -q ' /work/.tmp ' /proc/mounts",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("tmpRuncmd に %q が無い: %s", want, cmd)
+		}
+	}
+	if i, j := strings.Index(cmd, "mkdir -p /work/.tmp"), strings.Index(cmd, "mkfs.ext4"); i < 0 || j < 0 || i > j {
+		t.Errorf("mkdir が mkfs より前に無い (デバイス待ちで mkdir が飛ぶと /work/.tmp が残らない): %s", cmd)
 	}
 }
 
