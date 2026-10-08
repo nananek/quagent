@@ -63,7 +63,8 @@ write_files:
       echo 'export PATH="$HOME/.local/bin:$PATH"' >> "/home/$U/.profile"
 
       # Antigravity CLI (agy) (公式インストーラー)
-      runuser -l "$U" -c 'curl -fsSL https://antigravity.google/cli/install.sh | bash'
+      # Google Frontend が gzip で返すことがあるので --compressed で受ける。
+      runuser -l "$U" -c 'curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash'
       test -x "/home/$U/.local/bin/agy"
 
       # 作業ディレクトリ
