@@ -121,3 +121,63 @@ func TestEgressExpiry(t *testing.T) {
 		t.Fatalf("期限切れ後も IP が set に残る: %q", s)
 	}
 }
+
+func TestWebBlocked(t *testing.T) {
+	e, _ := newTestEgress(nil)
+	var events []Event
+	// イベントリーダー
+	r, w := io.Pipe()
+	e.events = &eventWriter{enc: json.NewEncoder(w)}
+	go func() {
+		dec := json.NewDecoder(r)
+		for {
+			var ev Event
+			if err := dec.Decode(&ev); err != nil {
+				return
+			}
+			events = append(events, ev)
+		}
+	}()
+
+	// 1. 初回呼び出し
+	e.webBlocked("test1.com (SNI)")
+
+	// 2. maxDeniedLogs を超えるまで呼ぶ
+	for i := 0; i < maxDeniedLogs+5; i++ {
+		e.webBlocked("spam.com")
+	}
+
+	// 3. 1分経過後の呼び出し (dropped メモのフラッシュ)
+	e.mu.Lock()
+	e.webWindow = time.Now().Add(-2 * time.Minute)
+	e.mu.Unlock()
+	e.webBlocked("after-minute.com")
+
+	w.Close()
+	// イベントが記録されていること
+	if len(events) == 0 {
+		t.Fatal("no blocked events recorded")
+	}
+}
+
+func TestReadControl(t *testing.T) {
+	// 1. 正常な control json
+	input := `{"Grants":[{"Pattern":"example.com","Expires":12345}]}` + "\n"
+	var received []control
+	err := readControl(strings.NewReader(input), func(c control) {
+		received = append(received, c)
+	})
+	if err != nil {
+		t.Fatalf("readControl failed: %v", err)
+	}
+	if len(received) != 1 || len(received[0].Grants) != 1 || received[0].Grants[0].Pattern != "example.com" {
+		t.Fatalf("unexpected control received: %+v", received)
+	}
+
+	// 2. 不正な JSON
+	err = readControl(strings.NewReader("invalid-json\n"), func(c control) {})
+	if err == nil {
+		t.Fatal("expected error on invalid json")
+	}
+}
+

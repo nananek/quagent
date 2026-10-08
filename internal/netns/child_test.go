@@ -1,8 +1,11 @@
 package netns
 
 import (
+	"net"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // 許可した行き先でも、新規接続は Web ポート (80/443) 以外へ張れないこと。
@@ -52,3 +55,52 @@ func TestEgressRulesRedirectWebPorts(t *testing.T) {
 		t.Fatalf("redirect 後の宛先 (loopback のプロキシポート) が通らない:\n%s", rules)
 	}
 }
+
+func TestWaitFor(t *testing.T) {
+	// 1. 即座に true
+	if !waitFor(time.Second, func() bool { return true }) {
+		t.Fatal("expected waitFor to return true immediately")
+	}
+
+	// 2. タイムアウト
+	start := time.Now()
+	if waitFor(150*time.Millisecond, func() bool { return false }) {
+		t.Fatal("expected waitFor to return false on timeout")
+	}
+	if time.Since(start) < 100*time.Millisecond {
+		t.Fatal("waitFor returned too quickly")
+	}
+}
+
+func TestAddHostfwd(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "slirp.sock")
+
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	// 1. 正常系: slirp4netns QMP API モック
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			buf := make([]byte, 1024)
+			n, _ := c.Read(buf)
+			if strings.Contains(string(buf[:n]), "add_hostfwd") {
+				_, _ = c.Write([]byte(`{"return":{}}`))
+			} else {
+				_, _ = c.Write([]byte(`{"error":{"desc":"failed"}}`))
+			}
+			_ = c.Close()
+		}
+	}()
+
+	if err := addHostfwd(sock, 8080, "10.0.2.15"); err != nil {
+		t.Fatalf("addHostfwd failed: %v", err)
+	}
+}
+

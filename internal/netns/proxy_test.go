@@ -1,9 +1,14 @@
 package netns
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
+	"io"
+	"net"
+	"strings"
 	"testing"
+	"time"
 )
 
 // clientHello は SNI 付き (serverName が空なら SNI 無し) の最小の ClientHello を返す。
@@ -164,3 +169,271 @@ func TestProxyTerminates(t *testing.T) {
 		t.Error("passthrough 無しで終端しないと判定した")
 	}
 }
+
+func TestReadHost(t *testing.T) {
+	// 1. 正常な HTTP リクエスト
+	r1 := bufio.NewReader(strings.NewReader("GET / HTTP/1.1\r\nHost: example.org\r\n\r\n"))
+	host, err := readHost(r1)
+	if err != nil || host != "example.org" {
+		t.Fatalf("readHost: got %q, %v; want example.org", host, err)
+	}
+
+	// 2. CONNECT リクエスト
+	r2 := bufio.NewReader(strings.NewReader("CONNECT api.example.com:443 HTTP/1.1\r\n\r\n"))
+	host, err = readHost(r2)
+	if err != nil || host != "api.example.com" {
+		t.Fatalf("readHost CONNECT: got %q, %v; want api.example.com", host, err)
+	}
+
+	// 3. 途中で切れた (EOF)
+	r3 := bufio.NewReader(strings.NewReader("GET / HTTP/1.1\r\nHost: truncated"))
+	if _, err := readHost(r3); err == nil {
+		t.Fatal("expected error on truncated input")
+	}
+
+	// 4. ヘッダが大きすぎる (> proxyMaxHead)
+	bigHeader := "GET / HTTP/1.1\r\nX-Big: " + strings.Repeat("A", proxyMaxHead+10) + "\r\n\r\n"
+	r4 := bufio.NewReader(strings.NewReader(bigHeader))
+	if _, err := readHost(r4); err == nil {
+		t.Fatal("expected error on oversized header")
+	}
+}
+
+func TestCaptureReader(t *testing.T) {
+	src := strings.NewReader("hello world")
+	cr := &captureReader{r: src}
+	buf := make([]byte, 5)
+	n, err := cr.Read(buf)
+	if err != nil || n != 5 {
+		t.Fatalf("first read: %d, %v", n, err)
+	}
+	if string(cr.buf) != "hello" {
+		t.Errorf("cr.buf = %q, want 'hello'", string(cr.buf))
+	}
+
+	buf2 := make([]byte, 10)
+	n, err = cr.Read(buf2)
+	if err != nil || n != 6 {
+		t.Fatalf("second read: %d, %v", n, err)
+	}
+	if string(cr.buf) != "hello world" {
+		t.Errorf("cr.buf = %q, want 'hello world'", string(cr.buf))
+	}
+}
+
+func TestReplayConn(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	prefix := strings.NewReader("prefix-")
+	rc := &replayConn{
+		Conn: c1,
+		r:    io.MultiReader(prefix, c1),
+	}
+
+	go func() {
+		_, _ = c2.Write([]byte("rest"))
+	}()
+
+	buf := make([]byte, 11)
+	n, err := io.ReadFull(rc, buf)
+	if err != nil || n != 11 {
+		t.Fatalf("io.ReadFull failed: %d, %v", n, err)
+	}
+	if string(buf) != "prefix-rest" {
+		t.Errorf("read = %q, want 'prefix-rest'", string(buf))
+	}
+}
+
+func TestWebProxyPipe(t *testing.T) {
+	clientSide, clientServerSide := net.Pipe()
+	defer clientSide.Close()
+	defer clientServerSide.Close()
+
+	upstreamClientSide, upstreamServerSide := net.Pipe()
+	defer upstreamClientSide.Close()
+	defer upstreamServerSide.Close()
+
+	proxy := &webProxy{
+		dial: func(network, addr string, mark int) (net.Conn, error) {
+			if addr != "example.com:80" {
+				t.Errorf("dial addr = %q, want 'example.com:80'", addr)
+			}
+			return upstreamClientSide, nil
+		},
+	}
+
+	// pipe をバックグラウンドで動かす
+	pipeDone := make(chan struct{})
+	go func() {
+		proxy.pipe(clientServerSide, "example.com:80", "example.com", clientServerSide)
+		close(pipeDone)
+	}()
+
+	// 1. クライアント -> 上流
+	go func() {
+		_, _ = clientSide.Write([]byte("ping"))
+	}()
+	upBuf := make([]byte, 4)
+	if _, err := io.ReadFull(upstreamServerSide, upBuf); err != nil {
+		t.Fatalf("upstream read error: %v", err)
+	}
+	if string(upBuf) != "ping" {
+		t.Errorf("upstream got %q, want 'ping'", string(upBuf))
+	}
+
+	// 2. 上流 -> クライアント
+	go func() {
+		_, _ = upstreamServerSide.Write([]byte("pong"))
+	}()
+	clientBuf := make([]byte, 4)
+	if _, err := io.ReadFull(clientSide, clientBuf); err != nil {
+		t.Fatalf("client read error: %v", err)
+	}
+	if string(clientBuf) != "pong" {
+		t.Errorf("client got %q, want 'pong'", string(clientBuf))
+	}
+
+	// クローズして pipe 終了を待つ
+	clientSide.Close()
+	upstreamServerSide.Close()
+	select {
+	case <-pipeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pipe did not terminate")
+	}
+}
+
+func TestWebProxyBlock(t *testing.T) {
+	var blockedReason string
+	p := &webProxy{
+		blocked: func(reason string) {
+			blockedReason = reason
+		},
+	}
+	p.block("test block reason")
+	if blockedReason != "test block reason" {
+		t.Errorf("blockedReason = %q, want 'test block reason'", blockedReason)
+	}
+}
+
+func TestHandleTLS(t *testing.T) {
+	// 1. 壊れたデータ -> block
+	var blockedReason string
+	p := &webProxy{
+		blocked: func(reason string) { blockedReason = reason },
+		allowed: func(name string) bool { return true },
+	}
+	c1, c2 := net.Pipe()
+	go func() {
+		_, _ = c2.Write([]byte("not a tls record"))
+		_ = c2.Close()
+	}()
+	p.handleTLS(c1, "203.0.113.1:443")
+	_ = c1.Close()
+	if !strings.Contains(blockedReason, "SNI 203.0.113.1") {
+		t.Errorf("expected blocked reason for bad TLS, got %q", blockedReason)
+	}
+
+	// 2. 不許可な SNI
+	blockedReason = ""
+	p = &webProxy{
+		blocked: func(reason string) { blockedReason = reason },
+		allowed: func(name string) bool { return name == "good.com" },
+	}
+	c1, c2 = net.Pipe()
+	go func() {
+		_, _ = c2.Write(tlsRecord(clientHello("evil.com")))
+		_ = c2.Close()
+	}()
+	p.handleTLS(c1, "203.0.113.1:443")
+	_ = c1.Close()
+	if blockedReason != "SNI evil.com" {
+		t.Errorf("expected blocked SNI evil.com, got %q", blockedReason)
+	}
+
+	// 3. 許可された SNI (passthrough で pipe 呼び出し)
+	dialed := false
+	p = &webProxy{
+		allowed:     func(name string) bool { return name == "good.com" },
+		passthrough: []string{"good.com"},
+		dial: func(network, addr string, mark int) (net.Conn, error) {
+			dialed = true
+			up1, up2 := net.Pipe()
+			go func() { _ = up2.Close() }()
+			return up1, nil
+		},
+	}
+	c1, c2 = net.Pipe()
+	go func() {
+		_, _ = c2.Write(tlsRecord(clientHello("good.com")))
+		_ = c2.Close()
+	}()
+	p.handleTLS(c1, "203.0.113.1:443")
+	_ = c1.Close()
+	if !dialed {
+		t.Error("expected dial to be called for allowed passthrough SNI")
+	}
+}
+
+func TestHandleHTTP(t *testing.T) {
+	// 1. 壊れた HTTP -> block
+	var blockedReason string
+	p := &webProxy{
+		blocked: func(reason string) { blockedReason = reason },
+		allowed: func(name string) bool { return true },
+	}
+	c1, c2 := net.Pipe()
+	go func() {
+		_, _ = c2.Write([]byte("GARBAGE\r\n\r\n"))
+		_ = c2.Close()
+	}()
+	p.handleHTTP(c1, "203.0.113.1:80")
+	_ = c1.Close()
+	if !strings.Contains(blockedReason, "Host 203.0.113.1") {
+		t.Errorf("expected blocked reason for bad HTTP, got %q", blockedReason)
+	}
+
+	// 2. 不許可な Host
+	blockedReason = ""
+	p = &webProxy{
+		blocked: func(reason string) { blockedReason = reason },
+		allowed: func(name string) bool { return name == "good.com" },
+	}
+	c1, c2 = net.Pipe()
+	go func() {
+		_, _ = c2.Write([]byte("GET / HTTP/1.1\r\nHost: evil.com\r\n\r\n"))
+		_ = c2.Close()
+	}()
+	p.handleHTTP(c1, "203.0.113.1:80")
+	_ = c1.Close()
+	if blockedReason != "Host evil.com" {
+		t.Errorf("expected blocked Host evil.com, got %q", blockedReason)
+	}
+
+	// 3. 許可された Host (headers == nil で pipe 呼び出し)
+	dialed := false
+	p = &webProxy{
+		allowed: func(name string) bool { return name == "good.com" },
+		dial: func(network, addr string, mark int) (net.Conn, error) {
+			dialed = true
+			up1, up2 := net.Pipe()
+			go func() { _ = up2.Close() }()
+			return up1, nil
+		},
+	}
+	c1, c2 = net.Pipe()
+	go func() {
+		_, _ = c2.Write([]byte("GET / HTTP/1.1\r\nHost: good.com\r\n\r\n"))
+		_ = c2.Close()
+	}()
+	p.handleHTTP(c1, "203.0.113.1:80")
+	_ = c1.Close()
+	if !dialed {
+		t.Error("expected dial to be called for allowed Host")
+	}
+}
+
+
+
