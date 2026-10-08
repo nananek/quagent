@@ -4,7 +4,9 @@ import (
 	"archive/tar"
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -70,5 +72,41 @@ func TestExtractTarRejectsEscape(t *testing.T) {
 		if _, _, err := extractTar(makeTar(t, tar.Header{Typeflag: tar.TypeReg, Name: name}), dir); err == nil {
 			t.Errorf("%s を受け付けた", name)
 		}
+	}
+}
+
+func TestTmpRuncmd(t *testing.T) {
+	cmd := tmpRuncmd("1000")
+	if !strings.Contains(cmd, "mkfs.ext4") || !strings.Contains(cmd, "mount -o nosuid,nodev,noexec") || !strings.Contains(cmd, "chown 1000:1000") {
+		t.Errorf("tmpRuncmd unexpected: %s", cmd)
+	}
+}
+
+func TestPrepareTmp(t *testing.T) {
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "repo")
+	workDir := filepath.Join(tmpDir, "work")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// git リポジトリを初期化
+	if out, err := exec.Command("git", "-C", repoDir, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+
+	dir, img, err := prepareTmp(repoDir, workDir)
+	if err != nil {
+		t.Fatalf("prepareTmp failed: %v", err)
+	}
+	if dir != filepath.Join(repoDir, ".tmp") {
+		t.Errorf("dir = %q, want %q", dir, filepath.Join(repoDir, ".tmp"))
+	}
+	fi, err := os.Stat(img)
+	if err != nil || fi.Size() != tmpDiskSize {
+		t.Errorf("img stat failed or invalid size: %v, size=%d", err, fi.Size())
 	}
 }

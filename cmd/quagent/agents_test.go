@@ -69,3 +69,65 @@ func TestSetupAgyRequiresGeminiProvider(t *testing.T) {
 		t.Fatal("providers に gemini が無いのを通した")
 	}
 }
+
+func TestGuestMCPURL(t *testing.T) {
+	if got := guestMCPURL(); got != "http://quagent.host:7070/mcp" {
+		t.Errorf("guestMCPURL() = %q, want 'http://quagent.host:7070/mcp'", got)
+	}
+}
+
+func TestSetupClaudeErrors(t *testing.T) {
+	// 1. anthropic provider が無い
+	cfg := &config.Config{}
+	if err := setupClaude(vmGuest{}, cfg, []string{"openai"}, "token"); err == nil {
+		t.Fatal("expected error when anthropic provider is missing")
+	}
+
+	// 2. 不正な subscription プラン
+	cfgSub := &config.Config{
+		Claude: config.Claude{Subscription: "ultra-premium"},
+	}
+	if err := setupClaude(vmGuest{}, cfgSub, []string{"anthropic"}, "token"); err == nil {
+		t.Fatal("expected error for invalid subscription plan")
+	}
+
+	// 3. subscription なのに header / prefix が既定以外
+	cfgHeader := &config.Config{
+		Claude: config.Claude{Subscription: "pro"},
+		Providers: map[string]config.Provider{
+			"anthropic": {Header: "X-Api-Key"},
+		},
+	}
+	if err := setupClaude(vmGuest{}, cfgHeader, []string{"anthropic"}, "token"); err == nil {
+		t.Fatal("expected error when custom header is used with subscription")
+	}
+}
+
+func TestCappedBuffer(t *testing.T) {
+	b := &cappedBuffer{max: 10}
+	n, err := b.Write([]byte("12345"))
+	if err != nil || n != 5 {
+		t.Fatalf("first write: n=%d, err=%v", n, err)
+	}
+	if b.String() != "12345" {
+		t.Errorf("content = %q, want '12345'", b.String())
+	}
+
+	// 上限 (10) を超える書き込み
+	n, err = b.Write([]byte("67890EXTRA"))
+	if err != nil || n != 10 { // n は渡されたスライスの長さ (10バイト)
+		t.Fatalf("second write: n=%d, err=%v", n, err)
+	}
+	if b.String() != "1234567890" {
+		t.Errorf("content = %q, want '1234567890'", b.String())
+	}
+
+	// 既に上限に達しているときの書き込み
+	n, err = b.Write([]byte("MORE"))
+	if err != nil || n != 4 {
+		t.Fatalf("third write: n=%d, err=%v", n, err)
+	}
+	if b.String() != "1234567890" {
+		t.Errorf("content = %q, want '1234567890'", b.String())
+	}
+}

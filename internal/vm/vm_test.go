@@ -64,3 +64,105 @@ func TestQemuArgvDiscard(t *testing.T) {
 		t.Fatalf("ルートディスクに discard=unmap が無い: %q", root)
 	}
 }
+
+func TestFreePort(t *testing.T) {
+	p1, err := FreePort()
+	if err != nil {
+		t.Fatalf("FreePort() error: %v", err)
+	}
+	if p1 <= 0 || p1 > 65535 {
+		t.Fatalf("FreePort() returned invalid port: %d", p1)
+	}
+
+	p2, err := FreePort()
+	if err != nil {
+		t.Fatalf("FreePort() second call error: %v", err)
+	}
+	if p2 <= 0 || p2 > 65535 {
+		t.Fatalf("FreePort() returned invalid port: %d", p2)
+	}
+}
+
+func TestOVMFPathFound(t *testing.T) {
+	tmp := t.TempDir()
+	p1 := filepath.Join(tmp, "non-existent.fd")
+	p2 := filepath.Join(tmp, "found.fd")
+	if err := os.WriteFile(p2, []byte("ovmf"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	found, err := ovmfPath([]string{p1, p2})
+	if err != nil {
+		t.Fatalf("ovmfPath error: %v", err)
+	}
+	if found != p2 {
+		t.Fatalf("ovmfPath() = %q, want %q", found, p2)
+	}
+}
+
+func TestQemuArgvAllOptions(t *testing.T) {
+	opts := QemuOpts{
+		Disk:       "/path/to/disk.qcow2",
+		Seed:       "/path/to/seed.iso",
+		CPUs:       8,
+		MemMiB:     8192,
+		ConsoleLog: "/path/to/console.log",
+		Netdev:     "dns=10.0.2.3,hostfwd=tcp::2222-:22",
+		VsockCID:   12345,
+		NestedVirt: true,
+		DataDisks: []DataDisk{
+			{Serial: "datadisk1", Path: "/path/to/disk,with,commas"},
+		},
+		Extra: []string{"-snapshot", "-daemonize"},
+	}
+
+	argv, err := QemuArgv(opts)
+	if err != nil {
+		t.Fatalf("QemuArgv error: %v", err)
+	}
+
+	// CPU
+	if got := argAfter(argv, "-cpu"); got != "host" {
+		t.Errorf("expected -cpu host with NestedVirt=true, got %q", got)
+	}
+
+	// Netdev
+	if got := argAfter(argv, "-netdev"); !strings.Contains(got, "dns=10.0.2.3,hostfwd=tcp::2222-:22") {
+		t.Errorf("expected netdev option to contain dns=10.0.2.3..., got %q", got)
+	}
+
+	// Vsock
+	vsockFound := false
+	for _, a := range argv {
+		if strings.Contains(a, "guest-cid=12345") {
+			vsockFound = true
+			break
+		}
+	}
+	if !vsockFound {
+		t.Errorf("expected vsock device with guest-cid=12345 in argv: %v", argv)
+	}
+
+	// DataDisks with escaped commas
+	diskFound := false
+	for _, a := range argv {
+		if strings.Contains(a, "/path/to/disk,,with,,commas") {
+			diskFound = true
+			break
+		}
+	}
+	if !diskFound {
+		t.Errorf("expected escaped comma disk path in argv: %v", argv)
+	}
+
+	// Extra
+	if len(argv) < 2 || argv[len(argv)-2] != "-snapshot" || argv[len(argv)-1] != "-daemonize" {
+		t.Errorf("expected extra arguments at the end of argv: %v", argv)
+	}
+}
+
+func TestHostDNS(t *testing.T) {
+	// HostDNS はホスト環境の resolv.conf を読む。見つかれば有効なIP文字列を返し、
+	// 見つからなければエラーを返す。パニックしないことを確認。
+	_, _ = HostDNS()
+}

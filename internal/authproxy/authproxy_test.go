@@ -102,3 +102,54 @@ func TestHandlerOnResponse(t *testing.T) {
 		t.Fatalf("code=%d", rec.Code)
 	}
 }
+
+func TestGuestBaseURL(t *testing.T) {
+	if got := GuestBaseURL("http://quagent.host:7070", "gemini"); got != "http://quagent.host:7070/llm/gemini" {
+		t.Errorf("GuestBaseURL = %q, want 'http://quagent.host:7070/llm/gemini'", got)
+	}
+}
+
+func TestRegisterSecretError(t *testing.T) {
+	mux := http.NewServeMux()
+	// 秘密の取り出し方法が未指定
+	_, err := Register(mux, map[string]config.Provider{
+		"test": {Upstream: "https://api.example.com"},
+	}, log.New(io.Discard, "", 0), nil)
+	if err == nil {
+		t.Fatal("expected error when secret cannot be retrieved")
+	}
+}
+
+func TestRegisterSuccess(t *testing.T) {
+	t.Setenv("TEST_AUTHPROXY_KEY", "secret-key")
+	mux := http.NewServeMux()
+	ids, err := Register(mux, map[string]config.Provider{
+		"provider1": {
+			Upstream:  "https://api.example.com",
+			SecretEnv: "TEST_AUTHPROXY_KEY",
+		},
+	}, log.New(io.Discard, "", 0), nil)
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != "provider1" {
+		t.Errorf("registered ids = %v, want ['provider1']", ids)
+	}
+}
+
+func TestRegisterDynamicBadUpstream(t *testing.T) {
+	mux := http.NewServeMux()
+	// http:// は拒否される (https でなければならない)
+	err := RegisterDynamic(mux, "test", "http://insecure.example.com", "Authorization",
+		func() (string, error) { return "tok", nil }, nil, log.New(io.Discard, "", 0), nil, nil)
+	if err == nil {
+		t.Fatal("expected error for non-https upstream")
+	}
+
+	// ホスト名なし
+	err = RegisterDynamic(mux, "test", "https://", "Authorization",
+		func() (string, error) { return "tok", nil }, nil, log.New(io.Discard, "", 0), nil, nil)
+	if err == nil {
+		t.Fatal("expected error for empty host upstream")
+	}
+}

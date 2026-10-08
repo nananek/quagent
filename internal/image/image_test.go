@@ -2,6 +2,8 @@ package image
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net/http"
@@ -13,6 +15,7 @@ import (
 	"testing"
 	"testing/fstest"
 	"text/template"
+	"time"
 
 	"github.com/nananek/quagent/internal/paths"
 )
@@ -346,5 +349,126 @@ func TestVerifySignature(t *testing.T) {
 	}
 	if err := verify(); err == nil {
 		t.Fatal("書き換えたイメージの署名が通った")
+	}
+}
+
+func TestRecipeTimeout(t *testing.T) {
+	rDefault := Recipe{}
+	if got := rDefault.timeout(); got != 45*time.Minute {
+		t.Errorf("timeout() = %v, want 45m", got)
+	}
+
+	rCustom := Recipe{BuildTimeoutMinutes: 120}
+	if got := rCustom.timeout(); got != 120*time.Minute {
+		t.Errorf("timeout() = %v, want 120m", got)
+	}
+}
+
+func TestFindRecipeNotFound(t *testing.T) {
+	if _, err := FindRecipe("nonexistent-os-recipe"); err == nil {
+		t.Fatal("expected error for nonexistent recipe")
+	}
+}
+
+func TestLatestNotFound(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if _, err := Latest("gentoo"); err == nil {
+		t.Fatal("expected error when no image exists")
+	}
+}
+
+func TestLatestFound(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	dir := paths.ImagesDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldImg := filepath.Join(dir, "base-gentoo-20261001-100000.qcow2")
+	newImg := filepath.Join(dir, "base-gentoo-20261005-100000.qcow2")
+	for _, p := range []string{oldImg, newImg} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	latest, err := Latest("gentoo")
+	if err != nil {
+		t.Fatalf("Latest() failed: %v", err)
+	}
+	if latest.Path != newImg {
+		t.Fatalf("Latest() = %q, want %q", latest.Path, newImg)
+	}
+}
+
+func TestRemoveInvalidPath(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	// 1. ImagesDir の外
+	if err := Remove(Image{Path: "/etc/passwd"}); err == nil {
+		t.Fatal("expected error when removing path outside ImagesDir")
+	}
+
+	// 2. 命名規則に一致しない
+	badName := filepath.Join(paths.ImagesDir(), "some-random-file.txt")
+	if err := Remove(Image{Path: badName}); err == nil {
+		t.Fatal("expected error when removing file with invalid name format")
+	}
+}
+
+func TestFetchSmall(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ok":
+			w.Write([]byte("hello world"))
+		case "/notfound":
+			w.WriteHeader(http.StatusNotFound)
+		case "/big":
+			w.Write(bytes.Repeat([]byte("A"), 100))
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+
+	// 1. 正常取得
+	b, err := fetchSmall(srv.URL+"/ok", 64)
+	if err != nil || string(b) != "hello world" {
+		t.Fatalf("fetchSmall ok: got %q, %v", string(b), err)
+	}
+
+	// 2. 404 エラー
+	if _, err := fetchSmall(srv.URL+"/notfound", 64); err == nil {
+		t.Fatal("expected error on 404")
+	}
+
+	// 3. サイズ超過
+	if _, err := fetchSmall(srv.URL+"/big", 50); err == nil {
+		t.Fatal("expected error on size limit exceeded")
+	}
+}
+
+func TestVerifyChecksum(t *testing.T) {
+	data := []byte("image content for checksum test")
+	h := sha256.Sum256(data)
+	sum256 := hex.EncodeToString(h[:])
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(sum256 + "  test.qcow2\n"))
+	}))
+	defer srv.Close()
+
+	r := Recipe{
+		CloudImageURL: "https://example.com/test.qcow2",
+		ChecksumURL:   srv.URL + "/checksums.sha256",
+	}
+
+	// 1. 一致
+	if err := verifyChecksum(r, sum256, ""); err != nil {
+		t.Fatalf("verifyChecksum failed on matching hash: %v", err)
+	}
+
+	// 2. 不一致
+	wrongHash := strings.Repeat("0", 64)
+	if err := verifyChecksum(r, wrongHash, ""); err == nil {
+		t.Fatal("expected error on mismatched hash")
 	}
 }

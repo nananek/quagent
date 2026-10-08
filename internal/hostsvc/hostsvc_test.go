@@ -145,3 +145,76 @@ func TestAuditWriterUnwrap(t *testing.T) {
 		t.Fatal("元の ResponseWriter が呼ばれていない")
 	}
 }
+
+func TestGuestOrigin(t *testing.T) {
+	if got := GuestOrigin(); got != "http://quagent.host:7070" {
+		t.Errorf("GuestOrigin() = %q, want 'http://quagent.host:7070'", got)
+	}
+}
+
+func TestServerHandler(t *testing.T) {
+	s, err := New(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+	if h == nil {
+		t.Fatal("Handler() returned nil")
+	}
+	req := httptest.NewRequest("GET", "/healthz", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Errorf("expected 200 from /healthz via Handler(), got %d", rec.Code)
+	}
+}
+
+type flushableRecorder struct {
+	*httptest.ResponseRecorder
+	flushed bool
+}
+
+func (f *flushableRecorder) Flush() {
+	f.flushed = true
+}
+
+func TestAuditWriterFlush(t *testing.T) {
+	base := &flushableRecorder{ResponseRecorder: httptest.NewRecorder()}
+	w := &auditWriter{ResponseWriter: base}
+	w.Flush()
+	if !base.flushed {
+		t.Error("expected base flusher to be called")
+	}
+}
+
+func TestServerStopNil(t *testing.T) {
+	s, err := New(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// s.srv が nil の状態で Stop を呼んでもパニックしない
+	s.Stop()
+}
+
+func TestReleaseConnCloseOnce(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+
+	releases := 0
+	rc := &releaseConn{
+		Conn: client,
+		release: func() {
+			releases++
+		},
+	}
+
+	if err := rc.Close(); err != nil {
+		t.Fatalf("first close failed: %v", err)
+	}
+	// 2回目のクローズ
+	_ = rc.Close()
+
+	if releases != 1 {
+		t.Errorf("expected release to be called exactly once, got %d", releases)
+	}
+}
