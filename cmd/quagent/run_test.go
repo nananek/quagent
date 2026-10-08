@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -157,12 +158,39 @@ func TestRepoRoot(t *testing.T) {
 }
 
 func TestGitIdentity(t *testing.T) {
-	name, email, err := gitIdentity(".")
+	// CI のように user.name / user.email が未設定でも通るよう、
+	// 一時リポジトリを作って検証する。グローバル設定の影響を遮断する。
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+
+	tmp := t.TempDir()
+	if out, err := exec.Command("git", "init", tmp).CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v: %s", err, out)
+	}
+
+	// 設定なしではエラーを返す。
+	if _, _, err := gitIdentity(tmp); err == nil {
+		t.Fatal("expected error when user.name/email is not set")
+	}
+
+	if out, err := exec.Command("git", "-C", tmp, "config", "user.name", "Test User").CombinedOutput(); err != nil {
+		t.Fatalf("git config user.name failed: %v: %s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", tmp, "config", "user.email", "test@example.com").CombinedOutput(); err != nil {
+		t.Fatalf("git config user.email failed: %v: %s", err, out)
+	}
+
+	name, email, err := gitIdentity(tmp)
 	if err != nil {
 		t.Fatalf("gitIdentity failed: %v", err)
 	}
-	if name == "" || email == "" {
-		t.Fatalf("gitIdentity returned empty name/email: %q, %q", name, email)
+	if name != "Test User" || email != "test@example.com" {
+		t.Fatalf("gitIdentity = %q, %q; want Test User, test@example.com", name, email)
+	}
+
+	// git 管理外ではエラーを返す。
+	if _, _, err := gitIdentity(t.TempDir()); err == nil {
+		t.Fatal("expected error for non-git directory")
 	}
 }
 
