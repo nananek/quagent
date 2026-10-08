@@ -2,10 +2,8 @@ package netns
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -18,28 +16,10 @@ import (
 	"golang.org/x/net/http2"
 )
 
-// InspectRequest は透明プロキシが終端して取り出した HTTP リクエストの点検依頼。
-// 子プロセスが親へ送り、親がコンテンツガード (ローカル LLM) にかけて可否を返す。
-type InspectRequest struct {
-	// Provider は点検の表示に使う区分 (直接の "https" / "http")。
-	Provider string      `json:"provider"`
-	Method   string      `json:"method"`
-	Host     string      `json:"host"`
-	Path     string      `json:"path"`
-	Query    string      `json:"query"`
-	Headers  http.Header `json:"headers"`
-	Body     []byte      `json:"body,omitempty"`
-	// Truncated は本文が長く、点検した範囲より後ろがあるとき true。
-	Truncated bool `json:"truncated,omitempty"`
-}
-
-// maxPeek は 1 リクエストで点検のために読む本文の上限 (親の点検上限より大きくしない)。
-const maxPeek = 2 << 20
-
-// terminate は許可済みの TLS 接続を終端し、平文になった HTTP の中身を点検して
+// terminate は許可済みの TLS 接続を終端し、平文になった HTTP のヘッダを絞って
 // から、元の宛先へ TLS で張り直して転送する。クライアントには CA が署名した SNI 用の
 // 証明書を提示する。ALPN で h2 が選ばれれば h2 として、そうでなければ HTTP/1.1 として
-// 扱う (h2 しか使わないクライアントも点検できる)。
+// 扱う (h2 しか使わないクライアントも扱える)。
 func (p *webProxy) terminate(client net.Conn, dst, sni string) {
 	cert, err := p.mitm.Leaf(sni)
 	if err != nil {
@@ -64,7 +44,7 @@ func (p *webProxy) terminate(client net.Conn, dst, sni string) {
 		p.serveHTTP2(tc, dst, sni)
 		return
 	}
-	p.serveInspect(tc, bufio.NewReader(tc), dst, sni, true)
+	p.serveHTTP1(tc, bufio.NewReader(tc), dst, sni, true)
 }
 
 // serveHTTP2 は h2 で来た 1 本の接続を、ストリームごとに点検して上流へ h2 で
@@ -85,20 +65,17 @@ func (p *webProxy) serveHTTP2(client net.Conn, dst, name string) {
 	})
 }
 
-// serveH2Stream は h2 の 1 ストリームを点検して上流へ中継する。:authority が
+// serveH2Stream は h2 の 1 ストリームをヘッダを絞って上流へ中継する。:authority が
 // 接続時の SNI と違うものは、張り直す先が違うことになるので通さない。
 func (p *webProxy) serveH2Stream(w http.ResponseWriter, r *http.Request, tr *http2.Transport, name string) {
 	if h, err := normalizeHost(r.Host); err != nil || h != name {
 		p.block(fmt.Sprintf("Host %s (SNI %s と一致しない)", r.Host, name))
-		writeBlockedH2(w, errors.New("SNI と Host が一致しない"))
+		http.Error(w, "quagent: SNI と Host が一致しない", http.StatusForbidden)
 		return
 	}
 	normalizeRequest(r, name, true)
 	removeHopHeaders(r.Header)
-	if err := p.check(r, name); err != nil {
-		writeBlockedH2(w, err)
-		return
-	}
+	p.filter(r, name)
 	out, err := tr.RoundTrip(r)
 	if err != nil {
 		log.Printf("web: %s へ h2 で中継できない: %v", name, err)
@@ -116,10 +93,10 @@ func (p *webProxy) serveH2Stream(w http.ResponseWriter, r *http.Request, tr *htt
 	_, _ = io.Copy(w, out.Body)
 }
 
-// serveInspect は 1 本のクライアント接続の HTTP/1.1 を、リクエストごとに点検して
+// serveHTTP1 は 1 本のクライアント接続の HTTP/1.1 を、リクエストごとに点検して
 // 上流へ中継する。secure なら上流へ TLS で、そうでなければ平文で張り直す。name は
 // 確認済みの接続先 (secure なら SNI、平文なら最初の Host から引き継ぐ)。
-func (p *webProxy) serveInspect(client net.Conn, br *bufio.Reader, dst, name string, secure bool) {
+func (p *webProxy) serveHTTP1(client net.Conn, br *bufio.Reader, dst, name string, secure bool) {
 	var up net.Conn
 	var upBR *bufio.Reader
 	defer func() {
@@ -161,10 +138,7 @@ func (p *webProxy) serveInspect(client net.Conn, br *bufio.Reader, dst, name str
 			}
 			req.Header.Del("Expect")
 		}
-		if err := p.check(req, host); err != nil {
-			writeBlocked(client, err)
-			return
-		}
+		p.filter(req, host)
 		if up == nil {
 			if secure {
 				up, err = p.dialUpstream(dst, host)
@@ -275,35 +249,12 @@ func (p *webProxy) dialUpstreamH2(dst, sni string) (net.Conn, error) {
 	return tc, nil
 }
 
-// check は 1 リクエストをコンテンツガードにかける。点検する本文は先頭の一部だけを読み、
-// 残りはそのまま転送できるように req.Body を差し替える。
-func (p *webProxy) check(req *http.Request, host string) error {
-	if p.inspect == nil {
-		return nil
+// filter は 1 リクエストのヘッダを header_policy どおりに絞る (ポリシーが無ければ
+// 何もしない)。
+func (p *webProxy) filter(req *http.Request, host string) {
+	if p.headers != nil {
+		p.headers.Rules(host).Apply(req.Header)
 	}
-	body, truncated, err := peekBody(req, p.inspectLimit)
-	if err != nil {
-		return fmt.Errorf("本文を読めない: %w", err)
-	}
-	headers := req.Header.Clone()
-	// Host は Header に入らないので、持ち出しの経路になりうるぶんを点検に見せる。
-	if req.Host != "" {
-		headers.Set("Host", req.Host)
-	}
-	provider := "https"
-	if req.URL != nil && req.URL.Scheme == "http" {
-		provider = "http"
-	}
-	return p.inspect(InspectRequest{
-		Provider:  provider,
-		Method:    req.Method,
-		Host:      host,
-		Path:      req.URL.Path,
-		Query:     req.URL.RawQuery,
-		Headers:   headers,
-		Body:      body,
-		Truncated: truncated,
-	})
 }
 
 // tunnel は Upgrade (WebSocket など) の要求を上流へ渡し、101 が返れば以後は
@@ -334,60 +285,6 @@ func (p *webProxy) tunnel(client net.Conn, up net.Conn, br *bufio.Reader, upBR *
 	go func() { _, err := io.Copy(up, br); errc <- err }()
 	go func() { _, err := io.Copy(client, upBR); errc <- err }()
 	<-errc
-}
-
-// peekBody は req.Body の先頭 n バイトを読み、残りを保ったまま req.Body を差し替える。
-// n より長い本文は truncated=true を返す。
-func peekBody(req *http.Request, n int) (body []byte, truncated bool, err error) {
-	if req.Body == nil || req.Body == http.NoBody || n <= 0 {
-		return nil, false, nil
-	}
-	if n > maxPeek {
-		n = maxPeek
-	}
-	buf := make([]byte, n)
-	read, err := io.ReadFull(req.Body, buf)
-	switch err {
-	case nil:
-		rest := req.Body
-		req.Body = struct {
-			io.Reader
-			io.Closer
-		}{io.MultiReader(bytes.NewReader(buf), rest), rest}
-		return buf, true, nil
-	case io.EOF:
-		req.Body = http.NoBody
-		return nil, false, nil
-	case io.ErrUnexpectedEOF:
-		body = buf[:read]
-		req.Body = io.NopCloser(bytes.NewReader(body))
-		return body, false, nil
-	default:
-		return nil, false, err
-	}
-}
-
-// writeBlocked はコンテンツガードが止めたことをクライアントに 403 で返す。
-func writeBlocked(w io.Writer, cause error) {
-	body := "quagent: blocked by the request content guard: " + cause.Error() + "\n"
-	resp := &http.Response{
-		StatusCode:    http.StatusForbidden,
-		Status:        "403 Forbidden",
-		Proto:         "HTTP/1.1",
-		ProtoMajor:    1,
-		ProtoMinor:    1,
-		Header:        http.Header{"Content-Type": {"text/plain; charset=utf-8"}},
-		Body:          io.NopCloser(strings.NewReader(body)),
-		ContentLength: int64(len(body)),
-	}
-	_ = resp.Write(w)
-}
-
-// writeBlockedH2 はコンテンツガードが止めたことを、h2 のストリームに 403 で返す。
-func writeBlockedH2(w http.ResponseWriter, cause error) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(http.StatusForbidden)
-	_, _ = io.WriteString(w, "quagent: blocked by the request content guard: "+cause.Error()+"\n")
 }
 
 // isUpgrade はリクエストがプロトコルの昇格 (WebSocket など) を求めるかを返す。

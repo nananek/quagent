@@ -41,7 +41,7 @@ func TestAgySubscriptionE2E(t *testing.T) {
 		return "Bearer " + tok, err
 	}
 	if err := authproxy.RegisterDynamic(mux, antigravity.ProviderID, antigravity.Upstream,
-		"Authorization", secret, antigravity.Allow, logger, nil, nil, nil); err != nil {
+		"Authorization", secret, antigravity.Allow, logger, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

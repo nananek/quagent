@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"log"
 	"math/rand/v2"
@@ -21,7 +20,6 @@ import (
 	"github.com/nananek/quagent/internal/authproxy"
 	"github.com/nananek/quagent/internal/config"
 	"github.com/nananek/quagent/internal/console"
-	"github.com/nananek/quagent/internal/guard"
 	"github.com/nananek/quagent/internal/guest"
 	"github.com/nananek/quagent/internal/hostsvc"
 	"github.com/nananek/quagent/internal/image"
@@ -120,18 +118,18 @@ func run(o runOpts) error {
 	if err != nil {
 		return err
 	}
-	if cfg.Guard.InspectHTTPS && !cfg.Guard.Enabled {
-		return fmt.Errorf("guard.inspect_https を使うには guard.enabled を true にする")
-	}
-	inspectHTTPS := cfg.Guard.Enabled && cfg.Guard.InspectHTTPS
-	// 証明書を固定 (pinning) するクライアント向けに、TLS 終端しない行き先を名前ごとに
-	// 選べる。指定した行き先は SNI/Host の確認だけ続けて素通しする。
-	passthrough, err := normalizePassthrough(cfg.Guard.PassthroughHTTPS)
-	if err != nil {
-		return err
-	}
-	if len(passthrough) > 0 && !inspectHTTPS {
-		return fmt.Errorf("guard.passthrough_https を使うには guard.inspect_https を true にする")
+	// ヘッダの制限 (header_policy) は、HTTPS を平文に戻さないと掛けられないので、
+	// 有効なら TLS を終端する (使い捨て CA)。passthrough_https の行き先は終端しない。
+	headersOn := cfg.HeaderPolicy != nil && cfg.HeaderPolicy.Enabled
+	var passthrough []string
+	if cfg.HeaderPolicy != nil {
+		passthrough, err = normalizePassthrough(cfg.HeaderPolicy.Passthrough)
+		if err != nil {
+			return err
+		}
+		if len(passthrough) > 0 && !headersOn {
+			return fmt.Errorf("header_policy.passthrough_https を使うには header_policy.enabled を true にする")
+		}
 	}
 	if o.Agent == "" {
 		o.Agent = DefaultAgent
@@ -230,29 +228,21 @@ func run(o runOpts) error {
 	}
 	// 許可していない LLM API の操作は、承認コンソールができてからそこに出す
 	llmDenied := make(chan string, 16)
-	// コンテンツガード (ローカル LLM)。承認コンソールはこの後で作るので、Reviewer は後から差す。
-	var contentGuard *guard.Guard
-	if cfg.Guard.Enabled {
-		contentGuard, err = guard.New(cfg.Guard, logger)
-		if err != nil {
-			return fmt.Errorf("コンテンツガードを作れない: %w", err)
-		}
-		logf("コンテンツガード: %s で LLM プロキシのリクエストを点検する", contentGuard)
-	}
-	// HTTPS も終端して点検するなら、run ごとの使い捨て CA を 1 つ作る。証明書は
+	// HTTPS を終端するなら、run ごとの使い捨て CA を 1 つ作る。証明書は
 	// guest の信頼ストアに入れ、秘密鍵は host の作業ディレクトリ (0700) から出さない。
 	var ca *tlsmitm.CA
 	var caCert string
-	if inspectHTTPS {
+	if headersOn {
 		ca, err = tlsmitm.NewCA()
 		if err != nil {
 			return fmt.Errorf("TLS 終端の CA を作れない: %w", err)
 		}
 		caCert = string(ca.CertPEM())
+	}
+	if headersOn {
+		logf("外向きリクエストのヘッダを絞る (User-Agent は固定。HTTPS は使い捨て CA で TLS を終端する。LLM プロキシは対象外)")
 		if len(passthrough) > 0 {
-			logf("HTTPS の中身も点検する (使い捨て CA で TLS を終端。%s は終端せず素通し)", strings.Join(passthrough, ", "))
-		} else {
-			logf("HTTPS の中身も点検する (使い捨て CA で TLS を終端。証明書を固定するクライアントは passthrough_https で除外する)")
+			logf("注意: %s は終端せず素通しするので、ヘッダは絞れない", strings.Join(passthrough, ", "))
 		}
 	}
 	providers, err := authproxy.Register(svc.Mux, cfg.Providers, logger, func(s string) {
@@ -260,7 +250,7 @@ func run(o runOpts) error {
 		case llmDenied <- s:
 		default: // 溢れた分は host.log にだけ残る
 		}
-	}, contentGuard)
+	})
 	if err != nil {
 		return err
 	}
@@ -302,7 +292,7 @@ func run(o runOpts) error {
 				case llmDenied <- s:
 				default:
 				}
-			}, contentGuard, func(id, method, path string, status int) {
+			}, func(id, method, path string, status int) {
 				// 初回の推論が通れば起動 (ユーザー情報確認を含む) は済んでいるので、
 				// 一時的に開けた egress をすぐ閉じる。
 				if id == antigravity.ProviderID && status/100 == 2 &&
@@ -423,18 +413,20 @@ runcmd:
 	}
 	logf("VM を起動 (base=%s, allow=%v)", filepath.Base(base), o.Allow)
 	spec := netns.Spec{WorkDir: work, SSHPort: sshPort, DNS: dns, Allow: o.Allow, QemuArgv: qemu}
-	if inspectHTTPS {
+	if headersOn {
 		keyPEM, err := ca.KeyPEM()
 		if err != nil {
 			return fmt.Errorf("TLS 終端の CA の鍵を書き出せない: %w", err)
 		}
-		spec.InspectHTTPS = true
+		spec.TerminateHTTPS = true
 		spec.CACertPEM, spec.CAKeyPEM = caCert, string(keyPEM)
-		spec.InspectLimit = contentGuard.InspectLimit()
 		spec.PassthroughHTTPS = passthrough
 		if len(passthrough) > 0 {
 			logf("TLS 終端しない行き先: %s (SNI/Host の確認だけ続けて素通しする)", strings.Join(passthrough, ", "))
 		}
+	}
+	if headersOn {
+		spec.HeaderPolicy = cfg.HeaderPolicy
 	}
 	l, err := netns.Start(spec)
 	if err != nil {
@@ -466,38 +458,6 @@ runcmd:
 		if o.Agent == "agy" {
 			agyEgress.Open()
 		}
-	}
-	if contentGuard != nil {
-		// 疑わしいリクエストは承認コンソールで人間が通すか止めるか決める
-		contentGuard.SetReviewer(func(ctx context.Context, req guard.Request, reason string) error {
-			return con.AskGuard(ctx, console.GuardInfo{
-				Provider: req.Provider,
-				Method:   req.Method,
-				URL:      req.URL(),
-				Reason:   reason,
-				Evidence: req.Evidence,
-				Headers:  req.HeaderLines(),
-				Body:     string(req.Body),
-			})
-		})
-		// 最初の本番リクエストがモデルの読み込み待ちで時間切れにならないよう先に載せる
-		go contentGuard.Warm(context.Background())
-	}
-	if inspectHTTPS {
-		// 子が TLS 終端して取り出した HTTPS のリクエストを、同じコンテンツガードにかける。
-		// 認証プロキシと同じ Guard を使うので、拒否した該当箇所の記憶も共有される。
-		l.SetInspector(func(req netns.InspectRequest) error {
-			return contentGuard.Check(context.Background(), guard.Request{
-				Provider:      req.Provider,
-				Method:        req.Method,
-				Host:          req.Host,
-				Path:          req.Path,
-				Query:         req.Query,
-				Headers:       req.Headers,
-				Body:          req.Body,
-				BodyTruncated: req.Truncated,
-			})
-		})
 	}
 	go relayDenied(l, con)
 	go relayBlocked(l, con)
@@ -538,8 +498,8 @@ runcmd:
 			return con.AskPR(console.PRInfo{Branch: req.Branch, Base: req.Base, Title: req.Title, Body: req.Body})
 		}
 	}
-	svc.Mux.Handle(mcpsrv.Path, mcpsrv.Handler(mgr, publisher, contentGuard, con.Log,
-		toolServerTools(cfg, contentGuard, con.Log)...))
+	svc.Mux.Handle(mcpsrv.Path, mcpsrv.Handler(mgr, publisher, con.Log,
+		toolServerTools(cfg, con.Log)...))
 
 	// 待機中の Ctrl-C でも後始末を通す。対話中の入力は tmux の端末が受けるので届かない。
 	sigs := make(chan os.Signal, 1)

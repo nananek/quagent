@@ -12,7 +12,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -46,8 +45,7 @@ func RunChild(specPath string) error {
 		return fmt.Errorf("resolv.conf の bind mount に失敗: %w", err)
 	}
 
-	c := &child{spec: spec, events: &eventWriter{enc: json.NewEncoder(os.Stdout)},
-		inspectWait: map[int]chan inspectResult{}}
+	c := &child{spec: spec, events: &eventWriter{enc: json.NewEncoder(os.Stdout)}}
 	defer c.cleanup()
 	return c.run()
 }
@@ -58,11 +56,6 @@ type child struct {
 	holder *exec.Cmd
 	slirp  *exec.Cmd
 	qemu   *exec.Cmd
-
-	// TLS 終端した HTTPS の点検依頼と、その返答待ち。
-	inspectMu   sync.Mutex
-	inspectNext int
-	inspectWait map[int]chan inspectResult
 }
 
 func (c *child) cleanup() {
@@ -182,20 +175,13 @@ func (c *child) run() error {
 	}
 	eg := newEgress(c.nft, c.events, initial)
 
-	// 親からの指示 (許可の差し替えと、点検依頼への返答) を早くから受ける。点検の
-	// 返答は透明プロキシが待つので、プロキシが動き出す前に読み手を用意する。
+	// 親からの指示 (許可の差し替え) を早くから受ける。
 	stdinClosed := make(chan error, 1)
 	go func() {
 		err := readControl(os.Stdin, func(ctl control) {
-			if ctl.InspectID != 0 {
-				c.deliverInspect(ctl.InspectID, ctl.Allow, ctl.Reason)
-				return
-			}
 			eg.setGrants(ctl.Grants)
 			c.events.send(Event{Applied: ctl.Seq})
 		})
-		// 親が消えたら、待っている点検を止める側で起こす (接続を握ったままにしない)。
-		c.failInspects()
 		stdinClosed <- err
 	}()
 
@@ -210,17 +196,18 @@ func (c *child) run() error {
 
 	// 3.5 透明プロキシ: 許可した IP への Web 接続の SNI/Host を確かめる。nft の
 	// redirect 先が無いと接続が弾かれるので、qemu を起動する前に待ち受ける。
-	// InspectHTTPS なら TLS を終端し、平文の HTTP を親のコンテンツガードにかける。
+	// TerminateHTTPS なら TLS を終端し、平文に戻した HTTP のヘッダを絞る。
 	web := newWebProxy(c.holder.Process.Pid, eg.allowed, eg.webBlocked)
-	if c.spec.InspectHTTPS {
+	if c.spec.TerminateHTTPS {
 		ca, err := tlsmitm.FromPEM([]byte(c.spec.CACertPEM), []byte(c.spec.CAKeyPEM))
 		if err != nil {
 			return fmt.Errorf("TLS 終端の CA を読めない: %w", err)
 		}
 		web.mitm = ca
 		web.passthrough = c.spec.PassthroughHTTPS
-		web.inspect = c.inspect
-		web.inspectLimit = c.spec.InspectLimit
+	}
+	if c.spec.HeaderPolicy != nil && c.spec.HeaderPolicy.Enabled {
+		web.headers = c.spec.HeaderPolicy
 	}
 	for _, lp := range []struct {
 		port int

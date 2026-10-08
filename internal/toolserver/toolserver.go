@@ -22,7 +22,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/nananek/quagent/internal/config"
-	"github.com/nananek/quagent/internal/guard"
 )
 
 const (
@@ -40,6 +39,21 @@ const (
 	specTimeout = 15 * time.Second
 	callTimeout = 60 * time.Second
 )
+
+// UserAgent が空でなければ、ツールサーバーへの全リクエストの User-Agent をこの値に
+// 固定する (header_policy が有効なとき、呼び出し側が設定する)。空なら Go の既定のまま。
+var UserAgent string
+
+// uaTransport は UserAgent が設定されていれば、リクエストの User-Agent を固定する。
+type uaTransport struct{ next http.RoundTripper }
+
+func (t uaTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if UserAgent != "" {
+		req = req.Clone(req.Context())
+		req.Header.Set("User-Agent", UserAgent)
+	}
+	return t.next.RoundTrip(req)
+}
 
 // guest が指定しても付けないヘッダ (認証や接続まわりは host が決める)。
 var forbiddenHeaders = map[string]bool{
@@ -78,13 +92,11 @@ type Server struct {
 	host   string
 	ops    map[string]*operation
 	client *http.Client
-	guard  *guard.Guard
 	logf   func(string)
 }
 
-// Load は cfg の OpenAPI 仕様を取得して MCP のツールに変換する。g が nil でなければ、
-// ツール呼び出しの中身もコンテンツガードに通す。logf は承認コンソール向けの記録。
-func Load(ctx context.Context, name string, cfg config.ToolServer, g *guard.Guard, logf func(string)) (*Server, error) {
+// Load は cfg の OpenAPI 仕様を取得して MCP のツールに変換する。logf は承認コンソール向けの記録。
+func Load(ctx context.Context, name string, cfg config.ToolServer, logf func(string)) (*Server, error) {
 	if name == "" || strings.Contains(name, NameSep) || !validName(name) {
 		return nil, fmt.Errorf("tool_servers の名前は英数字・- ・_ だけ ('__' を含まない): %q", name)
 	}
@@ -96,11 +108,12 @@ func Load(ctx context.Context, name string, cfg config.ToolServer, g *guard.Guar
 	s := &Server{
 		name: name, cfg: cfg, base: strings.TrimRight(u.String(), "/"), host: u.Host,
 		client: &http.Client{
-			Timeout: callTimeout,
+			Timeout:   callTimeout,
+			Transport: uaTransport{next: http.DefaultTransport},
 			// 転送先を勝手に変えさせない (リダイレクト先に認証ヘッダを送らない)
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
-		guard: g, logf: logf,
+		logf: logf,
 	}
 	if s.logf == nil {
 		s.logf = func(string) {}
@@ -271,24 +284,7 @@ func (s *Server) call(ctx context.Context, op *operation, raw json.RawMessage) *
 		return errResult("tool server credentials are unavailable on the host")
 	}
 
-	// 認証ヘッダはガードにもエージェントにも見せない (付けるのは転送の直前だけ)
-	if s.guard != nil {
-		limit := s.guard.InspectLimit()
-		peek, truncated := body, false
-		if len(peek) > limit {
-			peek, truncated = peek[:limit], true
-		}
-		gh := header.Clone()
-		gh.Set("Accept", "application/json")
-		if err := s.guard.Check(ctx, guard.Request{
-			Provider: "tool:" + s.name, Method: op.method, Host: s.host,
-			Path: path, Query: query.Encode(), Headers: gh, Body: peek, BodyTruncated: truncated,
-		}); err != nil {
-			s.logf(fmt.Sprintf("ツール呼び出しがコンテンツガードで止まった (%s %s): %v", s.name, op.toolName, err))
-			return errResult("blocked by the request content guard: %v", err)
-		}
-	}
-
+	// 認証ヘッダはエージェントに見せない (付けるのは転送の直前だけ)
 	var rd io.Reader
 	if body != nil {
 		rd = bytes.NewReader(body)

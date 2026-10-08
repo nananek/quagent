@@ -3,22 +3,16 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
-	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/nananek/quagent/internal/access"
-	"github.com/nananek/quagent/internal/config"
 	"github.com/nananek/quagent/internal/console"
-	"github.com/nananek/quagent/internal/guard"
 	"github.com/nananek/quagent/internal/guest"
 	"github.com/nananek/quagent/internal/hostsvc"
 	"github.com/nananek/quagent/internal/image"
@@ -34,7 +28,6 @@ const usage = `usage:
   quagent image ls                             焼いたベースイメージの一覧
   quagent image rm IMAGE                       ベースイメージを消す
   quagent always ls | rm DOMAIN...              「以後確認しない」ドメインの一覧・取り消し
-  quagent guard check [TEXT]                    設定したローカル LLM でリクエストの中身を点検してみる
   quagent run [--repo DIR] [--image RECIPE] [--cpus N] [--mem MiB] [--agent opencode|claude|agy] [--allow "d1 d2"] [--ssh] [--mount-tmp] [--nested-virt] [--local-head] [--pr-approval]
                                                VM を起動し、tmux でエージェントと承認コンソールを開く
 `
@@ -95,8 +88,6 @@ func dispatch(args []string) error {
 		return cmdRun(args[1:])
 	case "always":
 		return cmdAlways(args[1:])
-	case "guard":
-		return cmdGuard(args[1:])
 	default:
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
@@ -239,50 +230,6 @@ func cmdAlways(args []string) error {
 		return nil
 	}
 	return fmt.Errorf("always: ls か rm DOMAIN... を指定する")
-}
-
-// cmdGuard は設定したローカル LLM に、その場でリクエストを 1 件点検させる。
-// Ollama などが動いているか、モデルが判定を返せるかを確かめるのに使う。
-func cmdGuard(args []string) error {
-	if len(args) == 0 || args[0] != "check" {
-		return fmt.Errorf("guard: check [TEXT] を指定する")
-	}
-	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
-	g, err := guard.New(cfg.Guard, log.New(os.Stderr, "", 0))
-	if err != nil {
-		return err
-	}
-	text := strings.Join(args[1:], " ")
-	if text == "" {
-		b, err := io.ReadAll(io.LimitReader(os.Stdin, guard.MaxInspect))
-		if err != nil {
-			return err
-		}
-		text = string(b)
-	}
-	if strings.TrimSpace(text) == "" {
-		return fmt.Errorf("guard check: 点検する TEXT か標準入力が必要")
-	}
-	req := guard.Request{
-		Provider: "cli", Method: http.MethodPost, Host: "example.com", Path: "/",
-		Headers: http.Header{"User-Agent": {"quagent-guard-check"}},
-		Body:    []byte(text),
-	}
-	v, err := g.Inspect(context.Background(), req)
-	if err != nil {
-		return fmt.Errorf("点検できない (Ollama などは動いている?): %w", err)
-	}
-	fmt.Printf("%s: %s\n", v.Action, v.Reason)
-	if v.Evidence != "" {
-		fmt.Printf("evidence: %s\n", v.Evidence)
-	}
-	if len(v.Categories) > 0 {
-		fmt.Println("categories:", strings.Join(v.Categories, ", "))
-	}
-	return nil
 }
 
 // consoleCommand は承認コンソール UI を動かす隠しサブコマンド名。

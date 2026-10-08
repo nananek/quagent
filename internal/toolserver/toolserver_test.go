@@ -113,7 +113,7 @@ func call(s *Server, tool string, args string) *mcp.CallToolResult {
 // 認証なしのサーバーを登録できる (secret を省略)。ヘッダは付かない。
 func TestNoAuth(t *testing.T) {
 	ts, last := newToolServer(t, "")
-	s, err := Load(context.Background(), "tools", config.ToolServer{URL: ts.URL + "/"}, nil, nil)
+	s, err := Load(context.Background(), "tools", config.ToolServer{URL: ts.URL + "/"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestAuth(t *testing.T) {
 	t.Setenv("TOOL_KEY", "s3cret\n")
 	ts, last := newToolServer(t, "Bearer s3cret")
 	cfg := config.ToolServer{URL: ts.URL, SecretEnv: "TOOL_KEY"}
-	s, err := Load(context.Background(), "tools", cfg, nil, nil)
+	s, err := Load(context.Background(), "tools", cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,19 +149,19 @@ func TestAuth(t *testing.T) {
 		t.Errorf("Authorization = %q", last().header.Get("Authorization"))
 	}
 	// 秘密を付けないと仕様も取れない
-	if _, err := Load(context.Background(), "tools", config.ToolServer{URL: ts.URL}, nil, nil); err == nil {
+	if _, err := Load(context.Background(), "tools", config.ToolServer{URL: ts.URL}, nil); err == nil {
 		t.Error("認証なしで 401 のサーバーを読めた")
 	}
 	// header / prefix で変えられる
 	empty := ""
-	if _, err := Load(context.Background(), "tools", config.ToolServer{URL: ts.URL, Header: "X-Key", Prefix: &empty, SecretEnv: "TOOL_KEY"}, nil, nil); err == nil {
+	if _, err := Load(context.Background(), "tools", config.ToolServer{URL: ts.URL, Header: "X-Key", Prefix: &empty, SecretEnv: "TOOL_KEY"}, nil); err == nil {
 		t.Error("別ヘッダで認証が通ってしまった")
 	}
 }
 
 func TestBodyAndSchema(t *testing.T) {
 	ts, last := newToolServer(t, "")
-	s, err := Load(context.Background(), "tools", config.ToolServer{URL: ts.URL}, nil, nil)
+	s, err := Load(context.Background(), "tools", config.ToolServer{URL: ts.URL}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestBodyAndSchema(t *testing.T) {
 // MCP クライアントからツール一覧と呼び出しができる (登録の結線)。
 func TestMCPEndToEnd(t *testing.T) {
 	ts, _ := newToolServer(t, "")
-	s, err := Load(context.Background(), "tools", config.ToolServer{URL: ts.URL}, nil, nil)
+	s, err := Load(context.Background(), "tools", config.ToolServer{URL: ts.URL}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestLoadErrors(t *testing.T) {
 		{"x", config.ToolServer{URL: "ftp://example.com"}},
 		{"x", config.ToolServer{URL: ts.URL, OpenAPIPath: "/missing.json"}},
 	} {
-		if _, err := Load(context.Background(), c.name, c.cfg, nil, nil); err == nil {
+		if _, err := Load(context.Background(), c.name, c.cfg, nil); err == nil {
 			t.Errorf("%s %+v: エラーにならなかった", c.name, c.cfg)
 		}
 	}

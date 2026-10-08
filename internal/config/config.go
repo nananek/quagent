@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/nananek/quagent/internal/headerpolicy"
 	"github.com/nananek/quagent/internal/paths"
 	"github.com/nananek/quagent/internal/sandbox"
 )
@@ -33,58 +34,13 @@ type Config struct {
 	PR PR `json:"pr"`
 	// Clipboard は VM が OSC 52 で書き込もうとした中身 (承認したもの) の入れ方。
 	Clipboard Clipboard `json:"clipboard"`
-	// Guard はローカル LLM による HTTP リクエストの内容点検の設定。
-	Guard Guard `json:"guard"`
+	// HeaderPolicy は VM から外へ出るリクエストのヘッダを絞り、User-Agent を固定する
+	// 設定 (LLM 認証プロキシは対象外。プロバイダごとに必要なヘッダがあるため)。
+	// 有効にすると HTTPS を終端して平文に戻す (使い捨て CA を使う)。未指定なら何もしない。
+	HeaderPolicy *headerpolicy.Policy `json:"header_policy,omitempty"`
 	// Sandbox は VM の中のコマンドにかける seccomp / Landlock の設定。
 	// 未指定なら既定 (compat で有効)。
 	Sandbox *sandbox.Policy `json:"sandbox,omitempty"`
-}
-
-// Guard はローカル LLM による HTTP リクエストの内容点検の設定。ネットワークの
-// 許可制だけでは、許可したドメインへ秘密や個人情報を持ち出す要求を見抜けないので、
-// LLM 認証プロキシを通るリクエストを近くのローカル LLM に点検させる。
-type Guard struct {
-	// Enabled が true のときだけ点検する (既定 false)。
-	Enabled bool `json:"enabled"`
-	// Backend は "openai" (既定。llama.cpp の llama-server など OpenAI 互換) か
-	// "ollama"。
-	Backend string `json:"backend,omitempty"`
-	// Endpoint はローカル LLM の URL。既定 "http://127.0.0.1:8080" (llama.cpp)。
-	Endpoint string `json:"endpoint,omitempty"`
-	// Model は使うモデル。既定 "qwen2.5-3b-instruct" (6GB の VRAM 向け。
-	// llama.cpp は起動時の --alias と合わせる)。
-	Model string `json:"model,omitempty"`
-	// TimeoutSeconds は 1 リクエストの点検の上限。既定 30。
-	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
-	// MaxBytes は LLM に見せる本文の塊 1 つの先頭バイト数。既定 8192、上限 32768。
-	// NumCtx (文脈長) に収まらない大きさは切り下げる。
-	MaxBytes int `json:"max_bytes,omitempty"`
-	// MaxChunks は 1 リクエストの本文を何個の塊に分けて点検するか。既定 8、上限 64。
-	// 塊は少し重ねてあり、境目にまたがる短い秘密もどれかの塊に丸ごと入る。
-	MaxChunks int `json:"max_chunks,omitempty"`
-	// NumCtx はローカル LLM の文脈長 (トークン)。既定 8192。llama.cpp では起動時の
-	// num_ctx と合わせる (リクエストごとには変えられない)。Ollama にはこの値を渡す。
-	// MaxBytes がこの文脈に収まるよう切り下げられる。
-	NumCtx int `json:"num_ctx,omitempty"`
-	// Concurrency は同時に点検する件数。GPU 1 枚なら 1 (既定)。llama.cpp を並列
-	// (--parallel) で動かすときはその数まで上げられる。
-	Concurrency int `json:"concurrency,omitempty"`
-	// Mode は LLM が evidence を引用して deny したときの扱い。"ask" (既定。承認コンソールが通すか止めるか決める)、
-	// "deny" (確認せず止める)、"advisory" (ログに残して通す) のどれか。
-	Mode string `json:"mode,omitempty"`
-	// OnError は点検できなかったときの扱い。"ask" (既定)、"deny"、"allow" のどれか。
-	OnError string `json:"on_error,omitempty"`
-	// InspectHTTPS は、許可した行き先への HTTPS を host 側で TLS 終端し、平文に
-	// なったリクエストも同じコンテンツガードにかける。使い捨ての CA を作って guest の
-	// 信頼ストアに入れるので、証明書を固定 (pinning) するクライアントとは相性が悪い。
-	// Enabled が true のときだけ使える。
-	InspectHTTPS bool `json:"inspect_https,omitempty"`
-	// PassthroughHTTPS は TLS 終端せず素通しする行き先のパターン。証明書を固定
-	// (pinning) するクライアントの行き先をここに挙げる。SNI/Host が許可名に一致する
-	// ことの確認だけは続けるので、点検はできないが素通しにはならない。"example.com"
-	// (完全一致) か "*.example.com" (サブドメイン)。InspectHTTPS が true のときだけ
-	// 意味がある。
-	PassthroughHTTPS []string `json:"passthrough_https,omitempty"`
 }
 
 // Clipboard はクリップボードへの入れ方。

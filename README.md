@@ -25,7 +25,6 @@ quagent image build [--refresh|--incremental] arch   # ベースイメージの�
                                #   --refresh: クラウドイメージを再取得してクリーンビルド
                                #   --incremental: 前回のイメージをもとに差分更新 (カーネルは更新がある場合のみ再構築)
 quagent image ls / rm IMAGE    # ビルド済みイメージの一覧表示・削除
-quagent guard check "本文"      # ローカル LLM によるリクエスト内容検査のテスト実行 (後述)
 quagent run --image arch       # VM を起動 (--ssh: ホストからの SSH 接続を許可、--mount-tmp: .tmp をホスト・ゲスト間で同期)
 ```
 
@@ -136,46 +135,15 @@ Open WebUI のツールサーバーなど、OpenAPI 仕様で公開された外�
 - OpenAPI 仕様は `url` に `openapi_path`（既定: `/openapi.json`）を連結した URL から取得します。Open WebUI のツールサーバー等でパスが異なる場合は適宜指定してください（OpenAPI 3.x の JSON 形式に対応、YAML は非対応）。
 - パス・クエリ・ヘッダーの各パラメータは同名のツール引数となり、リクエストボディは `body` 引数として渡されます（JSON、または `application/x-www-form-urlencoded` 形式に対応）。
 - 仕様の取得は VM 起動時に 1 回のみ行われます。取得できなかったサーバーは警告ログを出力してスキップされ、VM の起動処理自体は継続します。
-- ツール呼び出しのリクエストもコンテンツガード（有効時）の検査対象となります。レスポンス本文は最大 1 MiB まで取得され、画像等のテキスト以外のレスポンスはメタデータ（Content-Type とサイズ）のみを返します。
+- レスポンス本文は最大 1 MiB まで取得され、画像等のテキスト以外のレスポンスはメタデータ（Content-Type とサイズ）のみを返します。
 
-## コンテンツガード (任意)
+## ヘッダの制限 (任意)
 
-接続先ドメインの許可制だけでは、許可済みドメインへの通信に機密情報が意図せず（または悪意を持って）紛れ込むケース（例: User-Agent ヘッダーに機密情報を埋め込むなど）を防止できません。任意で、ホスト側で平文として参照可能なリクエスト内容をローカル LLM に検査させ、機密情報と判断される具体的な根拠（`evidence`）が抽出された場合のみ、承認コンソールへ転送して人間の判断を仰ぐことができます。判定の仕組みや限界については [docs/design.md](docs/design.md) を参照してください。
+`~/.config/quagent/config.json` の `header_policy` を有効にすると、VM から外へ出る HTTP リクエストの余計なヘッダ（Referer、Cookie、独自の `X-*` など）を落とし、User-Agent を固定します（LLM 認証プロキシは対象外）。HTTPS のヘッダを絞るには TLS の終端が必要なため、使い捨て CA が VM に信頼されます。宛先ごとの緩和（許可ヘッダの追加、User-Agent の差し替え）も設定できます。詳細は [docs/design.md](docs/design.md) を参照してください。
 
 ```json
-"guard": {
-  "enabled": true,
-  "backend": "openai",
-  "endpoint": "http://127.0.0.1:8080",
-  "model": "qwen2.5-3b-instruct",
-  "timeout_seconds": 30,
-  "max_bytes": 8192,
-  "max_chunks": 8,
-  "num_ctx": 8192,
-  "concurrency": 1,
-  "mode": "ask",
-  "on_error": "ask",
-  "inspect_https": false
-}
+"header_policy": { "enabled": true, "user_agent": "quagent", "hosts": { "*.example.com": { "allow": ["X-Example-*"] } } }
 ```
-
-| フィールド | 意味 |
-| --- | --- |
-| `enabled` | コンテンツ検査を有効にするか（既定: false） |
-| `backend` | `openai`（既定。llama.cpp などの OpenAI 互換サーバー）または `ollama` |
-| `endpoint` | ローカル LLM の URL（既定: `http://127.0.0.1:8080`、llama.cpp 想定） |
-| `model` | 使用するモデル名（既定: `qwen2.5-3b-instruct`。llama.cpp では起動時の `--alias` と一致させる） |
-| `timeout_seconds` | LLM 呼び出し 1 回（1 チャンク）あたりのタイムアウト秒数（既定: 30。リクエスト全体の分割検査は最大 10 分） |
-| `max_bytes` | LLM に渡す本文 1 チャンクあたりのバイト数（既定: 8192、上限: 32768） |
-| `max_chunks` | 本文の最大分割チャンク数（既定: 8、上限: 64） |
-| `num_ctx` | ローカル LLM のコンテキスト長（トークン数。既定: 8192、範囲: 2048〜131072） |
-| `concurrency` | 同時に実行する検査数（GPU 1 枚運用の場合は既定値の 1 を推奨） |
-| `mode` | `evidence` が検出され deny と判定された場合の動作。`ask`（既定。承認コンソールで確認）/ `deny` / `advisory` |
-| `on_error` | 検査に失敗（エラー）した場合の動作。`ask`（既定。承認コンソールで確認）/ `deny` / `allow` |
-| `inspect_https` | 外部宛先への HTTPS 通信（および平文 HTTP）も TLS 終端して内容を検査する（既定: false） |
-| `passthrough_https` | TLS 終端を行わず透過させるホスト名一覧（証明書ピニングを行うクライアント向け） |
-
-検査に使用するローカル LLM（llama.cpp など）のセットアップ方法、パラメータのチューニング指針、制限事項については [docs/design.md](docs/design.md) を参照してください。`quagent guard check "本文"` コマンドで単体の検査動作をテストできます。
 
 ## PR の作成と署名
 
