@@ -354,7 +354,12 @@ func TestMITMUpgradeTunnel(t *testing.T) {
 		io.Copy(conn, conn)
 	}))
 	proxyCA, _ := tlsmitm.NewCA()
-	proxyAddr := testProxy(t, proxyCA, addr, roots, newPolicy())
+	wsPolicy := &headerpolicy.Policy{
+		Enabled:   true,
+		UserAgent: "fixed/1",
+		Allow:     []string{"X-Allowed", "Connection", "Upgrade", "Sec-WebSocket-Key"},
+	}
+	proxyAddr := testProxy(t, proxyCA, addr, roots, wsPolicy)
 
 	raw, err := net.Dial("tcp", proxyAddr)
 	if err != nil {

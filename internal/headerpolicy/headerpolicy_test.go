@@ -12,27 +12,32 @@ func TestApplyDropsUnknownAndFixesUserAgent(t *testing.T) {
 	h.Set("User-Agent", "me@example.com")
 	h.Set("Accept", "*/*")
 	h.Set("Content-Type", "application/json")
+	h.Set("Range", "bytes=0-10")
+	h.Set("If-Modified-Since", "Wed, 21 Oct 2015 07:28:00 GMT")
 	h.Set("Referer", "https://x.example/")
 	h.Set("Cookie", "a=b")
 	h.Set("X-Custom", "1")
+	h.Set("Authorization", "Bearer secret")
 	h.Set("Sec-WebSocket-Key", "k")
+	h.Set("If-Match", `"xyz"`)
+	h.Set("Grpc-Metadata-Token", "t")
 	dropped := p.Rules("a.example").Apply(h)
 
 	if got := h.Get("User-Agent"); got != DefaultUserAgent {
 		t.Fatalf("User-Agent = %q", got)
 	}
-	for _, k := range []string{"Referer", "Cookie", "X-Custom"} {
+	for _, k := range []string{"Referer", "Cookie", "X-Custom", "Authorization", "Sec-WebSocket-Key", "If-Match", "Grpc-Metadata-Token"} {
 		if h.Get(k) != "" {
 			t.Errorf("%s が残っている", k)
 		}
 	}
-	for _, k := range []string{"Accept", "Content-Type", "Sec-Websocket-Key"} {
+	for _, k := range []string{"Accept", "Content-Type", "Range", "If-Modified-Since"} {
 		if h.Get(k) == "" {
 			t.Errorf("%s が落ちている", k)
 		}
 	}
-	if len(dropped) != 3 {
-		t.Fatalf("dropped = %v", dropped)
+	if len(dropped) != 7 {
+		t.Fatalf("dropped = %v (len=%d, want 7)", dropped, len(dropped))
 	}
 }
 
