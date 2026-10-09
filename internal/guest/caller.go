@@ -181,10 +181,37 @@ func ProcessExe(dir string, pid int) (string, error) {
 	return link, nil
 }
 
-func isAgentProcess(comm string) bool {
+// CheckAgentChildCommand はプロセスがエージェントの子孫かを調べる隠しサブコマンド名。
+const CheckAgentChildCommand = "__check_agent_child"
+
+// IsAgentProcess はプロセス名がエージェント本体 (opencode, claude, agy) かを返す。
+func IsAgentProcess(comm string) bool {
 	switch comm {
 	case "opencode", "claude", "agy":
 		return true
+	}
+	return false
+}
+
+func isAgentProcess(comm string) bool { return IsAgentProcess(comm) }
+
+// IsDescendantOfAgent は targetPID から親を辿り、エージェント本体の子孫プロセスかを判定する。
+func IsDescendantOfAgent(dir string, targetPID int) bool {
+	if targetPID <= 1 {
+		return false
+	}
+	curr := targetPID
+	const maxDepth = 64
+	for depth := 0; depth < maxDepth && curr > 1; depth++ {
+		ppid, err := ParentPID(dir, curr)
+		if err != nil || ppid <= 1 {
+			break
+		}
+		pcomm, err := ProcessComm(dir, ppid)
+		if err == nil && IsAgentProcess(pcomm) {
+			return true
+		}
+		curr = ppid
 	}
 	return false
 }

@@ -26,6 +26,19 @@ const ConfigPath = "/etc/quagent/sandbox.json"
 // LauncherCommand は方針をかけてからコマンドを起動する隠しサブコマンド名。
 const LauncherCommand = "__sandbox"
 
+// LauncherCommandSubbox はサブプロセスのファイルシステム不可視化を行う隠しサブコマンド名。
+const LauncherCommandSubbox = "__subbox"
+
+// SensitiveAgentConfigPaths はサブプロセスから不可視化するホームディレクトリ直下の相対パス一覧。
+var SensitiveAgentConfigPaths = []string{
+	".config/opencode",
+	".claude",
+	".claude.json",
+	".gemini",
+	".ssh",
+	".config/quagent",
+}
+
 // Policy は VM の中でコマンドにかける制限。
 type Policy struct {
 	// Enabled を false にすると何もしない。省略 (null) なら有効。
@@ -45,6 +58,14 @@ type Policy struct {
 	// ReadWritePaths は Landlock で書き込みを許すパス。空なら既定
 	// (ホーム・/work・/tmp・/var/tmp・/run/user/<uid>・/dev/shm)。
 	ReadWritePaths []string `json:"read_write_paths,omitempty"`
+	// MaskAgentConfig はサブプロセスからエージェント設定ファイル (認証トークン等)
+	// を不可視化する (ファイルシステム名前空間 / tmpfs)。
+	// 省略 (null) または true なら有効 (既定: 有効)。
+	MaskAgentConfig *bool `json:"mask_agent_config,omitempty"`
+	// DockerInherit は rootless Docker コンテナへサンドボックス制約
+	// (seccomp の AF_VSOCK 遮断・危険 syscall 拒否) を透過適用する。
+	// 省略 (null) または true なら有効 (既定: 有効)。
+	DockerInherit *bool `json:"docker_inherit,omitempty"`
 }
 
 // Default は設定が無いときに使う方針。compat で有効。
@@ -55,6 +76,16 @@ func (p *Policy) On() bool { return p != nil && (p.Enabled == nil || *p.Enabled)
 
 // DenyVsockOn は AF_VSOCK ソケットの作成を遮断するかを返す (既定: 有効)。
 func (p *Policy) DenyVsockOn() bool { return p == nil || p.DenyVsock == nil || *p.DenyVsock }
+
+// MaskAgentConfigOn はサブプロセスからのエージェント設定ファイル不可視化が有効かを返す (既定: 有効)。
+func (p *Policy) MaskAgentConfigOn() bool {
+	return p == nil || p.MaskAgentConfig == nil || *p.MaskAgentConfig
+}
+
+// DockerInheritOn は rootless Docker へのサンドボックス制約継承が有効かを返す (既定: 有効)。
+func (p *Policy) DockerInheritOn() bool {
+	return p == nil || p.DockerInherit == nil || *p.DockerInherit
+}
 
 func boolPtr(b bool) *bool { return &b }
 
@@ -123,8 +154,11 @@ var strictDeny = []string{
 	"mount_setattr", "move_mount", "fsopen", "fsconfig", "fsmount", "open_tree",
 }
 
-// denyNames は方針で拒否する syscall 名を返す (重複は除く)。
-func (p *Policy) denyNames() []string {
+// DenyNames は方針で拒否する syscall 名を返す (重複は除く)。
+func (p *Policy) DenyNames() []string {
+	if p == nil {
+		return append([]string{}, compatDeny...)
+	}
 	names := append([]string{}, compatDeny...)
 	if p.Mode == "strict" {
 		names = append(names, strictDeny...)
@@ -132,6 +166,8 @@ func (p *Policy) denyNames() []string {
 	names = append(names, p.ExtraDeny...)
 	return names
 }
+
+func (p *Policy) denyNames() []string { return p.DenyNames() }
 
 // DenyNumbers は拒否する syscall 番号を返す。未知の名前はエラー (書いた方針を
 // 黙って無視しない)。
