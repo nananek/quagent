@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/mdlayher/vsock"
 )
 
 // unix socket の上で受け口を動かし、Dial をそこへ向ける。
