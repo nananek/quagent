@@ -2,76 +2,83 @@
 
 プロジェクトごとに使い捨ての QEMU VM を起動し、外向き通信を**ホスト側で**厳格に制限した環境で各種コーディングエージェントを安全に動かすためのツールです。
 
-- **隔離の主体は VM とホスト:** QEMU は非特権（unprivileged）な user/mount/net 名前空間内で動作し、許可リストに登録されていない接続先への新規アウトバウンド通信は VM の外側（nftables）ですべて遮断されます。ゲスト OS 内の root 権限からもファイアウォールルールを参照・改変することはできません。ホスト側の全処理は非 root（非特権）ユーザーで動作します。
-- **ホストと VM 間の通信は vsock を利用:** ホストからの VM 操作（コマンド実行、仮想端末、リポジトリの同期、PR 作成用の git fetch など）はすべて vsock 経由で行われます。ネットワークを経由しないため、sshd は既定で停止されます。
-- **VM 内部における多層防御:** VM 内で実行されるコマンドに対しても、エージェント自身の権限では解除できない seccomp / Landlock による制限を適用します（危険なシステムコールへのアクセス経路を減らすための追加の防御層です）。
-- **機密情報を VM 内に保持しない設計:** LLM の API キー、コミット署名鍵、GitHub トークンなどの機密情報はホスト側にのみ保持し、ホスト側のプロキシがリクエストに付与します。
+- **隔離の主体はホスト側:** QEMU は非特権な user/mount/net 名前空間内で動作し、許可リストに登録されていない接続先への新規アウトバウンド通信は VM の外側（nftables）ですべて遮断されます。ゲスト OS 内の root 権限からもルールを参照・改変できません。
+- **ホスト・VM 間は vsock で通信:** コマンド実行、仮想端末、リポジトリ同期、PR 作成等はすべて vsock 経由で行われます。通常のネットワークを経由しないため、sshd は既定で停止されます。
+- **VM 内部における多層防御:** VM 内で実行されるコマンドに対しても、seccomp / Landlock による追加の制限を適用し、プロセス間権限分離や設定ファイルの不可視化を行います。
+- **機密情報を VM 内に保持しない:** LLM の API キー、コミット署名鍵、GitHub トークンなどの機密情報はホスト側にのみ保持し、ホスト側のプロキシや取り込み処理が付与・再署名します。
 
-仕組みの詳細や脅威モデルについては [docs/design.md](docs/design.md)、開発やコーディング指針については [docs/development.md](docs/development.md) を参照してください。本 README では基本的な使い方を説明します。
+アーキテクチャや脅威モデルの詳細は [docs/design.md](docs/design.md)、開発やコーディング指針については [docs/development.md](docs/development.md) を参照してください。
 
-## 使い方
+---
+
+## 必要な環境 (ホスト)
+
+- **仮想化・名前空間:** `qemu-system-x86_64` (KVM), `qemu-img`, `xorriso`, `slirp4netns`, `unshare` / `nsenter` / `prlimit` (util-linux), `nft`, 非特権ユーザー名前空間, vsock (`/dev/vhost-vsock`)
+- **ツール・CLI:** `git`, `gh`, `tmux`
+- **イメージビルド時:** `gpg` / `gpgv` (全レシピで署名検証), OVMF (Gentoo 等の UEFI レシピ用)
+
+---
+
+## インストールとビルド
 
 ```sh
 make build                     # bin/quagent (VM 内にも持ち込むため静的リンクでビルド)
 make install                   # ~/.local/bin/quagent にインストール (PREFIX で変更可)
-cd <repo> && quagent           # TUI: 起動設定 (対象リポジトリ・OS・CPU・メモリ) とベースイメージの管理
 ```
 
-TUI を使わずに CLI から直接操作することも可能です:
+---
+
+## 基本的な使い方
+
+### 起動 (TUI / CLI)
+
+リポジトリディレクトリで `quagent` を実行すると TUI が起動します:
+
+```sh
+cd <repo> && quagent           # TUI: 起動設定とベースイメージ管理
+```
+
+CLI から直接操作することも可能です:
 
 ```sh
 quagent image recipes          # 利用可能なレシピ (OS) の一覧表示
-quagent image build [--refresh|--incremental] arch   # ベースイメージのビルド / 差分更新
-                               #   --refresh: クラウドイメージを再取得してクリーンビルド
-                               #   --incremental: 前回のイメージをもとに差分更新 (カーネルは更新がある場合のみ再構築)
+quagent image build arch       # ベースイメージのビルド (--refresh / --incremental 対応)
 quagent image ls / rm IMAGE    # ビルド済みイメージの一覧表示・削除
 quagent run --image arch       # VM を起動 (--mount-tmp: .tmp をホスト・ゲスト間で同期)
 ```
 
-ベースイメージのビルドは起動画面からではなく、管理画面（ベースイメージの管理）で行います。初回起動時など利用可能なイメージがまだ存在しない場合は、起動画面ではなく管理画面が開き、イメージのビルドへと誘導されます。起動画面で選択した OS のイメージが存在しない場合も同様に管理画面へ案内されます。
+- **イメージの管理:** 初回起動時など利用可能なイメージが存在しない場合は、管理画面（ベースイメージの管理）へ案内されます。CPU コア数やメモリ容量の指定、差分更新、不要イメージの一括クリーンアップ（prune）が可能です。
+- **対応エージェント:** `quagent run` では `--agent` オプション（TUI でも選択可）でエージェントを指定します。
+  - `opencode` (既定、`--auto` 付与)
+  - `claude` (Claude Code、`--dangerously-skip-permissions` 付与)
+  - `agy` (Antigravity CLI、`--dangerously-skip-permissions` 付与)
+  ※ VM による強固な隔離環境下で動作するため、エージェント側でのプロンプト確認はスキップして自律実行されます。
 
-ビルド開始前には、ビルド用 VM の CPU コア数とメモリ容量を指定できます（前回指定した値が既定値となります。カーネルを再構築するレシピではコア数が多いほど高速に完了します）。前回のイメージが存在する場合は「差分更新」または「焼き直し（再ビルド）」を選択できます。管理画面では各 OS のイメージ作成・更新のほか、イメージの個別削除（各 OS の最新イメージも削除可能）や、古いイメージを残さない一括クリーンアップ（prune）が行えます。
+### 画面構成と操作フロー
 
-`quagent run` を実行すると tmux セッションが作成され、上部ペインで VM 内のエージェントが、下部ペインでアクセスの承認コンソールが開きます。利用するエージェントは `--agent` オプション（TUI でも選択可能）で指定します。`opencode`（既定、`--auto` 付与）、`claude`（Claude Code、`--dangerously-skip-permissions` 付与）、`agy`（Antigravity CLI、`--dangerously-skip-permissions` 付与）に対応しています。VM による強固な隔離環境下で動作するため、エージェント側でのプロンプト確認はスキップして自律実行されます。
+`quagent run` を実行すると tmux セッションが作成されます:
 
-エージェントの起動処理は VM 内の `/entrypoint.sh` にまとめられており、エージェントが終了すると対話型シェルに戻ります。`~/.bashrc` の設定により `/entrypoint.sh` がコマンド履歴の先頭に登録されているため、`↑` キーを押して Enter を押すだけで即座にエージェントを再起動できます。エージェントペインのシェルを終了するか、承認コンソールで `quit` を入力すると tmux セッションが閉じ、ホスト側の端末に戻って次の操作を TUI で選択できます（エージェントを選び直して同じ VM のまま再起動するか、終了するか。終了を選んだときだけ、該当 VM のホスト側ログを残すかどうかも指定できます。Ctrl-C 等で中断した場合は「終了・ログを残す」となります）。再起動では VM を破棄せず、`/entrypoint.sh` と該当エージェントの設定だけを差し替えます（agy のサブスクリプションへの切り替えにも対応）。終了を選ぶと VM は破棄されます。なお、tmux セッションからデタッチした場合は、セッションが維持されている限り VM はバックグラウンドで動作し続けます。
+- **上部ペイン:** VM 内のエージェントが自律動作します。終了時は対話シェルに戻り、`↑` + Enter で即座にエージェントを再起動できます。
+- **下部ペイン:** 承認コンソールが開き、接続先申請や動的緩和、PR 作成などの承認・対話を行います。
 
-## 接続先の申請 (MCP)
+### セッション終了と再起動
 
-VM からの外部宛先へのアウトバウンド通信は既定で一切遮断されています。エージェントが外部通信を必要とする場合は、MCP エンドポイント (`http://quagent.host:7070/mcp`) の `request_network_access` ツールを通じて「申請理由」と「ドメイン一覧」をまとめて申請し、ユーザーが承認コンソール上で一括して可否を判断します。
+エージェントペインのシェルを終了するか、承認コンソールで `quit` を入力すると tmux セッションが閉じ、ホスト側の TUI に戻ります:
 
-| 入力 | 意味 |
-| --- | --- |
-| `1` | 今回のみ許可 (5分間、新規接続を許可) |
-| `2` | このセッション中のみ常に許可 (以降の確認をスキップ) |
-| `3` | 今後常に許可 (全プロジェクト共通。npm や PyPI などの汎用パッケージリポジトリ等を想定) |
-| `d` | 拒否 |
-| `q` | 質問・指示を返す (エージェント側で回答を申請理由に反映して再申請させる) |
+- **エージェントを選び直して再起動:** VM を破棄せず、エージェントや設定のみを差し替えて即座に再起動します。
+- **終了:** VM を破棄します。終了時のみ、該当 VM のホスト側ログを残すか選択できます。
 
-10分間応答がない場合はタイムアウトとして自動拒否され、その旨がエージェントに通知されます。エージェントは不要になったアクセス許可を `release_network_access` で明示的に解放できます。アクセス許可は「新規接続の開始を認めるか」の判定であるため、期限切れや解放によって既に確立済みの既存接続が切断されることはありません。「今後常に許可」したドメインは `~/.local/share/quagent/always-allow.json` に保存され、`quagent always ls` や `quagent always rm DOMAIN...`（または TUI）から確認・削除できます。
+---
 
-アクセス許可は DNS レベルで判定されます。許可されたドメインであっても、DNS 応答の解決先 IP がプライベート LAN、ループバック、リンクローカル（クラウド事業者のメタデータエンドポイントなど）、CGNAT（Tailscale 等）などの内部向けアドレスである場合は通信を遮断します。また、許可された IP 宛ての TCP 80/443 通信は透過プロキシを経由し、実際の接続時に提示されたホスト名（TLS の SNI、HTTP の Host ヘッダー）が許可済みドメインと一致しない場合は即座に切断します。詳細な判定ロジックは [docs/design.md](docs/design.md) を参照してください。
+## 各種機能と設定
 
-## クリップボード (OSC 52)
+### 1. LLM の設定
 
-VM 内のエージェントが端末経由でクリップボードへ書き込もうとすると (OSC 52)、ホスト側でエージェントペインの出力を監視・捕捉し、承認コンソール上で確認を求めます（`[y] コピーする / [n] 拒否`、内容の先頭プレビューとサイズを表示）。ホスト側の tmux やターミナルエミュレータへ直接届くことはありません。クリップボードの読み出し要求（ホスト側のクリップボード内容を VM 側へ送信させようとする要求）は常に拒否されます。
-
-承認待ちは最大 1 件のみ保持され、待機中に発生した新たな要求は破棄されます。また、連続要求の間隔制限（3秒以上）、最大サイズ制限（64 KiB）、タイムアウト（2分間無応答で自動拒否）が設けられています。
-
-承認されたクリップボードデータのホスト側への反映方法は、`config.json` の `clipboard` で設定します:
-
-```json
-"clipboard": { "method": "tmux" }                         // 既定。tmux load-buffer -w を実行
-"clipboard": { "method": "osc52" }                        // 起動元端末に OSC 52 シーケンスを再送 (Kitty など)
-"clipboard": { "method": "command", "command": ["wl-copy"] }
-```
-
-## LLM の設定
-
-API キー等の認証情報は VM 内には配置しません。VM 内の opencode は `http://quagent.host:7070/llm/<provider>` を baseURL として利用し、ホスト側の認証プロキシが正規の認証情報を付与した上で本来の上流 API へリクエストを転送します。VM からは外部の API ドメインへ直接通信することはできません（既定のアウトバウンド通信は遮断されています）。
+API キー等の認証情報は VM 内には配置しません。ホスト側の認証プロキシが正規の認証情報を付与して上流 API へリクエストを転送します。
 
 `~/.config/quagent/config.json`:
 
+#### opencode の設定
 ```json
 {
   "providers": {
@@ -84,62 +91,77 @@ API キー等の認証情報は VM 内には配置しません。VM 内の openc
 }
 ```
 
-Claude Code を利用する場合は `providers` に `anthropic` を設定します。サブスクリプション（Pro/Max）で利用する場合は、ホスト側で `claude setup-token` を実行して長期（1年）トークンを作成し、それを機密情報として指定した上で `claude.subscription` にプラン（`pro` / `max` / `team` / `enterprise`）を指定します:
-
+#### Claude Code の設定
 ```json
-"providers": {
-  "anthropic": {
-    "upstream": "https://api.anthropic.com",
-    "secret_command": ["pass", "show", "anthropic/claude-oauth-token"]
-  }
-},
-"claude": { "subscription": "max" }
-```
-
-agy (Antigravity CLI) を利用する場合は `providers` に `gemini`（Gemini API）を設定します:
-
-```json
-"providers": {
-  "gemini": {
-    "upstream": "https://generativelanguage.googleapis.com",
-    "header": "x-goog-api-key", "prefix": "",
-    "secret_command": ["pass", "show", "gemini/api-key"]
-  }
-},
-"agy": { "model": "gemini-3.8-flash-high" }
-```
-
-サブスクリプション（ホスト側で agy にログイン済み）で利用する場合は、API キーの代わりに `"agy": { "subscription": true }` を指定します。ホスト側の OAuth ログイン情報から一時トークンを再生成してプロキシが付与するため、VM 内の agy はサブスクリプション枠で動作します（この場合 `providers` の `gemini` 設定は不要です）。VM に渡されるのは起動時に生成された有効期限 1 時間の一時トークンのみであり、長期の refresh_token がホストから流出することはありません。この一時トークンはプロキシへの接続認証トークンとしても使用されます。なお、起動直後のユーザー情報確認とプロフィール画像の取得はゲストから直接アクセスされるため、その宛先（`www.googleapis.com` および画像ホスト）のみ一時的に egress を開放します。開放は agy の起動時（初回指定またはセッション終了後の再起動時）に行われ、初回推論が完了すると直ちに遮断されます（以降は通常の申請・承認フローに戻ります）。header_policy が有効な場合も、この宛先だけは TLS 終端せず素通しします（終端すると Authorization が落とされてユーザー情報確認が 401 になり agy が起動できないため）。サブスクで agy を起動する前（再起動での選択時も）は、ホスト側で `agy models` による起動確認を行い、通ればすぐ終了してから VM の起動・切り替えに進みます。確認に失敗したら、初回は VM を作らず終了し、再起動時は VM を残したまま選び直しに戻ります。
-
-`claude.model` で VM 内の Claude Code、`agy.model` で VM 内の agy の既定モデル、`claude.theme` でカラーテーマ、`agy.color_scheme` でカラースキームを指定できます（既定ではホスト側の各エージェントの設定を引き継ぎます）。provider ID は opencode の provider ID と一致させます。機密情報の取得方法は `secret_env`（環境変数名）、`secret_file`（ファイルパス）、`secret_command`（コマンド実行）から選択できます。`opencode.model` は VM 内の opencode の既定モデルであり、`providers` に設定した provider のモデルを指定します。プロキシが転送対象とする操作（推論およびモデル一覧取得）や `allow` リストの指定方法については [docs/design.md](docs/design.md) を参照してください。
-
-## ツールサーバー (OpenAPI)
-
-Open WebUI のツールサーバーなど、OpenAPI 仕様で公開された外部サーバーを、VM 内のエージェントから MCP ツールとして利用できます。ホスト側で OpenAPI 仕様 (JSON) を取得して各 operation を MCP ツールへと自動変換し、既存の MCP エンドポイント (`http://quagent.host:7070/mcp`) に登録します。ツール呼び出しはホストがツールサーバーへプロキシ転送するため、VM からツールサーバーへ直接通信する必要はなく（プライベート LAN 上のサーバーも利用可能）、API キーなどの機密情報が VM 内に配置されることもありません。
-
-```json
-"tool_servers": {
-  "my-tools": {
-    "url": "http://192.168.1.10:8000",
-    "secret_env": "MY_TOOLS_KEY"
+{
+  "providers": {
+    "anthropic": {
+      "upstream": "https://api.anthropic.com",
+      "secret_command": ["pass", "show", "anthropic/claude-oauth-token"]
+    }
   },
-  "public-tools": {
-    "url": "https://tools.example.com",
-    "openapi_path": "/weather/openapi.json"
-  }
+  "claude": { "subscription": "max" }
 }
 ```
+※ サブスクリプション利用時は、ホスト側で `claude setup-token` により長期トークンを作成して機密情報に指定します。
 
-- 各サーバーの設定キー（`my-tools` など）がツール名のプレフィックスとなり、ツールは `<キー>__<operationId>` という形式で公開されます。
-- 認証が不要なサーバーの場合は `secret_env` / `secret_file` / `secret_command` をすべて省略します（認証なしで登録されます）。認証が必要な場合は `providers` と同様に設定し、`header` / `prefix` で認証ヘッダーのカスタマイズも可能です（既定: `Authorization: Bearer <機密情報>`）。機密情報は仕様の取得およびツール呼び出しの転送時にホスト側で付与されます。
-- OpenAPI 仕様は `url` に `openapi_path`（既定: `/openapi.json`）を連結した URL から取得します。Open WebUI のツールサーバー等でパスが異なる場合は適宜指定してください（OpenAPI 3.x の JSON 形式に対応、YAML は非対応）。
-- パス・クエリ・ヘッダーの各パラメータは同名のツール引数となり、リクエストボディは `body` 引数として渡されます（JSON、または `application/x-www-form-urlencoded` 形式に対応）。
-- 仕様の取得は VM 起動時に 1 回のみ行われます。取得できなかったサーバーは警告ログを出力してスキップされ、VM の起動処理自体は継続します。
-- レスポンス本文は最大 1 MiB まで取得され、画像等のテキスト以外のレスポンスはメタデータ（Content-Type とサイズ）のみを返します。
+#### agy (Antigravity CLI) の設定
+- **API キーで利用:**
+  ```json
+  {
+    "providers": {
+      "gemini": {
+        "upstream": "https://generativelanguage.googleapis.com",
+        "header": "x-goog-api-key", "prefix": "",
+        "secret_command": ["pass", "show", "gemini/api-key"]
+      }
+    },
+    "agy": { "model": "gemini-3.8-flash-high" }
+  }
+  ```
+- **サブスクリプションで利用 (ホスト側でログイン済み):**
+  ```json
+  {
+    "agy": { "subscription": true }
+  }
+  ```
+  ※ ホスト側の OAuth ログイン情報から一時トークンを生成してプロキシが付与します（長期トークンは VM に渡りません）。
 
-## ヘッダ・本文の制限 (任意)
+- **機密情報の取得方法:** `secret_command`（コマンド実行）、`secret_env`（環境変数）、`secret_file`（ファイルパス）から選択できます。
 
-`~/.config/quagent/config.json` の `header_policy` を有効にすると、VM から外へ出る HTTP リクエストの余計なヘッダ（Referer、Cookie、独自の `X-*` など）を落とし、User-Agent を固定します（LLM 認証プロキシは対象外）。また、`deny_request_body` によるリクエストボディの送信遮断や `allowed_methods` による HTTP メソッドの制限も行えます。HTTPS のヘッダや本文を検査・制限するには TLS の終端が必要なため、使い捨て CA が VM に信頼されます。宛先ごとの緩和（許可ヘッダの追加、ボディ送信の許可、メソッドの緩和）も設定できます。詳細は [docs/design.md](docs/design.md) を参照してください。
+---
+
+### 2. 接続先の申請と承認 (MCP)
+
+VM からの新規アウトバウンド通信は既定ですべて遮断されています。エージェントが外部通信を必要とする場合、MCP ツール（`request_network_access`）を通じて申請を行い、ユーザーが承認コンソールで判定します。
+
+| 入力 | 動作 |
+| --- | --- |
+| `1` | 今回のみ許可 (5分間、新規接続を許可) |
+| `2` | このセッション中のみ常に許可 (以降の確認をスキップ) |
+| `3` | 今後常に許可 (全プロジェクト共通。汎用パッケージリポジトリ等を想定) |
+| `d` | 拒否 |
+| `q` | 質問・指示を返す (エージェント側で理由に反映して再申請させる) |
+
+- 10分間無応答の場合は自動拒否されます。不要になった許可は `release_network_access` で明示的に解放できます。
+- 「今後常に許可」したドメインは `~/.local/share/quagent/always-allow.json` に保存され、`quagent always ls` / `quagent always rm` から確認・削除できます。
+- 許可ドメインであっても、プライベート IP や内部向けアドレスへの通信、および SNI/Host ヘッダーが一致しない通信は即座に切断されます。
+
+---
+
+### 3. データ持ち出し防止 (Content Guard / DLP) と動的緩和
+
+quagent は VM から外部への意図しない機密情報漏洩や不正な通信チャネルの確立を多層で防止します:
+
+- **Content Guard / DLP (コンテンツ検査エンジン):** Web 透過プロキシを通過する HTTP リクエスト（URL、ヘッダ、ボディ）を走査し、秘密鍵（RSA/EC/OpenSSH）やクラウド・API プロバイダの認証情報（AWS, GitHub PAT, Google, Slack, OpenAI, JWT 等）の漏洩を検知して即座に HTTP 403 で遮断します（`config.json` の `"content_guard": { "enabled": false }` で無効化可能）。
+- **DNS トンネリング検知:** 許可ドメイン配下であっても、不正な FQDN 長、異常なエントロピー、深層サブドメイン、TXT/ANY クエリ等のトンネリング兆候を検知して即座に遮断（REFUSED 応答）します。
+- **宛先別動的緩和 (MCP):** エージェントが特定 API 呼び出し等で追加ヘッダやボディ送信を必要とする場合、MCP の `request_header_relaxation` を通じて動的緩和を申請できます。承認コンソール上でユーザーが対話的に判断し、不要になった緩和は `release_header_relaxation` で解放できます。
+
+---
+
+### 4. ヘッダ・本文の制限 (任意)
+
+`header_policy` を有効にすると、VM から外部への HTTP リクエストの不要なヘッダ（Cookie, Referer, 独自ヘッダ等）を除去し、User-Agent を固定します。リクエストボディの送信遮断や HTTP メソッドの制限も可能です。
 
 ```json
 "header_policy": {
@@ -154,46 +176,55 @@ Open WebUI のツールサーバーなど、OpenAPI 仕様で公開された外�
 }
 ```
 
-## データ持ち出し防止 (Content Guard / DLP) と動的緩和
+---
 
-quagent は VM から外部への意図しない機密情報持ち出しや不正な外部チャネルの確立を多層で防止します:
+### 5. ツールサーバー (OpenAPI)
 
-- **Content Guard / DLP (コンテンツ検査エンジン):** Web 透過プロキシを通過する HTTP リクエスト（URL、ヘッダ、ボディ）を透過的かつ決定論的に走査し、秘密鍵（RSA/EC/DSA/OPENSSH）、クラウド・API プロバイダの認証情報（AWS アクセスキー、GitHub PAT、Google API キー、Slack トークン、OpenAI/LLM API キー、JWT 等）の漏洩を検知して即座に HTTP 403 Forbidden で遮断します。`config.json` の `content_guard`（既定で有効）で制御できます。
-- **DNS トンネリング検知:** 許可ドメイン配下の不正なサブドメインを用いた DNS トンネリング（外部へのデータ密輸）を阻止するため、自前 DNS リゾルバにおいて FQDN 総長（>180）、ラベル長（>50）、シャノンエントロピー（>3.8）、深層サブドメイン（6階層以上）、不審なクエリタイプ（TXT / NULL / ANY）をリアルタイムに検知して即時遮断（REFUSED 応答）します。
-- **宛先別動的緩和 (MCP):** エージェントが特定 API 呼び出し等で追加のヘッダ（`Authorization` 等）、メソッド（`POST`/`PUT` 等）、リクエストボディの送信を必要とする場合、MCP エンドポイントの `request_header_relaxation` を通じて動的緩和を申請できます。承認コンソール上でユーザーが対話的に判断（今回のみ 5分 / このセッション中 / 拒否 / 質問）でき、不要になった緩和は `release_header_relaxation` で即座に放棄できます。
+OpenAPI 仕様で公開された外部サーバー（Open WebUI のツールサーバー等）を、VM 内のエージェントから MCP ツールとして利用できます。ホスト側が仕様を取得して MCP ツールに自動変換し、呼び出しをプロキシします。
 
-## PR の作成と署名
+```json
+"tool_servers": {
+  "my-tools": {
+    "url": "http://192.168.1.10:8000",
+    "secret_env": "MY_TOOLS_KEY"
+  },
+  "public-tools": {
+    "url": "https://tools.example.com",
+    "openapi_path": "/weather/openapi.json"
+  }
+}
+```
 
-エージェントは `/work` の保護されていない作業ブランチにコミットを作成し、MCP の `create_pull_request` ツールを通じてプルリクエストの作成を依頼します。GitHub の認証トークンやコミット署名鍵は VM 内には配置されません。VM 内で作成されたコミットは一時的な使い捨て鍵で署名され、ホスト側がこれを取り込んで正規の鍵で再署名した上で push します。仕組みの詳細は [docs/design.md](docs/design.md) を参照してください。
+---
 
-PR 作成は既定で承認制です（`--pr-approval`、TUI では「PR を承認制にする」が既定有効）。ホスト側で push する前に、承認コンソール上でブランチ名・マージ先ベースブランチ・タイトル・本文を提示して `y` / `n` の確認を求めます。`n` が入力された場合や 10 分間応答がない場合は、push および PR 作成は中止されます（自動 push に戻す場合は `--pr-approval=false` を指定）。
+### 6. クリップボード (OSC 52)
 
-## 多層の防御
+VM 内のエージェントが端末経由でクリップボードへ書き込もうとすると (OSC 52)、ホスト側で捕捉して承認コンソール上で確認を求めます（`[y] コピー / [n] 拒否`）。クリップボードの読み出し要求は常に拒否されます。
 
-quagent は「隔離の主体はホスト側に置く」という原則のもと、境界制御と内部制限を組み合わせた多層防御を採用しています。仕組みの詳細は [docs/design.md](docs/design.md) を参照してください。
+反映方法は `config.json` の `clipboard` で設定します:
+- `"clipboard": { "method": "tmux" }` (既定)
+- `"clipboard": { "method": "osc52" }` (端末へ OSC 52 を再送)
+- `"clipboard": { "method": "command", "command": ["wl-copy"] }`
 
-| 防御層 | 主な硬化策 |
-| --- | --- |
-| **第1層: ホスト & VM 境界** | QEMU (KVM) による完全隔離、Nested KVM 無効化、非特権 user/mount/net/pid/ipc/uts 名前空間による分離、QEMU プロセスのサンドボックス (QEMU ネイティブ seccomp、事前適用 cBPF seccomp、Landlock による書き込み制限、ホームディレクトリのホワイトリスト化、コアダンプ無効化、FD・プロセス数上限、プロセス nice 優先度譲渡と OOM スコア調整)、ホスト側リソース保護 (起動前 10 GiB 空き容量検査、80% 早期警戒、95% ACPI 安全停止、ホスト空き容量 2 GiB 防衛、ログサイズ上限切詰、利用可能な環境での cgroups v2 透過適用)、ホスト・ゲスト間通信の vsock 単一化 (ネットワーク/sshd 排除)、ホスト側 vsock リスナーの接続元 CID 検証・接続上限 (64本) および拒否監査ログ (`host.log`) 記録、共有ファイルシステム不使用 (`git bundle` 複製、独立した noexec `.tmp` ディスク) |
-| **第2層: ゲストOS & サンドボックス** | 非特権 `agent` ユーザー (sudo なし)、rootless Docker、カーネル硬化 (Gentoo レシピ等: モジュール署名強制、Lockdown、32bit/レガシー廃止)、VM 内コマンドの seccomp (危険システムコールの拒否、`AF_VSOCK` ソケット作成の遮断によるホスト側任意ポート接続防止、32bit ABI 偽装の強制終了) と Landlock (ファイル書込パス制限)、プロセス間権限分離 (中継窓口の接続元 PID 検証によるサブプロセスの LLM/MCP 遮断、ファイルシステム名前空間によるエージェント設定ファイルの不可視化)、rootless Docker へのサンドボックス制約継承 (既定 seccomp による AF_VSOCK 遮断・危険 syscall 拒否、デーモンボリューム保護)、ゲスト側 vsock リスナーの Host (CID 2) 以外接続拒否と接続上限 (64本) |
-| **第3層: ネットワーク & Egress 遮断** | ホスト側 nftables による Default Deny、IPv6 遮断、自前 DNS によるホワイトリスト判定と内部向け IP (プライベート/メタデータ/CGNAT) 宛ての遮断、DNS トンネリング検知 (総長/ラベル長/シャノンエントロピー/深層/クエリタイプ)、Web 透過プロキシによる SNI / Host 検証 (TCP 80/443 のみ)、Content Guard / DLP による機密情報 (秘密鍵/APIキー/トークン) 漏洩遮断、任意の TLS 終端 (`header_policy`) によるヘッダ・本文制限と MCP 経由の宛先別動的緩和 |
-| **第4層: 機密情報の非保持** | LLM API キー・GitHub トークン・GPG 鍵を VM に一切置かない、ホスト側 LLM 認証プロキシ (推論/モデル一覧エンドポイントのみ転送)、OpenAPI ツールサーバーのホスト側プロキシ、使い捨て鍵とホスト正規鍵による二重署名 Git PR |
-| **第5層: コントロール & 承認** | 承認コンソールによる対話確認 (ネットワーク申請、MCP 経由の宛先別ヘッダ・メソッド・ボディ動的緩和申請、既定有効な PR 作成承認、OSC 52 クリップボード書込)、不正な Git オブジェクトを検出する `transfer.fsckObjects` による取り込み検査、制御文字・Bidi 文字のエスケープによる画面偽装防止、各種リソース上限 (申請数、接続数、PR サイズ)、改変不能なホスト監査ログ (`host.log`) |
-| **第6層: ビルド & サプライチェーン** | 静的リンクバイナリ (`CGO_ENABLED=0`)、ベースイメージの GPG 署名検証 (Arch, Gentoo)、Dependabot 更新の 7 日間遅延適用 |
+---
 
-### 今後の課題
+### 7. PR の作成と署名
 
-現状のアーキテクチャにおいて、さらなる堅牢化や改善の余地がある主な課題です:
+エージェントは `/work` の保護されていない作業ブランチでコミットを作成し、MCP の `create_pull_request` ツールを通じて PR 作成を依頼します。
 
-- **Egress 通信の統計・監査レポートの出力強化:** 許可済みドメイン宛ての通信量やプロトコル種別、ブロックされた通信イベント（DLP、DNS トンネリング、未許可接続）のサマリーをセッション終了時にレポートとして出力・永続化する機能。
+- **安全なコミット再署名:** VM 内では一時的な使い捨て鍵でコミットが作成され、ホスト側がこれを取り込んで正規の鍵で再署名した上で push します（GitHub トークンや秘密鍵は VM に渡りません）。
+- **PR 作成の承認:** 既定で承認制（`--pr-approval`）となっており、push 前に承認コンソール上でブランチ名・マージ先・タイトル・本文の確認を求めます。
 
-## ホストに必要な環境
+---
 
-`qemu-system-x86_64` (KVM)、`qemu-img`、`xorriso`、`slirp4netns`、`unshare`/`nsenter`/`prlimit` (util-linux)、`nft`、`git`、`gh`、`tmux`。
+## 関連ドキュメントとスキル
 
-また、非特権ユーザー名前空間（unprivileged user namespace）が有効化されており、vsock（`/dev/vhost-vsock`、カーネルモジュール `vhost_vsock`）が利用可能である必要があります。
+- [docs/design.md](docs/design.md) — 内部アーキテクチャ、隔離の仕組み、多層防御一覧表、脅威モデル、詳細仕様
+- [docs/development.md](docs/development.md) — 開発ガイドライン、ビルド・テスト手順、コーディング指針、PR 規約
+- [.opencode/skills/recipe-authoring/](.opencode/skills/recipe-authoring/SKILL.md) — ベースイメージレシピの作成・修正規約
+- [.opencode/skills/document-authoring/](.opencode/skills/document-authoring/SKILL.md) — ドキュメント構成・作成規約
 
-イメージをビルドする場合は `gpg` / `gpgv` も必要です（すべての組み込みレシピで署名検証を行います）。UEFI レシピ（Gentoo）をビルド・実行する場合は OVMF（`edk2-ovmf`、`ovmf` など。統合イメージ `OVMF.fd` / `OVMF.4m.fd`）が必要です。
+---
 
 ## ライセンス
 
