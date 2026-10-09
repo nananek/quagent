@@ -27,9 +27,8 @@ type Launch struct {
 	Recipe string `json:"recipe"`
 	CPUs   int    `json:"cpus"`
 	MemMiB int    `json:"mem_mib"`
-	// MountTmp は repo の .tmp と VM の /work/.tmp を受け渡す。SSH は人が ssh で入れるようにする。
+	// MountTmp は repo の .tmp と VM の /work/.tmp を受け渡す。
 	MountTmp bool `json:"mount_tmp"`
-	SSH      bool `json:"ssh"`
 	// NestedVirt は VM の中で KVM を使えるようにする。
 	NestedVirt bool `json:"nested_virt"`
 	// LocalHead はブランチをローカルの先頭 (未 push のコミットを含む) で渡す。
@@ -259,9 +258,6 @@ func startForm(agents []string) (Launch, error) {
 	if l.MountTmp {
 		extras = append(extras, "tmp")
 	}
-	if l.SSH {
-		extras = append(extras, "ssh")
-	}
 	if l.NestedVirt {
 		extras = append(extras, "nested")
 	}
@@ -291,7 +287,6 @@ func startForm(agents []string) (Launch, error) {
 		huh.NewInput().Title("メモリ (MiB)").Value(&mem).Validate(positiveInt),
 		huh.NewMultiSelect[string]().Title("オプション").Options(
 			huh.NewOption("repo の .tmp と VM の /work/.tmp を受け渡す (終了時に回収)", "tmp"),
-			huh.NewOption("ssh で入れるようにする", "ssh"),
 			huh.NewOption("VM の中で KVM を使えるようにする (入れ子の仮想化)", "nested"),
 			huh.NewOption("ブランチをローカルの先頭で渡す (未 push のコミットも渡る)", "local"),
 		).Value(&extras),
@@ -304,7 +299,7 @@ func startForm(agents []string) (Launch, error) {
 		return Launch{}, errBack
 	}
 	l.Repo = gitTop(l.Repo)
-	l.MountTmp, l.SSH = slices.Contains(extras, "tmp"), slices.Contains(extras, "ssh")
+	l.MountTmp = slices.Contains(extras, "tmp")
 	l.NestedVirt = slices.Contains(extras, "nested")
 	l.LocalHead = slices.Contains(extras, "local")
 	l.PRApproval = slices.Contains(prApproval, "pr")

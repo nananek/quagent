@@ -62,14 +62,22 @@ func TestHostTimezone(t *testing.T) {
 }
 
 func TestSSHUnits(t *testing.T) {
-	unitsOn := sshUnits(true)
-	if len(unitsOn) != 2 {
-		t.Errorf("sshUnits(true) = %v, want 2 units", unitsOn)
+	units := sshUnits()
+	if len(units) != 6 {
+		t.Errorf("sshUnits() = %v, want 6 units", units)
 	}
-
-	unitsOff := sshUnits(false)
-	if len(unitsOff) != 6 {
-		t.Errorf("sshUnits(false) = %v, want 6 units", unitsOff)
+	expected := []string{"sshd-vsock.socket", "sshd-unix-local.socket", "ssh.service", "ssh.socket", "sshd.service", "sshd.socket"}
+	for _, exp := range expected {
+		found := false
+		for _, u := range units {
+			if u == exp {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("sshUnits() missing expected unit %q", exp)
+		}
 	}
 }
 

@@ -43,8 +43,6 @@ type runOpts struct {
 	Allow  []string
 	// Interactive は端末から使うとき true。tmux でエージェントと承認コンソールを開く。
 	Interactive bool
-	// SSH は人が ssh で VM に入れるようにする (quagent 自身の操作は常に vsock)。
-	SSH bool
 	// MountTmp は host の repo の .tmp と VM の /work/.tmp を受け渡す (tmpdisk.go)。
 	MountTmp bool
 	// NestedVirt は VM の中で KVM を使えるようにする (VM の中で VM を動かす開発用)。
@@ -351,8 +349,8 @@ func run(o runOpts) error {
 	}
 	defer svc.Stop()
 
-	// VM の受け口 (quagent 自身) を seed に入れ、cloud-init で作業ユーザーとして常駐させる。
-	// ssh は既定で止める。--ssh のときだけ使い捨ての鍵で人が入れるようにする。
+	// VM の受け口 (quagent 自身) を seed に入れ、cloud-init で常駐させる。
+	// ssh は完全に停止する (vsock 経由のみ)。
 	tmpCmd := ""
 	if tmpDir != "" {
 		tmpCmd = tmpRuncmd(strconv.Itoa(vm.GuestUID))
@@ -404,26 +402,10 @@ runcmd:
   - [sh, -c, "install -o %s -g %s -m 755 /entrypoint.sh %s && ln -sf %s /entrypoint.sh"]
 %s%s  - [sh, -c, "mkdir -p /run/quagent-seed && mount -o ro /dev/disk/by-label/cidata /run/quagent-seed && install -m 755 /run/quagent-seed/quagent-guest /usr/local/bin/quagent-guest && umount /run/quagent-seed"]
   - [systemd-run, --unit=quagent-guest, --uid=%s, -p, Restart=always, /usr/local/bin/quagent-guest, %s, "%d"]
-`, indentBlock(entrypoint, "      "), extraFiles, sandboxFile, hostsvc.GuestHost, maskCmd(sshUnits(o.SSH)), vm.GuestUser, vm.GuestUser, entrypointPath, entrypointPath, trustCmd, tmpCmd, vm.GuestUser, guestCommand, svc.Port)
+`, indentBlock(entrypoint, "      "), extraFiles, sandboxFile, hostsvc.GuestHost, maskCmd(sshUnits()), vm.GuestUser, vm.GuestUser, entrypointPath, entrypointPath, trustCmd, tmpCmd, vm.GuestUser, guestCommand, svc.Port)
 	// 時刻の表示 (承認の期限やコミットの日時) を host とそろえる
 	if tz := hostTimezone(); tz != "" {
 		userData += "timezone: " + tz + "\n"
-	}
-	var sshPort int
-	var sshKey string
-	if o.SSH {
-		if sshPort, err = vm.FreePort(); err != nil {
-			return err
-		}
-		sshKey = filepath.Join(work, "id_ed25519")
-		if out, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "quagent", "-f", sshKey).CombinedOutput(); err != nil {
-			return fmt.Errorf("ssh 鍵の生成に失敗: %v: %s", err, out)
-		}
-		pub, err := os.ReadFile(sshKey + ".pub")
-		if err != nil {
-			return err
-		}
-		userData += fmt.Sprintf("ssh_pwauth: false\nusers:\n  - name: %s\n    ssh_authorized_keys: [%q]\n", vm.GuestUser, strings.TrimSpace(string(pub)))
 	}
 	seed, err := vm.MakeSeed(work, "quagent-"+filepath.Base(work), "quagent", userData,
 		map[string]string{"quagent-guest": self})
@@ -437,10 +419,6 @@ runcmd:
 
 	// DNS は qemu 既定の 10.0.2.3 -> 子 netns の自前 DNS。子 netns は IPv4 のみ。
 	netdev := "ipv6=off"
-	if o.SSH {
-		// qemu の hostfwd は子 netns 側 (slirp4netns の tap0 = 10.0.2.100) で受ける。
-		netdev += fmt.Sprintf(",hostfwd=tcp:10.0.2.100:%d-:22", sshPort)
-	}
 	qemu, err := vm.QemuArgv(vm.QemuOpts{
 		Disk: overlay, Seed: seed, CPUs: o.CPUs, MemMiB: o.MemMiB,
 		ConsoleLog: filepath.Join(work, "console.log"),
@@ -458,7 +436,7 @@ runcmd:
 		dataDiskPaths = append(dataDiskPaths, d.Path)
 	}
 	spec := netns.Spec{
-		WorkDir: work, SSHPort: sshPort, DNS: dns, Allow: o.Allow, QemuArgv: qemu,
+		WorkDir: work, DNS: dns, Allow: o.Allow, QemuArgv: qemu,
 		BaseDisk: base, DataDiskPaths: dataDiskPaths,
 		Nice:              resPolicy.Nice,
 		OOMScoreAdj:       resPolicy.OOMScoreAdj,
@@ -607,7 +585,7 @@ runcmd:
 	if out, err := g.sh("cloud-init status --wait", nil); err != nil {
 		return fmt.Errorf("cloud-init が失敗: %v: %s", err, out)
 	}
-	if err := checkSSHOff(g, sshUnits(o.SSH), !o.SSH); err != nil {
+	if err := checkSSHOff(g, sshUnits()); err != nil {
 		return err
 	}
 
@@ -626,10 +604,6 @@ runcmd:
 	}
 	if err := setupHistory(g); err != nil {
 		return err
-	}
-	if o.SSH {
-		con.Log(fmt.Sprintf("ssh: ssh -i %s -p %d -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null %s@127.0.0.1",
-			sshKey, sshPort, vm.GuestUser))
 	}
 
 	if !o.Interactive {
@@ -828,13 +802,13 @@ func hostTimezone() string {
 
 // sshUnits は VM で止める ssh のユニット。distro で名前が違う (Debian は ssh.*、
 // Arch は sshd.*) ので両方挙げる。systemd-ssh-generator が vsock や unix ソケットを
-// 見つけて作る sshd-vsock.socket / sshd-unix-local.socket は --ssh でも要らない。
-func sshUnits(sshOn bool) []string {
-	units := []string{"sshd-vsock.socket", "sshd-unix-local.socket"}
-	if !sshOn {
-		units = append(units, "ssh.service", "ssh.socket", "sshd.service", "sshd.socket")
+// 見つけて作る sshd-vsock.socket / sshd-unix-local.socket も含めてすべて止める。
+func sshUnits() []string {
+	return []string{
+		"sshd-vsock.socket", "sshd-unix-local.socket",
+		"ssh.service", "ssh.socket",
+		"sshd.service", "sshd.socket",
 	}
-	return units
 }
 
 // maskCmd は units を 1 つずつ mask して止める sh スクリプト。まとめて渡すと
@@ -844,13 +818,11 @@ func maskCmd(units []string) string {
 	return "for u in " + strings.Join(units, " ") + "; do systemctl mask --now $u; done 2>/dev/null; true"
 }
 
-// checkSSHOff は units が動いていないこと (noPort なら 22 番の待ち受けも無いこと) を
+// checkSSHOff は units が動いていないこと、および 22 番ポートの待ち受けも無いことを
 // 確かめる。止められていなければ、ssh を開けたまま進めずに起動をやめる。
-func checkSSHOff(g vmGuest, units []string, noPort bool) error {
+func checkSSHOff(g vmGuest, units []string) error {
 	script := "for u in " + strings.Join(units, " ") + "; do systemctl is-active --quiet $u && echo $u; done"
-	if noPort {
-		script += "; ss -Hln -A inet,vsock | awk '$5 ~ /:22$/ {print \"listen \" $5}'"
-	}
+	script += "; ss -Hln -A inet,vsock | awk '$5 ~ /:22$/ {print \"listen \" $5}'"
 	out, err := g.sh(script+"; true", nil)
 	if err != nil {
 		return fmt.Errorf("ssh の停止を確かめられない: %v: %s", err, out)
