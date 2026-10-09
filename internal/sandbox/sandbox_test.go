@@ -258,6 +258,30 @@ func TestDenyVsockPolicy(t *testing.T) {
 	}
 }
 
+func TestBuildSeccompFilter(t *testing.T) {
+	// amd64, denyVsock=false
+	f1 := buildSeccompFilter(unix.AUDIT_ARCH_X86_64, uint32(unix.EPERM), []int{unix.SYS_GETPPID}, false)
+	// amd64, denyVsock=true
+	f2 := buildSeccompFilter(unix.AUDIT_ARCH_X86_64, uint32(unix.EPERM), []int{unix.SYS_GETPPID}, true)
+	if len(f2) <= len(f1) {
+		t.Fatalf("expected f2 (with vsock deny) to have more instructions than f1: %d <= %d", len(f2), len(f1))
+	}
+
+	// arm64, denyVsock=false
+	f3 := buildSeccompFilter(unix.AUDIT_ARCH_AARCH64, uint32(unix.EPERM), nil, false)
+	// arm64, denyVsock=true
+	f4 := buildSeccompFilter(unix.AUDIT_ARCH_AARCH64, uint32(unix.EPERM), nil, true)
+	if len(f4) <= len(f3) {
+		t.Fatalf("expected f4 to have more instructions than f3: %d <= %d", len(f4), len(f3))
+	}
+
+	// 未知のアーキテクチャ
+	f5 := buildSeccompFilter(0x1234, uint32(unix.EPERM), nil, true)
+	if len(f5) == 0 {
+		t.Fatal("expected filter for unknown arch")
+	}
+}
+
 func contains(xs []int, v int) bool {
 	for _, x := range xs {
 		if x == v {

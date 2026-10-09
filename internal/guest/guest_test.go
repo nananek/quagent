@@ -208,3 +208,35 @@ func TestHostOnlyVsockAddr(t *testing.T) {
 		t.Fatalf("expected vsock.Host conn, got %v", c.RemoteAddr())
 	}
 }
+
+func TestServeMaxConns(t *testing.T) {
+	ml := &mockGuestListener{conns: make(chan net.Conn, 70)}
+	defer ml.Close()
+
+	go func() {
+		_ = serve(ml)
+	}()
+
+	// maxGuestConns (64) 本の接続を流す (handle 内でヘッダ待ちになる)
+	conns := make([]net.Conn, maxGuestConns)
+	for i := 0; i < maxGuestConns; i++ {
+		c1, c2 := net.Pipe()
+		conns[i] = c1
+		ml.conns <- c2
+	}
+
+	// 65本目を流す -> セマフォ満杯のため即座に切断される
+	c65a, c65b := net.Pipe()
+	ml.conns <- c65b
+
+	buf := make([]byte, 1)
+	_, err := c65a.Read(buf)
+	if err == nil {
+		t.Fatal("expected 65th connection to be closed immediately")
+	}
+
+	for _, c := range conns {
+		_ = c.Close()
+	}
+	_ = c65a.Close()
+}

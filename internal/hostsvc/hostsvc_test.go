@@ -258,11 +258,15 @@ func TestGuardListener(t *testing.T) {
 	p1, p2 := net.Pipe()
 	p3, p4 := net.Pipe()
 	p5, p6 := net.Pipe()
+	p7, p8 := net.Pipe()
 
 	defer p1.Close()
 	defer p3.Close()
 	defer p5.Close()
+	defer p7.Close()
 
+	// 0. vsock 以外のアドレス (!ok) -> スキップされて破棄
+	ml.conns <- p8
 	// 1. 別の CID (5) -> スキップされて破棄
 	ml.conns <- &mockVsockConn{Conn: p2, addr: &vsock.Addr{ContextID: 5}}
 	// 2. 正しい CID (10) -> 接続成功
@@ -288,13 +292,45 @@ func TestGuardListener(t *testing.T) {
 	// c をクローズするとセマフォが解放される
 	_ = c.Close()
 
-	if len(rejected) != 2 {
-		t.Fatalf("expected 2 reject events, got %d: %v", len(rejected), rejected)
+	if len(rejected) != 3 {
+		t.Fatalf("expected 3 reject events, got %d: %v", len(rejected), rejected)
 	}
 	if !strings.Contains(rejected[0], "不正な CID") {
-		t.Errorf("reject[0] = %q, want CID mismatch", rejected[0])
+		t.Errorf("reject[0] = %q, want CID mismatch for non-vsock addr", rejected[0])
 	}
-	if !strings.Contains(rejected[1], "同時接続上限") {
-		t.Errorf("reject[1] = %q, want max conns exceeded", rejected[1])
+	if !strings.Contains(rejected[1], "不正な CID") {
+		t.Errorf("reject[1] = %q, want CID mismatch", rejected[1])
 	}
+	if !strings.Contains(rejected[2], "同時接続上限") {
+		t.Errorf("reject[2] = %q, want max conns exceeded", rejected[2])
+	}
+}
+
+func TestGuardListenerNilOnReject(t *testing.T) {
+	ml := &mockListener{conns: make(chan net.Conn, 5)}
+	gl := &guardListener{
+		Listener: ml,
+		cid:      10,
+		sem:      make(chan struct{}, 1),
+	}
+
+	p1, p2 := net.Pipe()
+	p3, p4 := net.Pipe()
+	p5, p6 := net.Pipe()
+	defer p1.Close()
+	defer p3.Close()
+	defer p5.Close()
+
+	// 1. vsock 以外のアドレス (!ok) -> onReject=nil でも安全に切断
+	ml.conns <- p2
+	// 2. 別の CID (5) -> onReject=nil でも安全に切断
+	ml.conns <- &mockVsockConn{Conn: p4, addr: &vsock.Addr{ContextID: 5}}
+	// 3. 正しい CID (10) -> 受付成功
+	ml.conns <- &mockVsockConn{Conn: p6, addr: &vsock.Addr{ContextID: 10}}
+
+	c, err := gl.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
 }

@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +14,7 @@ import (
 	"github.com/nananek/quagent/internal/access"
 	"github.com/nananek/quagent/internal/config"
 	"github.com/nananek/quagent/internal/console"
+	"github.com/nananek/quagent/internal/hostsvc"
 	"github.com/nananek/quagent/internal/netns"
 	"github.com/nananek/quagent/internal/paths"
 )
@@ -357,5 +361,24 @@ func TestSetupAgySubscriptionNoSeed(t *testing.T) {
 	err := setupAgySubscription(vmGuest{}, &config.Config{}, "token")
 	if err == nil || !strings.Contains(err.Error(), "種が無い") {
 		t.Fatalf("expected error without seed, got %v", err)
+	}
+}
+
+func TestServerOnRejectLogging(t *testing.T) {
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+	svc, err := hostsvc.New(123)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.OnReject = func(reason string, remote net.Addr) {
+		logger.Printf("reject: %s (remote=%v)", reason, remote)
+	}
+
+	addr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:12345")
+	svc.OnReject("test reject", addr)
+
+	if !strings.Contains(buf.String(), "reject: test reject (remote=127.0.0.1:12345)") {
+		t.Fatalf("unexpected log output: %q", buf.String())
 	}
 }

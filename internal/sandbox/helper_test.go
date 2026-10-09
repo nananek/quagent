@@ -50,6 +50,12 @@ func TestSandboxHelper(t *testing.T) {
 			os.Exit(3)
 		}
 		wantGetppidEPERM()
+	case "exported-seccomp-with-vsock":
+		_ = unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+		if err := ApplySeccompWithVsock([]int{unix.SYS_GETPPID}, false); err != nil {
+			os.Exit(3)
+		}
+		wantGetppidEPERM()
 	case "exported-landlock":
 		_ = unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
 		dir := os.Getenv("QUAGENT_LANDLOCK_DIR")
@@ -296,6 +302,7 @@ func runHelper(t *testing.T, env map[string]string) {
 
 func TestExportedApply(t *testing.T) {
 	runHelper(t, map[string]string{"QUAGENT_SANDBOX_HELPER": "exported-seccomp"})
+	runHelper(t, map[string]string{"QUAGENT_SANDBOX_HELPER": "exported-seccomp-with-vsock"})
 
 	if err := ApplyLandlock([]string{"/nonexistent/path/for/test"}, true); err == nil {
 		t.Fatal("expected error for nonexistent path")
