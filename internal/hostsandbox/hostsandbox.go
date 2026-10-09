@@ -77,7 +77,8 @@ func IsSubpath(parent, child string) (string, bool) {
 }
 
 // ApplyResourceLimits は QEMU プロセスのリソース制限を設定する。
-// コアダンプ (RLIMIT_CORE) を 0 にして機密情報漏洩とディスク枯渇を防ぐ。
+// コアダンプ (RLIMIT_CORE) を 0 にして機密情報漏洩とディスク枯渇を防ぎ、
+// ファイルディスクリプタ上限 (RLIMIT_NOFILE) およびプロセス数上限 (RLIMIT_NPROC) を設定する。
 func ApplyResourceLimits() error {
 	var rlim unix.Rlimit
 	rlim.Cur = 0
@@ -85,7 +86,42 @@ func ApplyResourceLimits() error {
 	if err := unix.Setrlimit(unix.RLIMIT_CORE, &rlim); err != nil {
 		return fmt.Errorf("RLIMIT_CORE を 0 に設定できない: %w", err)
 	}
+
+	// NOFILE: ファイルディスクリプタの浪費・枯渇を防ぐ (soft 2048 / hard 4096)
+	var nofile unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &nofile); err == nil {
+		if nofile.Max >= 2048 {
+			nofile.Cur = 2048
+			_ = unix.Setrlimit(unix.RLIMIT_NOFILE, &nofile)
+		}
+	}
+
+	// NPROC: PID 名前空間内でのスレッド爆発を防ぐ (soft 512 / hard 1024)
+	var nproc unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_NPROC, &nproc); err == nil {
+		if nproc.Max >= 512 {
+			nproc.Cur = 512
+			_ = unix.Setrlimit(unix.RLIMIT_NPROC, &nproc)
+		}
+	}
+
 	return nil
+}
+
+// ApplyProcessPriorities は QEMU プロセスのスケジューリング優先度 (nice) および
+// OOM スコア (oom_score_adj) を設定する。
+func ApplyProcessPriorities(niceVal, oomScoreAdj int) {
+	if niceVal > 0 {
+		if err := unix.Setpriority(unix.PRIO_PROCESS, 0, niceVal); err != nil {
+			log.Printf("[quagent:hostsandbox] setpriority(nice=%d) スキップ: %v", niceVal, err)
+		}
+	}
+	if oomScoreAdj > 0 {
+		adjStr := fmt.Sprintf("%d\n", oomScoreAdj)
+		if err := os.WriteFile("/proc/self/oom_score_adj", []byte(adjStr), 0o644); err != nil {
+			log.Printf("[quagent:hostsandbox] oom_score_adj 設定スキップ: %v", err)
+		}
+	}
 }
 
 // ApplyHostSeccomp はホスト側 QEMU 用の seccomp フィルタを適用する。
@@ -291,6 +327,8 @@ type Spec struct {
 	BaseDisk           string   `json:"base_disk,omitempty"`
 	DataDiskPaths      []string `json:"data_disk_paths,omitempty"`
 	DisableHostSandbox bool     `json:"disable_host_sandbox,omitempty"`
+	Nice               int      `json:"nice,omitempty"`
+	OOMScoreAdj        int      `json:"oom_score_adj,omitempty"`
 	QemuArgv           []string `json:"qemu_argv"`
 }
 
@@ -323,10 +361,13 @@ func Run(specPath string) error {
 		return syscall.Exec(target, spec.QemuArgv, os.Environ())
 	}
 
-	// 1. リソース制限 (RLIMIT_CORE = 0)
+	// 1. リソース制限 (RLIMIT_CORE, RLIMIT_NOFILE, RLIMIT_NPROC)
 	if err := ApplyResourceLimits(); err != nil {
 		log.Printf("[quagent:hostsandbox] リソース制限の設定をスキップ: %v", err)
 	}
+
+	// 1.5. プロセス優先度・OOM スコア調整
+	ApplyProcessPriorities(spec.Nice, spec.OOMScoreAdj)
 
 	// 2. ディレクトリの最小化・ホワイトリスト化 (Mount Namespace)
 	home, _ := os.UserHomeDir()

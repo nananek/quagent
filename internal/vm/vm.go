@@ -88,6 +88,10 @@ type QemuOpts struct {
 	// Sandbox は QEMU 自身の seccomp サンドボックス (-sandbox on,spawn=deny 等) の指定。
 	// nil なら ProbeQemuSeccomp() で自動判定する。
 	Sandbox *bool
+	// IOReadBPS はディスク読み取り上限 (バイト/秒, 0 なら無制限)。
+	IOReadBPS int64
+	// IOWriteBPS はディスク書き込み上限 (バイト/秒, 0 なら無制限)。
+	IOWriteBPS int64
 	// Extra は追加の qemu 引数。
 	Extra []string
 }
@@ -139,14 +143,23 @@ func QemuArgv(o QemuOpts) ([]string, error) {
 		"-machine", "q35,accel=kvm", "-cpu", cpu,
 		"-smp", strconv.Itoa(o.CPUs), "-m", strconv.Itoa(o.MemMiB),
 		"-nographic", "-serial", "file:" + o.ConsoleLog, "-monitor", "none",
+	}
+	rootDrive := "file=" + o.Disk + ",if=none,id=root,format=qcow2,discard=unmap"
+	if o.IOReadBPS > 0 {
+		rootDrive += fmt.Sprintf(",throttling.bps-read=%d", o.IOReadBPS)
+	}
+	if o.IOWriteBPS > 0 {
+		rootDrive += fmt.Sprintf(",throttling.bps-write=%d", o.IOWriteBPS)
+	}
+	argv = append(argv,
 		// 追加のディスクがあっても起動はこのディスクから
-		"-drive", "file=" + o.Disk + ",if=none,id=root,format=qcow2,discard=unmap",
+		"-drive", rootDrive,
 		"-device", "virtio-blk-pci,drive=root,bootindex=0",
-		"-drive", "file=" + o.Seed + ",if=virtio,format=raw,readonly=on",
+		"-drive", "file="+o.Seed+",if=virtio,format=raw,readonly=on",
 		"-netdev", netdev,
 		"-device", "virtio-net-pci,netdev=n0",
 		"-device", "virtio-rng-pci",
-	}
+	)
 	sandboxOn := false
 	if o.Sandbox != nil {
 		sandboxOn = *o.Sandbox

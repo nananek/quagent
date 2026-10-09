@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nananek/quagent/internal/cgroup"
 	"github.com/nananek/quagent/internal/headerpolicy"
 )
 
@@ -55,6 +56,16 @@ type Spec struct {
 	// DisableHostSandbox を true にすると、ホスト側 QEMU サンドボックス
 	// (名前空間分離、Landlock、Seccomp、ディレクトリ隔離) を無効化する。
 	DisableHostSandbox bool `json:"disable_host_sandbox,omitempty"`
+	// Nice は QEMU プロセスのスケジューリング優先度。
+	Nice int `json:"nice,omitempty"`
+	// OOMScoreAdj は OOM 発生時の優先身代わりスコア。
+	OOMScoreAdj int `json:"oom_score_adj,omitempty"`
+	// CPUQuotaPercent はホスト側 CPU 占有上限率 (cgroups v2)。
+	CPUQuotaPercent int `json:"cpu_quota_percent,omitempty"`
+	// MemMiB は VM メモリ割当。
+	MemMiB int `json:"mem_mib,omitempty"`
+	// MemoryOverheadMiB はホストメモリ許容オーバーヘッド。
+	MemoryOverheadMiB int `json:"memory_overhead_mib,omitempty"`
 	// QemuArgv は子 netns 内で実行する qemu のコマンドライン。
 	QemuArgv []string `json:"qemu_argv"`
 }
@@ -98,7 +109,15 @@ func Start(spec Spec) (*Launcher, error) {
 	}
 	defer logf.Close()
 
-	cmd := exec.Command("unshare", "-Urm", self, ChildCommand, specPath)
+	argv := []string{"unshare", "-Urm", self, ChildCommand, specPath}
+	cgroupOpts := cgroup.Options{
+		CPUQuotaPercent:   spec.CPUQuotaPercent,
+		MemMiB:            spec.MemMiB,
+		MemoryOverheadMiB: spec.MemoryOverheadMiB,
+		TasksMax:          512,
+	}
+	argv = cgroup.WrapCommand(argv, cgroupOpts)
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stderr = logf
 	events, err := cmd.StdoutPipe()
 	if err != nil {

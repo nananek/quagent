@@ -44,12 +44,99 @@ type Config struct {
 	// QemuSandbox はホスト側 QEMU プロセスにかけるサンドボックスの設定。
 	// 未指定なら既定で有効。
 	QemuSandbox *QemuSandboxPolicy `json:"qemu_sandbox,omitempty"`
+	// Resources はホスト側の計算資源 (ストレージ、CPU、メモリ、I/O) の保護設定。
+	Resources *ResourcePolicy `json:"resources,omitempty"`
 }
 
 // QemuSandboxPolicy はホスト側 QEMU プロセスのサンドボックス設定。
 type QemuSandboxPolicy struct {
 	// Enabled を false にするとホスト側 QEMU サンドボックスを無効化する (既定: true)。
 	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// ResourcePolicy はホスト側の計算資源 (ストレージ、CPU、メモリ、I/O) の保護設定。
+type ResourcePolicy struct {
+	// Enabled を false にするとホスト側リソース保護を無効化する (既定: true)。
+	Enabled *bool `json:"enabled,omitempty"`
+	// MinFreeDiskGiB は VM 起動に必要なホスト作業ディレクトリの最小空き容量 (GiB, 既定: 10)。
+	// これを下回る場合は起動を拒否する。
+	MinFreeDiskGiB int `json:"min_free_disk_gib,omitempty"`
+	// HostSafetyFreeGiB は実行中のホスト安全下限空き容量 (GiB, 既定: 2)。
+	// 実行中にホストの空き容量がこれを下回った場合は即時安全停止する。
+	HostSafetyFreeGiB int `json:"host_safety_free_gib,omitempty"`
+	// DiskWarnPercent はゲスト仮想ディスク (40 GiB) に対する警告使用率 (既定: 80%)。
+	DiskWarnPercent int `json:"disk_warn_percent,omitempty"`
+	// DiskStopPercent はゲスト仮想ディスクに対する安全停止使用率 (既定: 95%)。
+	DiskStopPercent int `json:"disk_stop_percent,omitempty"`
+	// CPUQuotaPercent はホスト側 CPU 占有上限率 (例: 200 = 2コア分, 0 = 無制限/自動, 既定: 0)。
+	CPUQuotaPercent int `json:"cpu_quota_percent,omitempty"`
+	// MemoryOverheadMiB は QEMU のメモリ割当 (-m) に対するホスト側許容マージン (MiB, 既定: 512)。
+	MemoryOverheadMiB int `json:"memory_overhead_mib,omitempty"`
+	// IOReadBPS はディスク読込上限 (バイト/秒, 0 = 無制限, 既定: 0)。
+	IOReadBPS int64 `json:"io_read_bps,omitempty"`
+	// IOWriteBPS はディスク書込上限 (バイト/秒, 0 = 無制限, 既定: 0)。
+	IOWriteBPS int64 `json:"io_write_bps,omitempty"`
+	// Nice は QEMU プロセスのスケジューリング優先度 (既定: 10)。
+	Nice int `json:"nice,omitempty"`
+	// OOMScoreAdj は OOM 発生時の優先身代わりスコア (既定: 500)。
+	OOMScoreAdj int `json:"oom_score_adj,omitempty"`
+	// MaxLogSizeMiB は console.log の最大保持サイズ (MiB, 既定: 50)。
+	MaxLogSizeMiB int `json:"max_log_size_mib,omitempty"`
+}
+
+// DefaultResourcePolicy は既定のリソース保護設定を返す。
+func DefaultResourcePolicy() ResourcePolicy {
+	tr := true
+	return ResourcePolicy{
+		Enabled:           &tr,
+		MinFreeDiskGiB:    10,
+		HostSafetyFreeGiB: 2,
+		DiskWarnPercent:   80,
+		DiskStopPercent:   95,
+		CPUQuotaPercent:   0,
+		MemoryOverheadMiB: 512,
+		Nice:              10,
+		OOMScoreAdj:       500,
+		MaxLogSizeMiB:     50,
+	}
+}
+
+// ResourcePolicyOrDefault は設定が存在すれば既定値を補完して返し、
+// 未設定ならデフォルトを返す。
+func (c *Config) ResourcePolicyOrDefault() ResourcePolicy {
+	def := DefaultResourcePolicy()
+	if c == nil || c.Resources == nil {
+		return def
+	}
+	res := *c.Resources
+	if res.Enabled == nil {
+		res.Enabled = def.Enabled
+	}
+	if res.MinFreeDiskGiB <= 0 {
+		res.MinFreeDiskGiB = def.MinFreeDiskGiB
+	}
+	if res.HostSafetyFreeGiB <= 0 {
+		res.HostSafetyFreeGiB = def.HostSafetyFreeGiB
+	}
+	if res.DiskWarnPercent <= 0 {
+		res.DiskWarnPercent = def.DiskWarnPercent
+	}
+	if res.DiskStopPercent <= 0 {
+		res.DiskStopPercent = def.DiskStopPercent
+	}
+	if res.MemoryOverheadMiB <= 0 {
+		res.MemoryOverheadMiB = def.MemoryOverheadMiB
+	}
+	if res.Nice <= 0 {
+		res.Nice = def.Nice
+	}
+	if res.OOMScoreAdj <= 0 {
+		res.OOMScoreAdj = def.OOMScoreAdj
+	}
+	if res.MaxLogSizeMiB <= 0 {
+		res.MaxLogSizeMiB = def.MaxLogSizeMiB
+	}
+	return res
 }
 
 // Clipboard はクリップボードへの入れ方。
