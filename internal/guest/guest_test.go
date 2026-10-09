@@ -163,3 +163,48 @@ func TestFrameStream(t *testing.T) {
 		t.Fatalf("got (%d, %q), want (%d, 'error output')", tType, data, fStderr)
 	}
 }
+
+type mockAddrConn struct {
+	net.Conn
+	addr net.Addr
+}
+
+func (c *mockAddrConn) RemoteAddr() net.Addr { return c.addr }
+
+type mockGuestListener struct {
+	conns chan net.Conn
+}
+
+func (m *mockGuestListener) Accept() (net.Conn, error) {
+	c, ok := <-m.conns
+	if !ok {
+		return nil, net.ErrClosed
+	}
+	return c, nil
+}
+func (m *mockGuestListener) Close() error   { close(m.conns); return nil }
+func (m *mockGuestListener) Addr() net.Addr { return &vsock.Addr{ContextID: 2} }
+
+func TestHostOnlyVsockAddr(t *testing.T) {
+	ml := &mockGuestListener{conns: make(chan net.Conn, 5)}
+	l := &hostOnly{ml}
+
+	p1, p2 := net.Pipe()
+	p3, p4 := net.Pipe()
+	defer p1.Close()
+	defer p3.Close()
+
+	// 1. CID 3 (Host 以外) -> 拒否
+	ml.conns <- &mockAddrConn{Conn: p2, addr: &vsock.Addr{ContextID: 3}}
+	// 2. CID 2 (vsock.Host) -> 受付
+	ml.conns <- &mockAddrConn{Conn: p4, addr: &vsock.Addr{ContextID: vsock.Host}}
+
+	c, err := l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if a, ok := c.RemoteAddr().(*vsock.Addr); !ok || a.ContextID != vsock.Host {
+		t.Fatalf("expected vsock.Host conn, got %v", c.RemoteAddr())
+	}
+}

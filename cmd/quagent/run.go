@@ -235,6 +235,9 @@ func run(o runOpts) error {
 	svc.Audit = func(e hostsvc.AuditEvent) {
 		logger.Print(e.LogLine())
 	}
+	svc.OnReject = func(reason string, remote net.Addr) {
+		logger.Printf("reject: %s (remote=%v)", reason, remote)
+	}
 	// 許可していない LLM API の操作は、承認コンソールができてからそこに出す
 	llmDenied := make(chan string, 16)
 	// HTTPS を終端するなら、run ごとの使い捨て CA を 1 つ作る。証明書は

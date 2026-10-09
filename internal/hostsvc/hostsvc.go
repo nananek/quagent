@@ -57,6 +57,8 @@ type Server struct {
 	Mux *http.ServeMux
 	// Audit が non-nil なら、窓口へのリクエストごとに呼ぶ (host 側の監査ログ用)。
 	Audit func(AuditEvent)
+	// OnReject が non-nil なら、窓口への vsock 接続を拒否したときに呼ぶ (host 側の監査ログ用)。
+	OnReject func(reason string, remote net.Addr)
 	// Token は run ごとの合言葉。エージェントの設定にだけ書き、/healthz 以外は
 	// これを持たないリクエストを拒否する (VM 内のエージェント以外のプロセスや
 	// コンテナが、プロキシ経由で鍵や MCP を使えないように)。
@@ -175,7 +177,7 @@ func (s *Server) Start() error {
 	if err != nil {
 		return fmt.Errorf("vsock で待ち受けられない: %w", err)
 	}
-	return s.serve(&guardListener{Listener: l, cid: s.cid, sem: make(chan struct{}, maxConns)})
+	return s.serve(&guardListener{Listener: l, cid: s.cid, sem: make(chan struct{}, maxConns), onReject: s.OnReject})
 }
 
 func (s *Server) serve(l net.Listener) error {
@@ -202,8 +204,9 @@ func (s *Server) Stop() {
 // guardListener はこの run の VM 以外からの接続を切り、同時接続数を絞る。
 type guardListener struct {
 	net.Listener
-	cid uint32
-	sem chan struct{}
+	cid      uint32
+	sem      chan struct{}
+	onReject func(reason string, remote net.Addr)
 }
 
 func (l *guardListener) Accept() (net.Conn, error) {
@@ -212,7 +215,11 @@ func (l *guardListener) Accept() (net.Conn, error) {
 		if err != nil {
 			return nil, err
 		}
-		if a, ok := c.RemoteAddr().(*vsock.Addr); !ok || a.ContextID != l.cid {
+		a, ok := c.RemoteAddr().(*vsock.Addr)
+		if !ok || a.ContextID != l.cid {
+			if l.onReject != nil {
+				l.onReject(fmt.Sprintf("vsock 不正な CID からの接続を拒否 (want_cid=%d)", l.cid), c.RemoteAddr())
+			}
 			c.Close() // 別の VM から
 			continue
 		}
@@ -220,6 +227,9 @@ func (l *guardListener) Accept() (net.Conn, error) {
 		case l.sem <- struct{}{}:
 			return &releaseConn{Conn: c, release: func() { <-l.sem }}, nil
 		default:
+			if l.onReject != nil {
+				l.onReject(fmt.Sprintf("vsock 同時接続上限 (%d) 超過のため拒否", cap(l.sem)), c.RemoteAddr())
+			}
 			c.Close() // 同時接続の上限
 		}
 	}

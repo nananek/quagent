@@ -213,6 +213,51 @@ func TestSyscallNumbers(t *testing.T) {
 	}
 }
 
+func TestDenyVsockPolicy(t *testing.T) {
+	var pNil *Policy
+	if !pNil.DenyVsockOn() {
+		t.Fatal("nil policy should have DenyVsockOn = true")
+	}
+
+	pDef := Default()
+	if !pDef.DenyVsockOn() {
+		t.Fatal("default policy should have DenyVsockOn = true")
+	}
+
+	pEmpty := &Policy{}
+	if !pEmpty.DenyVsockOn() {
+		t.Fatal("empty policy should have DenyVsockOn = true")
+	}
+
+	tFalse := false
+	pOff := &Policy{DenyVsock: &tFalse}
+	if pOff.DenyVsockOn() {
+		t.Fatal("policy with DenyVsock=false should have DenyVsockOn = false")
+	}
+
+	tTrue := true
+	pOn := &Policy{DenyVsock: &tTrue}
+	if !pOn.DenyVsockOn() {
+		t.Fatal("policy with DenyVsock=true should have DenyVsockOn = true")
+	}
+
+	b, err := pOff.JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpFile := filepath.Join(t.TempDir(), "policy.json")
+	if err := os.WriteFile(tmpFile, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(tmpFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.DenyVsockOn() {
+		t.Fatal("loaded policy should preserve DenyVsock = false")
+	}
+}
+
 func contains(xs []int, v int) bool {
 	for _, x := range xs {
 		if x == v {

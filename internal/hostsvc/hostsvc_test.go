@@ -245,10 +245,14 @@ func (m *mockListener) Addr() net.Addr { return &vsock.Addr{} }
 
 func TestGuardListener(t *testing.T) {
 	ml := &mockListener{conns: make(chan net.Conn, 5)}
+	var rejected []string
 	gl := &guardListener{
 		Listener: ml,
 		cid:      10,
 		sem:      make(chan struct{}, 1), // 同時接続上限 1
+		onReject: func(reason string, remote net.Addr) {
+			rejected = append(rejected, reason)
+		},
 	}
 
 	p1, p2 := net.Pipe()
@@ -283,4 +287,14 @@ func TestGuardListener(t *testing.T) {
 
 	// c をクローズするとセマフォが解放される
 	_ = c.Close()
+
+	if len(rejected) != 2 {
+		t.Fatalf("expected 2 reject events, got %d: %v", len(rejected), rejected)
+	}
+	if !strings.Contains(rejected[0], "不正な CID") {
+		t.Errorf("reject[0] = %q, want CID mismatch", rejected[0])
+	}
+	if !strings.Contains(rejected[1], "同時接続上限") {
+		t.Errorf("reject[1] = %q, want max conns exceeded", rejected[1])
+	}
 }
