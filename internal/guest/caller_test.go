@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -470,5 +471,65 @@ func TestDefaultCallerPID(t *testing.T) {
 	_, err = defaultCallerPID(&net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9999})
 	if err == nil {
 		t.Error("expected error for non-existent port")
+	}
+}
+
+func TestIsAgentProcess(t *testing.T) {
+	for _, name := range []string{"opencode", "claude", "agy"} {
+		if !IsAgentProcess(name) {
+			t.Errorf("expected %s to be agent process", name)
+		}
+	}
+	for _, name := range []string{"bash", "sh", "python3", "pytest", "npm"} {
+		if IsAgentProcess(name) {
+			t.Errorf("expected %s NOT to be agent process", name)
+		}
+	}
+}
+
+func TestIsDescendantOfAgent(t *testing.T) {
+	tmp := t.TempDir()
+	makeProc := func(pid int, comm string, ppid int) {
+		pDir := filepath.Join(tmp, strconv.Itoa(pid))
+		_ = os.MkdirAll(pDir, 0o755)
+		_ = os.WriteFile(filepath.Join(pDir, "comm"), []byte(comm+"\n"), 0o644)
+		stat := fmt.Sprintf("%d (%s) S %d 1 1 0 0", pid, comm, ppid)
+		_ = os.WriteFile(filepath.Join(pDir, "stat"), []byte(stat), 0o644)
+	}
+
+	// 1. targetPID <= 1
+	if IsDescendantOfAgent(tmp, 1) {
+		t.Error("expected false for pid 1")
+	}
+	if IsDescendantOfAgent(tmp, 0) {
+		t.Error("expected false for pid 0")
+	}
+
+	// 2. proc tree: 1 -> bash(10) -> agy(20) -> bash(30) -> pytest(40)
+	makeProc(10, "bash", 1)
+	makeProc(20, "agy", 10)
+	makeProc(30, "bash", 20)
+	makeProc(40, "pytest", 30)
+
+	// pytest(40) is descendant of agy(20)
+	if !IsDescendantOfAgent(tmp, 40) {
+		t.Error("expected pytest(40) to be descendant of agy")
+	}
+	// bash(30) is descendant of agy(20)
+	if !IsDescendantOfAgent(tmp, 30) {
+		t.Error("expected bash(30) to be descendant of agy")
+	}
+	// agy(20) parent is bash(10), not a descendant of another agent
+	if IsDescendantOfAgent(tmp, 20) {
+		t.Error("expected agy(20) parent to not be agent")
+	}
+	// bash(10) parent is init(1)
+	if IsDescendantOfAgent(tmp, 10) {
+		t.Error("expected bash(10) to not be descendant of agent")
+	}
+
+	// 3. Unknown PID
+	if IsDescendantOfAgent(tmp, 9999) {
+		t.Error("expected false for unknown pid")
 	}
 }

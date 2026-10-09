@@ -76,6 +76,14 @@ func dispatch(args []string) error {
 		return cmdExec(args[1:])
 	case sandbox.LauncherCommand:
 		return sandbox.Run(args[1:])
+	case sandbox.LauncherCommandSubbox:
+		return sandbox.RunSubbox(args[1:])
+	case guest.CheckAgentChildCommand:
+		if guest.IsDescendantOfAgent("/proc", os.Getppid()) {
+			return nil
+		}
+		os.Exit(1)
+		return nil
 	case hostsandbox.LauncherCommand:
 		if len(args) != 2 {
 			return fmt.Errorf("%s: spec のパスが必要", hostsandbox.LauncherCommand)

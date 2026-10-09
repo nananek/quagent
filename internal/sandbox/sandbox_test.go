@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -279,6 +280,55 @@ func TestBuildSeccompFilter(t *testing.T) {
 	f5 := buildSeccompFilter(0x1234, uint32(unix.EPERM), nil, true)
 	if len(f5) == 0 {
 		t.Fatal("expected filter for unknown arch")
+	}
+}
+
+func TestPolicy_MaskAgentConfigAndDockerInherit(t *testing.T) {
+	// nil policy
+	var nilP *Policy
+	if !nilP.MaskAgentConfigOn() {
+		t.Errorf("expected nil policy to have MaskAgentConfigOn true")
+	}
+	if !nilP.DockerInheritOn() {
+		t.Errorf("expected nil policy to have DockerInheritOn true")
+	}
+	if names := nilP.DenyNames(); len(names) == 0 {
+		t.Errorf("expected nil policy to have non-empty DenyNames")
+	}
+
+	// default policy (omitted fields -> true)
+	p := Default()
+	if !p.MaskAgentConfigOn() {
+		t.Errorf("expected Default to have MaskAgentConfigOn true")
+	}
+	if !p.DockerInheritOn() {
+		t.Errorf("expected Default to have DockerInheritOn true")
+	}
+
+	// explicit false
+	f := false
+	p2 := &Policy{
+		MaskAgentConfig: &f,
+		DockerInherit:   &f,
+	}
+	if p2.MaskAgentConfigOn() {
+		t.Errorf("expected false for MaskAgentConfigOn")
+	}
+	if p2.DockerInheritOn() {
+		t.Errorf("expected false for DockerInheritOn")
+	}
+
+	// JSON unmarshaling
+	raw := []byte(`{"mask_agent_config": false, "docker_inherit": true}`)
+	var p3 Policy
+	if err := json.Unmarshal(raw, &p3); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if p3.MaskAgentConfigOn() {
+		t.Errorf("expected false for p3.MaskAgentConfigOn")
+	}
+	if !p3.DockerInheritOn() {
+		t.Errorf("expected true for p3.DockerInheritOn")
 	}
 }
 

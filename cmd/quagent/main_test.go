@@ -8,6 +8,7 @@ import (
 	"github.com/nananek/quagent/internal/access"
 	"github.com/nananek/quagent/internal/hostsandbox"
 	"github.com/nananek/quagent/internal/netns"
+	"github.com/nananek/quagent/internal/sandbox"
 )
 
 func TestDispatchValidation(t *testing.T) {
@@ -30,6 +31,10 @@ func TestDispatchValidation(t *testing.T) {
 
 	if err := dispatch([]string{hostsandbox.LauncherCommand}); err == nil {
 		t.Error("expected error for hostsandbox.LauncherCommand without spec path")
+	}
+
+	if err := dispatch([]string{sandbox.LauncherCommandSubbox}); err == nil {
+		t.Error("expected error for LauncherCommandSubbox without args")
 	}
 
 	if err := dispatch([]string{"image"}); err == nil {

@@ -105,6 +105,37 @@ func sandboxWriteFile(policy []byte) string {
 		sandbox.ConfigPath, indentBlock(string(policy), "      "))
 }
 
+const dockerSeccompGuestPath = "/etc/quagent/docker-seccomp.json"
+
+// dockerWriteFiles は Docker 向け seccomp プロファイルと daemon.json を guest に置く write_files の断片。
+func dockerWriteFiles(seccompJSON, daemonJSON []byte) string {
+	daemonPath := fmt.Sprintf("/home/%s/.config/docker/daemon.json", vm.GuestUser)
+	return fmt.Sprintf("  - path: %s\n    permissions: '0644'\n    content: |\n%s\n  - path: %s\n    permissions: '0644'\n    content: |\n%s",
+		dockerSeccompGuestPath, indentBlock(string(seccompJSON), "      "),
+		daemonPath, indentBlock(string(daemonJSON), "      "))
+}
+
+// subboxWrapperFiles はエージェントの子孫プロセスから機密設定を不可視化する bash/sh ラッパーを置く write_files の断片。
+func subboxWrapperFiles() string {
+	bashWrapper := `#!/bin/bash
+if [ -z "$QUAGENT_SUBBOX_ACTIVE" ] && /usr/local/bin/quagent-guest __check_agent_child 2>/dev/null; then
+  export QUAGENT_SUBBOX_ACTIVE=1
+  exec /usr/local/bin/quagent-guest __subbox -- /bin/bash "$@"
+fi
+exec /bin/bash "$@"`
+
+	shWrapper := `#!/bin/sh
+if [ -z "$QUAGENT_SUBBOX_ACTIVE" ] && /usr/local/bin/quagent-guest __check_agent_child 2>/dev/null; then
+  export QUAGENT_SUBBOX_ACTIVE=1
+  exec /usr/local/bin/quagent-guest __subbox -- /bin/sh "$@"
+fi
+exec /bin/sh "$@"`
+
+	return fmt.Sprintf("  - path: /usr/local/bin/bash\n    permissions: '0755'\n    content: |\n%s\n  - path: /usr/local/bin/sh\n    permissions: '0755'\n    content: |\n%s",
+		indentBlock(bashWrapper, "      "),
+		indentBlock(shWrapper, "      "))
+}
+
 // normalizePassthrough は TLS 終端しない行き先のパターンを検証・正規化する
 // ("example.com" か "*.example.com")。空なら nil を返す。
 func normalizePassthrough(in []string) ([]string, error) {
@@ -368,17 +399,41 @@ func run(o runOpts) error {
 	// なので、作業ユーザーは読めるが書き換えられない。受け口 (quagent-guest) が
 	// 起動時に読み、以降のコマンドを起動役経由で起動する。
 	sandboxFile := ""
+	dockerSetupCmd := ""
 	if sb.On() {
 		sbJSON, err := sb.JSON()
 		if err != nil {
 			return err
 		}
 		sandboxFile = sandboxWriteFile(sbJSON)
+		if sb.DockerInheritOn() {
+			seccompJSON, err := sb.DockerSeccompJSON()
+			if err != nil {
+				return err
+			}
+			daemonJSON, err := sandbox.GenerateDockerDaemonJSON(dockerSeccompGuestPath)
+			if err != nil {
+				return err
+			}
+			sandboxFile += "\n" + dockerWriteFiles(seccompJSON, daemonJSON)
+			dockerSetupCmd = fmt.Sprintf("  - [sh, -c, \"chown -R %s:%s /home/%s/.config/docker 2>/dev/null; systemctl --user restart docker 2>/dev/null || true\"]\n",
+				vm.GuestUser, vm.GuestUser, vm.GuestUser)
+		}
+		if sb.MaskAgentConfigOn() {
+			sandboxFile += "\n" + subboxWrapperFiles()
+		}
 		note := ""
 		if sb.Landlock {
 			note = " + Landlock"
 		}
-		logf("sandbox: VM 内のコマンドに %s の方針をかける (seccomp%s)", sb.Mode, note)
+		extra := ""
+		if sb.DockerInheritOn() {
+			extra += " + Docker"
+		}
+		if sb.MaskAgentConfigOn() {
+			extra += " + Subbox"
+		}
+		logf("sandbox: VM 内のコマンドに %s の方針をかける (seccomp%s%s)", sb.Mode, note, extra)
 	} else {
 		logf("sandbox: 無効")
 	}
@@ -400,9 +455,9 @@ bootcmd:
 runcmd:
   # 再起動のとき作業ユーザーが差し替えられるよう、/entrypoint.sh の実体は作業ユーザーのホームに置く
   - [sh, -c, "install -o %s -g %s -m 755 /entrypoint.sh %s && ln -sf %s /entrypoint.sh"]
-%s%s  - [sh, -c, "mkdir -p /run/quagent-seed && mount -o ro /dev/disk/by-label/cidata /run/quagent-seed && install -m 755 /run/quagent-seed/quagent-guest /usr/local/bin/quagent-guest && umount /run/quagent-seed"]
+%s%s%s  - [sh, -c, "mkdir -p /run/quagent-seed && mount -o ro /dev/disk/by-label/cidata /run/quagent-seed && install -m 755 /run/quagent-seed/quagent-guest /usr/local/bin/quagent-guest && umount /run/quagent-seed"]
   - [systemd-run, --unit=quagent-guest, --uid=%s, -p, Restart=always, /usr/local/bin/quagent-guest, %s, "%d"]
-`, indentBlock(entrypoint, "      "), extraFiles, sandboxFile, hostsvc.GuestHost, maskCmd(sshUnits()), vm.GuestUser, vm.GuestUser, entrypointPath, entrypointPath, trustCmd, tmpCmd, vm.GuestUser, guestCommand, svc.Port)
+`, indentBlock(entrypoint, "      "), extraFiles, sandboxFile, hostsvc.GuestHost, maskCmd(sshUnits()), vm.GuestUser, vm.GuestUser, entrypointPath, entrypointPath, trustCmd, tmpCmd, dockerSetupCmd, vm.GuestUser, guestCommand, svc.Port)
 	// 時刻の表示 (承認の期限やコミットの日時) を host とそろえる
 	if tz := hostTimezone(); tz != "" {
 		userData += "timezone: " + tz + "\n"

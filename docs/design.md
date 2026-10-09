@@ -45,19 +45,23 @@ sshd は完全に停止・無効化されます（systemd-ssh-generator が生�
   また、異なる ABI からの同一番号システムコール（32bit の `int 0x80`、x32 など）はアーキテクチャの詐称を含めて拒否され、プロセスは強制終了されます。64bit 以外のバイナリは実行できません。
 - **Landlock** (`landlock: true`、既定: 無効): ファイルやディレクトリの書き込み・作成・削除・リネームを `read_write_paths`（既定: ホームディレクトリ、`/work`、`/tmp`、`/var/tmp`、`/run/user/<uid>`、`/dev/shm`）の配下に限定します。読み取り操作は制限されません。カーネルが Landlock に未対応の場合は起動プロセスがエラーを返します（暗黙的な無効化は行いません）。`read_write_paths` を明示指定した際に存在しないパスが含まれている場合もエラーとなります（タイポ等によって意図せず全書き込みが拒否される事故を防ぐため）。カーネルの Landlock ABI バージョンが古い場合、`rename` / `link`（ABI < 2）や `truncate`（ABI < 3）は制限対象外となります。
 - **プロセス間権限分離 (窓口アクセスの接続元 PID 検証):** ホスト窓口 (`quagent.host:7070`) への中継デーモンは、TCP 接続を受け付けた際に `/proc/net/tcp` および `/proc/<pid>/fd` から接続元プロセスの PID を特定し、プロセスツリーを検査します。接続を許可するのはエージェント本体プロセス（およびセッションリーダー）のみであり、エージェントが実行したテストコード、ビルドスクリプト、依存関係スクリプト等の子孫プロセスからの窓口接続は即座に拒否・切断されます。これにより、万が一エージェント設定ファイルの認証トークンが参照された場合でも、サブプロセスから直接 MCP ツール（`request_network_access` や `create_pull_request`）や LLM API を不正に叩くことはできません。
+- **エージェント設定ファイルの不可視化 (`mask_agent_config: true`、既定: 有効):** エージェント本体が実行した子孫プロセス（テストコード、ビルドツール、シェル等）に対し、ファイルシステム名前空間（Mount/User 名前空間・`__subbox`）を利用してホームディレクトリ配下の機密設定パス（`~/.config/opencode`、`~/.claude`、`~/.claude.json`、`~/.gemini`、`~/.ssh`、`~/.config/quagent`）に空の tmpfs または `/dev/null` を透過的に被せて不可視化します。エージェント本体自身は設定ファイルを正常に読み取れますが、サブプロセスからはファイル自体が存在しないように見えるため、認証トークンや署名鍵の窃取・漏洩を防止します（`mask_agent_config: false` で無効化可能）。
+- **rootless Docker へのサンドボックス制約継承 (`docker_inherit: true`、既定: 有効):** rootless Docker で実行されるコンテナに対しても、`sandbox.Policy` に基づく seccomp フィルタ（`AF_VSOCK` ソケット作成の拒否、危険システムコールの拒否、64bit ABI 限定）を反映した Docker 既定 seccomp プロファイル（`/etc/quagent/docker-seccomp.json`）を cloud-init 経由で透過的に適用します。また Docker デーモンの環境からも機密ディレクトリを保護し、コンテナのボリュームマウント（`-v /home/agent/...`）を経由した機密情報の持ち出しを遮断します（`docker_inherit: false` で無効化可能）。
 
 ```json
 "sandbox": {
   "enabled": true,
   "mode": "compat",
   "deny_vsock": true,
-  "landlock": false
+  "landlock": false,
+  "mask_agent_config": true,
+  "docker_inherit": true
 }
 ```
 
-`enabled` を省略した場合は有効（既定）となります。無効化する場合は `"enabled": false` を指定します。`extra_deny` に拒否対象とするシステムコール名を追加することも可能です（例: `["chroot"]`）。`deny_vsock: false` で AF_VSOCK 遮断のみを無効化できます。`read_write_paths` で Landlock の書き込み許可パスをカスタマイズできます。
+`enabled` を省略した場合は有効（既定）となります。無効化する場合は `"enabled": false` を指定します。`extra_deny` に拒否対象とするシステムコール名を追加することも可能です（例: `["chroot"]`）。`deny_vsock: false` で AF_VSOCK 遮断のみを無効化できます。`read_write_paths` で Landlock の書き込み許可パスをカスタマイズできます。`mask_agent_config: false` で設定ファイルの不可視化を無効化、`docker_inherit: false` で Docker への制約継承を無効化できます。
 
-この仕組みはホスト側の許可制を代替するものではなく、VM 内部における危険なシステムコールの侵入経路を最小化するための追加レイヤーです。作業に必要なシステムコールが遮断されてしまう場合は、`enabled: false` で無効化できます（なお、`__sandbox` は quagent の内部サブコマンドです）。
+この仕組みはホスト側の許可制を代替するものではなく、VM 内部における危険なシステムコールの侵入経路を最小化するための追加レイヤーです。作業に必要なシステムコールが遮断されてしまう場合は、`enabled: false` で無効化できます（なお、`__sandbox` および `__subbox` は quagent の内部サブコマンドです）。
 
 ## 敵対的・暴走エージェントに対する防御とリソース制限
 
