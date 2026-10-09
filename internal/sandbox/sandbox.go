@@ -30,12 +30,13 @@ const LauncherCommand = "__sandbox"
 const LauncherCommandSubbox = "__subbox"
 
 // SensitiveAgentConfigPaths はサブプロセスから不可視化するホームディレクトリ直下の相対パス一覧。
+// コミット署名用の捨て鍵 (~/.ssh/quagent-mark) をエージェントの子プロセスが参照できるよう、
+// .ssh は不可視化の対象に含めない (VM 内にはホスト側の SSH 秘密鍵は持ち込まれない)。
 var SensitiveAgentConfigPaths = []string{
 	".config/opencode",
 	".claude",
 	".claude.json",
 	".gemini",
-	".ssh",
 	".config/quagent",
 }
 

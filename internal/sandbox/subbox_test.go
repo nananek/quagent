@@ -171,3 +171,11 @@ func TestRunSubbox_ForkNamespace(t *testing.T) {
 		t.Fatalf("subbox helper execution failed: %v, output: %s", err, string(out))
 	}
 }
+
+func TestSensitiveAgentConfigPaths_ExcludesSSH(t *testing.T) {
+	for _, p := range SensitiveAgentConfigPaths {
+		if p == ".ssh" {
+			t.Errorf("SensitiveAgentConfigPaths に .ssh を含めてはならない (コミット署名用の捨て鍵 quagent-mark にアクセスできなくなる)")
+		}
+	}
+}
