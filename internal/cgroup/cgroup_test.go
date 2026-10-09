@@ -46,4 +46,19 @@ func TestWrapCommand(t *testing.T) {
 	if !strings.Contains(joined, "unshare -Urm mycmd") {
 		t.Errorf("expected trailing target cmd in %q", joined)
 	}
+
+	// 空 argv
+	if got := WrapCommand(nil, opts); len(got) != 0 {
+		t.Errorf("expected empty result for nil argv, got %v", got)
+	}
+
+	// MemoryOverheadMiB なしのケース
+	optsNoOverhead := Options{MemMiB: 2048}
+	wrappedNoOverhead := WrapCommand(cmd, optsNoOverhead)
+	if Available() {
+		joinedNoOverhead := strings.Join(wrappedNoOverhead, " ")
+		if !strings.Contains(joinedNoOverhead, "MemoryMax=2048M") {
+			t.Errorf("expected MemoryMax=2048M in %q", joinedNoOverhead)
+		}
+	}
 }

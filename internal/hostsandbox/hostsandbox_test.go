@@ -62,7 +62,7 @@ func TestApplyResourceLimits(t *testing.T) {
 func TestApplyProcessPriorities(t *testing.T) {
 	// nice / oom_score_adj の適用呼び出しが安全に行えることを確認
 	ApplyProcessPriorities(0, 0)
-	ApplyProcessPriorities(10, 0)
+	ApplyProcessPriorities(10, 500)
 }
 
 func TestIsolateHomeInNamespace(t *testing.T) {
