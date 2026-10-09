@@ -29,7 +29,7 @@ const usage = `usage:
   quagent image ls                             焼いたベースイメージの一覧
   quagent image rm IMAGE                       ベースイメージを消す
   quagent always ls | rm DOMAIN...              「以後確認しない」ドメインの一覧・取り消し
-  quagent run [--repo DIR] [--image RECIPE] [--cpus N] [--mem MiB] [--agent opencode|claude|agy] [--allow "d1 d2"] [--ssh] [--mount-tmp] [--nested-virt] [--local-head] [--pr-approval[=false]]
+  quagent run [--repo DIR] [--image RECIPE] [--cpus N] [--mem MiB] [--agent opencode|claude|agy] [--allow "d1 d2"] [--mount-tmp] [--nested-virt] [--local-head] [--pr-approval[=false]]
                                                VM を起動し、tmux でエージェントと承認コンソールを開く
 `
 
@@ -54,7 +54,7 @@ func dispatch(args []string) error {
 			return err
 		}
 		return run(runOpts{Repo: l.Repo, Recipe: l.Recipe, CPUs: l.CPUs, MemMiB: l.MemMiB,
-			MountTmp: l.MountTmp, SSH: l.SSH, NestedVirt: l.NestedVirt, LocalHead: l.LocalHead, Agent: l.Agent, PRApproval: l.PRApproval, Interactive: true,
+			MountTmp: l.MountTmp, NestedVirt: l.NestedVirt, LocalHead: l.LocalHead, Agent: l.Agent, PRApproval: l.PRApproval, Interactive: true,
 			AfterSession: afterSession})
 	}
 	switch args[0] {
@@ -178,7 +178,6 @@ func cmdRun(args []string) error {
 	mountTmp := fs.Bool("mount-tmp", false, "repo の .tmp と VM の /work/.tmp (64 MiB) を受け渡す (起動時にコピー、終了時に回収)")
 	localHead := fs.Bool("local-head", false, "checkout 中のブランチをローカルの先頭 (未 push のコミットを含む) で渡す。既定は upstream の先頭")
 	nested := fs.Bool("nested-virt", false, "VM の中で KVM を使えるようにする (VM の中で VM を動かすとき)")
-	useSSH := fs.Bool("ssh", false, "人が ssh で VM に入れるようにする (quagent 自身の操作は vsock)")
 	prApproval := fs.Bool("pr-approval", true, "PR の作成を承認コンソールで確認してから push する (既定: true)")
 	allow := fs.String("allow", "", "egress を許すドメイン (空白区切り)。LLM API は認証プロキシ経由なので不要")
 	_ = fs.Parse(args)
@@ -190,7 +189,6 @@ func cmdRun(args []string) error {
 		MemMiB:      *mem,
 		Allow:       strings.Fields(*allow),
 		Interactive: interactive,
-		SSH:         *useSSH,
 		MountTmp:    *mountTmp,
 		NestedVirt:  *nested,
 		LocalHead:   *localHead,

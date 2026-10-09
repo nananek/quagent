@@ -4,9 +4,8 @@
 // 作って qemu を入れる。qemu が外へ張る socket は子 netns の nftables を通る。
 // ルールは qemu の外側にあるので guest の root からは見えず、改変もできない。
 //
-//	host ── slirp4netns add_hostfwd ──► 子 netns (qemu hostfwd) ──► guest:22
-//	        qemu ── tap0 ──► slirp4netns ──► host (uplink)
-//	        └ nftables (子 netns): DNS と allow set 以外を reject
+//	qemu ── tap0 ──► slirp4netns ──► host (uplink)
+//	└ nftables (子 netns): DNS と allow set 以外を reject
 package netns
 
 import (
@@ -30,9 +29,6 @@ const ChildCommand = "__netns"
 // Spec はランチャに渡す設定。
 type Spec struct {
 	WorkDir string `json:"work_dir"`
-	// SSHPort が 0 でなければ host 127.0.0.1 で待ち受け、子 netns の同ポートへ中継する
-	// (ssh を使うときだけ)。
-	SSHPort int `json:"ssh_port,omitempty"`
 	// DNS は上流のリゾルバ。子 netns 内の DNS サーバーが許可ドメインの問い合わせだけ転送する。
 	DNS string `json:"dns"`
 	// Allow は最初から期限なしで許可するドメインのパターン。
