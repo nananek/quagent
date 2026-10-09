@@ -75,11 +75,18 @@ func (p *webProxy) serveH2Stream(w http.ResponseWriter, r *http.Request, tr *htt
 	}
 	normalizeRequest(r, name, true)
 	removeHopHeaders(r.Header)
-	if p.headers != nil {
-		rules := p.headers.Rules(name)
+	if p.headers != nil || p.hasRelaxations() {
+		rules := p.currentRules(name)
 		if code, reason := rules.CheckRequest(r); code != 0 {
 			p.block(fmt.Sprintf("%s %s (%s)", r.Method, name, reason))
 			http.Error(w, "quagent: "+reason, code)
+			return
+		}
+	}
+	if p.dlp != nil {
+		if detected, pattern, preview, err := p.dlp.InspectRequest(r); err == nil && detected {
+			p.block(fmt.Sprintf("DLP %s %s (%s: %s)", r.Method, name, pattern, preview))
+			http.Error(w, fmt.Sprintf("quagent: DLP violation (%s)", pattern), http.StatusForbidden)
 			return
 		}
 	}
@@ -138,11 +145,18 @@ func (p *webProxy) serveHTTP1(client net.Conn, br *bufio.Reader, dst, name strin
 		if !upgrade {
 			removeHopHeaders(req.Header)
 		}
-		if p.headers != nil {
-			rules := p.headers.Rules(host)
+		if p.headers != nil || p.hasRelaxations() {
+			rules := p.currentRules(host)
 			if code, reason := rules.CheckRequest(req); code != 0 {
 				p.block(fmt.Sprintf("%s %s (%s)", req.Method, host, reason))
 				_ = writeHTTP1Error(client, code, "quagent: "+reason)
+				return
+			}
+		}
+		if p.dlp != nil {
+			if detected, pattern, preview, err := p.dlp.InspectRequest(req); err == nil && detected {
+				p.block(fmt.Sprintf("DLP %s %s (%s: %s)", req.Method, host, pattern, preview))
+				_ = writeHTTP1Error(client, http.StatusForbidden, fmt.Sprintf("quagent: DLP violation (%s)", pattern))
 				return
 			}
 		}
@@ -268,9 +282,15 @@ func (p *webProxy) dialUpstreamH2(dst, sni string) (net.Conn, error) {
 // filter は 1 リクエストのヘッダを header_policy どおりに絞る (ポリシーが無ければ
 // 何もしない)。
 func (p *webProxy) filter(req *http.Request, host string) {
-	if p.headers != nil {
-		p.headers.Rules(host).Apply(req.Header)
+	if p.headers != nil || p.hasRelaxations() {
+		p.currentRules(host).Apply(req.Header)
 	}
+}
+
+func (p *webProxy) hasRelaxations() bool {
+	p.dynamicMu.RLock()
+	defer p.dynamicMu.RUnlock()
+	return len(p.dynamic) > 0
 }
 
 // tunnel は Upgrade (WebSocket など) の要求を上流へ渡し、101 が返れば以後は

@@ -9,12 +9,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nananek/quagent/internal/headerpolicy"
 	"github.com/nananek/quagent/internal/netns"
 )
 
-type fakeApplier struct{ last []netns.Grant }
+type fakeApplier struct {
+	last      []netns.Grant
+	lastRelax map[string]headerpolicy.HostRule
+}
 
 func (f *fakeApplier) SetGrants(gs []netns.Grant) error { f.last = gs; return nil }
+func (f *fakeApplier) SetRelaxations(rules map[string]headerpolicy.HostRule) error {
+	f.lastRelax = rules
+	return nil
+}
 
 func (f *fakeApplier) has(pattern string) (netns.Grant, bool) {
 	for _, g := range f.last {
@@ -341,5 +349,106 @@ func TestRevokeClosesTempGrant(t *testing.T) {
 	// 触っていない方は残る
 	if _, ok := m.Grants()["keep.example"]; !ok {
 		t.Fatal("関係ない許可まで消えた")
+	}
+}
+
+func TestRelaxationLifecycle(t *testing.T) {
+	m, f := newTestManager(t)
+
+	// 1. バリデーションエラー
+	if _, err := m.SubmitRelaxation(Relaxation{Host: ""}, "reason"); err == nil {
+		t.Fatal("空のホスト名が通った")
+	}
+	if _, err := m.SubmitRelaxation(Relaxation{Host: "api.example.com"}, ""); err == nil {
+		t.Fatal("空の理由が通った")
+	}
+
+	// 2. 申請提出
+	req, err := m.SubmitRelaxation(Relaxation{
+		Host:      "api.github.com",
+		Headers:   []string{"Authorization", "X-Custom-*"},
+		Methods:   []string{"POST", "PUT"},
+		AllowBody: true,
+	}, "PR 作成のため")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pending := m.PendingRelaxations()
+	if len(pending) != 1 || pending[0].ID != req.ID {
+		t.Fatalf("pendingRelaxations = %+v", pending)
+	}
+
+	// 3. 待機 (pending 状態)
+	res, err := m.WaitRelaxation(context.Background(), req.ID, 10*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != Pending {
+		t.Fatalf("status = %s, want pending", res.Status)
+	}
+
+	// 4. Once 承認
+	if err := m.DecideRelaxation(req.ID, Decision{Status: Approved, Kind: Once}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err = m.WaitRelaxation(context.Background(), req.ID, 10*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != Approved || res.Kind != Once || res.ExpiresAt == "" {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+
+	active := m.Relaxations()
+	rule, ok := active["api.github.com"]
+	if !ok || !rule.AllowRequestBody || len(rule.AllowedMethods) != 2 {
+		t.Fatalf("active relaxations mismatch: %+v", active)
+	}
+	if f.lastRelax["api.github.com"].AllowRequestBody != true {
+		t.Fatalf("applier did not receive relaxation: %+v", f.lastRelax)
+	}
+
+	// 5. 放棄 (Release)
+	if err := m.ReleaseRelaxation("api.github.com"); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Relaxations()) != 0 {
+		t.Fatalf("relaxations not empty after release: %+v", m.Relaxations())
+	}
+
+	// 6. Session 承認と自動再承認
+	req2, err := m.SubmitRelaxation(Relaxation{
+		Host:      "registry.example.org",
+		Methods:   []string{"POST"},
+		AllowBody: true,
+	}, "Docker push")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DecideRelaxation(req2.ID, Decision{Status: Approved, Kind: Session}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 解放後、再申請すると session 記憶により即時自動承認 (Auto: true)
+	_ = m.ReleaseRelaxation("registry.example.org")
+	req3, err := m.SubmitRelaxation(Relaxation{Host: "registry.example.org"}, "再プッシュ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res3, _ := m.WaitRelaxation(context.Background(), req3.ID, 10*time.Millisecond)
+	if res3.Status != Approved || !res3.Auto {
+		t.Fatalf("expected auto approved session relaxation, got %+v", res3)
+	}
+
+	// 7. 拒否 (Denied)
+	req4, _ := m.SubmitRelaxation(Relaxation{Host: "denied.example.com"}, "test")
+	if err := m.DecideRelaxation(req4.ID, Decision{Status: Denied}); err != nil {
+		t.Fatal(err)
+	}
+	res4, _ := m.WaitRelaxation(context.Background(), req4.ID, 10*time.Millisecond)
+	if res4.Status != Denied {
+		t.Fatalf("status = %s, want denied", res4.Status)
 	}
 }

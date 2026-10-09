@@ -2,6 +2,7 @@ package netns
 
 import (
 	"net"
+	"strings"
 	"testing"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -133,5 +134,97 @@ func TestDNSReply(t *testing.T) {
 	}
 	if respHdr.ID != 42 || !respHdr.Response || respHdr.RCode != dnsmessage.RCodeNameError {
 		t.Errorf("reply header mismatch: %+v", respHdr)
+	}
+}
+
+func TestDetectTunneling(t *testing.T) {
+	tests := []struct {
+		name        string
+		query       string
+		qtype       dnsmessage.Type
+		wantBlocked bool
+		wantReason  string
+	}{
+		{
+			name:        "Normal query",
+			query:       "api.github.com",
+			qtype:       dnsmessage.TypeA,
+			wantBlocked: false,
+		},
+		{
+			name:        "Overly long query (>180 chars)",
+			query:       strings.Repeat("a", 40) + "." + strings.Repeat("b", 40) + "." + strings.Repeat("c", 40) + "." + strings.Repeat("d", 40) + "." + strings.Repeat("e", 30) + ".example.com",
+			qtype:       dnsmessage.TypeA,
+			wantBlocked: true,
+			wantReason:  "クエリ名総長過大",
+		},
+		{
+			name:        "Overly long single label (>45 chars)",
+			query:       "abcdefghijklmnopqrstuvwxyz0123456789abcdefghijkl.example.com",
+			qtype:       dnsmessage.TypeA,
+			wantBlocked: true,
+			wantReason:  "ラベル長過大",
+		},
+		{
+			name:        "Excessive subdomain depth (>6 levels)",
+			query:       "a.b.c.d.e.f.g.example.com",
+			qtype:       dnsmessage.TypeA,
+			wantBlocked: true,
+			wantReason:  "サブドメイン階層過大",
+		},
+		{
+			name:        "High entropy label (>4.2 bits/char, len >= 25)",
+			query:       "v28q9x7zp4m1c5j8k2t6r3y0f.example.com",
+			qtype:       dnsmessage.TypeA,
+			wantBlocked: true,
+			wantReason:  "高エントロピーラベル検知",
+		},
+		{
+			name:        "Suspicious query type TXT with long label",
+			query:       "data-exfiltration-payload-chunk-01.example.com",
+			qtype:       dnsmessage.TypeTXT,
+			wantBlocked: true,
+			wantReason:  "異常なクエリタイプ",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			blocked, reason := detectTunneling(tc.query, tc.qtype)
+			if blocked != tc.wantBlocked {
+				t.Fatalf("detectTunneling(%q) blocked=%v, want %v (reason=%s)", tc.query, blocked, tc.wantBlocked, reason)
+			}
+			if tc.wantBlocked && !strings.Contains(reason, tc.wantReason) {
+				t.Errorf("reason = %q, want substring %q", reason, tc.wantReason)
+			}
+		})
+	}
+}
+
+func TestDNSHandleTunnelingBlocked(t *testing.T) {
+	var blockedName, blockedReason string
+	srv := &dnsServer{
+		allowed: func(name string) bool { return true },
+		onTunnelBlocked: func(name, reason string) {
+			blockedName = name
+			blockedReason = reason
+		},
+	}
+
+	// 高エントロピーなトンネリングクエリ
+	q := buildQuery("v28q9x7zp4m1c5j8k2t6r3y0f.example.com", dnsmessage.TypeA)
+	resp := srv.handle(q, "udp")
+	if resp == nil {
+		t.Fatal("handle returned nil")
+	}
+
+	if got := parseRCode(t, resp); got != dnsmessage.RCodeRefused {
+		t.Fatalf("RCode = %v, want RCodeRefused", got)
+	}
+	if blockedName != "v28q9x7zp4m1c5j8k2t6r3y0f.example.com" {
+		t.Errorf("blockedName = %q", blockedName)
+	}
+	if !strings.Contains(blockedReason, "高エントロピー") {
+		t.Errorf("blockedReason = %q", blockedReason)
 	}
 }

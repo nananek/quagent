@@ -172,7 +172,11 @@ func TestIsolationRWPaths(t *testing.T) {
 func TestMaskSensitiveFallback(t *testing.T) {
 	tmp := t.TempDir()
 	for _, d := range []string{".ssh", ".gnupg", ".aws"} {
-		_ = os.MkdirAll(filepath.Join(tmp, d), 0o700)
+		target := filepath.Join(tmp, d)
+		_ = os.MkdirAll(target, 0o700)
+		t.Cleanup(func() {
+			_ = unix.Unmount(target, unix.MNT_DETACH)
+		})
 	}
 	// マウント権限がなくてもエラーを無視して安全に終了すること
 	_ = maskSensitiveFallback(tmp)

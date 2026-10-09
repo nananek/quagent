@@ -38,6 +38,9 @@ type Config struct {
 	// 設定 (LLM 認証プロキシは対象外。プロバイダごとに必要なヘッダがあるため)。
 	// 有効にすると HTTPS を終端して平文に戻す (使い捨て CA を使う)。未指定なら何もしない。
 	HeaderPolicy *headerpolicy.Policy `json:"header_policy,omitempty"`
+	// ContentGuard は秘密情報・認証情報の漏洩防止 (DLP) 検査の設定。
+	// 未指定なら既定で有効。
+	ContentGuard *ContentGuardPolicy `json:"content_guard,omitempty"`
 	// Sandbox は VM の中のコマンドにかける seccomp / Landlock の設定。
 	// 未指定なら既定 (compat で有効)。
 	Sandbox *sandbox.Policy `json:"sandbox,omitempty"`
@@ -46,6 +49,20 @@ type Config struct {
 	QemuSandbox *QemuSandboxPolicy `json:"qemu_sandbox,omitempty"`
 	// Resources はホスト側の計算資源 (ストレージ、CPU、メモリ、I/O) の保護設定。
 	Resources *ResourcePolicy `json:"resources,omitempty"`
+}
+
+// ContentGuardPolicy は秘密情報・認証情報の漏洩防止 (DLP) 検査の設定。
+type ContentGuardPolicy struct {
+	// Enabled を false にすると Content Guard / DLP 検査を無効化する (既定: true)。
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// IsEnabled は Content Guard が有効かどうかを返す (既定: true)。
+func (p *ContentGuardPolicy) IsEnabled() bool {
+	if p == nil || p.Enabled == nil {
+		return true
+	}
+	return *p.Enabled
 }
 
 // QemuSandboxPolicy はホスト側 QEMU プロセスのサンドボックス設定。

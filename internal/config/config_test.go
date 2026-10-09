@@ -320,3 +320,27 @@ func TestResourcePolicy(t *testing.T) {
 		t.Errorf("expected OOMScoreAdj default 500, got %d", resCustom.OOMScoreAdj)
 	}
 }
+
+func TestContentGuardPolicy(t *testing.T) {
+	var nilPolicy *ContentGuardPolicy
+	if !nilPolicy.IsEnabled() {
+		t.Error("nil policy should be enabled by default")
+	}
+
+	emptyPolicy := &ContentGuardPolicy{}
+	if !emptyPolicy.IsEnabled() {
+		t.Error("empty policy should be enabled by default")
+	}
+
+	f := false
+	disabledPolicy := &ContentGuardPolicy{Enabled: &f}
+	if disabledPolicy.IsEnabled() {
+		t.Error("disabled policy should not be enabled")
+	}
+
+	tr := true
+	enabledPolicy := &ContentGuardPolicy{Enabled: &tr}
+	if !enabledPolicy.IsEnabled() {
+		t.Error("explicitly enabled policy should be enabled")
+	}
+}

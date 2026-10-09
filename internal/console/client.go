@@ -136,7 +136,7 @@ func (u *clientUI) onMsg(m Msg) {
 		if len(u.queue) > 0 {
 			fmt.Print(u.prompt())
 		}
-	case "request", "clip", "prrequest":
+	case "request", "clip", "prrequest", "relaxrequest":
 		for _, q := range u.queue {
 			if q.Type == m.Type && q.ID == m.ID {
 				return
@@ -148,13 +148,15 @@ func (u *clientUI) onMsg(m Msg) {
 		} else {
 			fmt.Println(dim + "(確認待ちがもう 1 件)" + reset)
 		}
-	case "settled", "clipsettled", "prsettled":
+	case "settled", "clipsettled", "prsettled", "relaxsettled":
 		want := "request"
 		switch m.Type {
 		case "clipsettled":
 			want = "clip"
 		case "prsettled":
 			want = "prrequest"
+		case "relaxsettled":
+			want = "relaxrequest"
 		}
 		for i, q := range u.queue {
 			if q.Type != want || q.ID != m.ID {
@@ -172,6 +174,12 @@ func (u *clientUI) onMsg(m Msg) {
 				default:
 					fmt.Printf("PR #%d: 拒否 (push しなかった)\n", m.ID)
 				}
+			case want == "relaxrequest":
+				text := statusText[m.Status]
+				if k, ok := kindText[m.Kind]; ok && m.Status == access.Approved {
+					text += " (" + k + ")"
+				}
+				fmt.Printf("HTTP緩和 #%d: %s\n", m.ID, text)
 			default:
 				text := statusText[m.Status]
 				if k, ok := kindText[m.Kind]; ok && m.Status == access.Approved {
@@ -210,6 +218,23 @@ func (u *clientUI) show() {
 		fmt.Print(u.prompt())
 		u.focus()
 		return
+	case "relaxrequest":
+		fmt.Printf("\n"+bold+cyan+"━━ HTTP緩和申請 #%d ━━"+reset+"\n", r.ID)
+		fmt.Printf(bold+"対象ホスト:"+reset+" %s\n", Sanitize(r.RelaxHost))
+		if len(r.RelaxHeaders) > 0 {
+			fmt.Printf(bold+"許可ヘッダ:"+reset+" %s\n", Sanitize(strings.Join(r.RelaxHeaders, ", ")))
+		}
+		if len(r.RelaxMethods) > 0 {
+			fmt.Printf(bold+"許可メソッド:"+reset+" %s\n", Sanitize(strings.Join(r.RelaxMethods, ", ")))
+		}
+		if r.AllowBody {
+			fmt.Printf(bold + "リクエストボディ:" + reset + " 許可\n")
+		}
+		fmt.Printf(bold+"理由:"+reset+" %s\n", Sanitize(r.Reason))
+		fmt.Printf(dim+"%s までに応答がなければ拒否"+reset+"\n", Sanitize(r.Deadline))
+		fmt.Print(u.prompt())
+		u.focus()
+		return
 	}
 	fmt.Printf("\n"+bold+cyan+"━━ 接続申請 #%d ━━"+reset+"\n", r.ID)
 	fmt.Printf(bold+"理由:"+reset+" %s\n", Sanitize(r.Reason))
@@ -237,6 +262,11 @@ func (u *clientUI) prompt() string {
 		return "[y] コピーする  [n] 拒否 > "
 	case u.queue[0].Type == "prrequest":
 		return "[y] 承認して PR を作る  [n] 拒否 > "
+	case u.queue[0].Type == "relaxrequest":
+		if u.asking {
+			return "エージェントへの質問 (空で取り消し): "
+		}
+		return "[1] 今回のみ (5分)  [2] このセッションでは確認しない\n[d] 拒否  [q] 質問を返す > "
 	case u.asking:
 		return "エージェントへの質問 (空で取り消し): "
 	default:
@@ -312,6 +342,33 @@ func (u *clientUI) onLine(line string) bool {
 			u.decide(Msg{Type: "prdecide", ID: r.ID, Status: access.Denied})
 		default:
 			fmt.Print("y / n のどちらか > ")
+		}
+		return false
+	}
+	if r.Type == "relaxrequest" {
+		if u.asking {
+			if line == "" {
+				u.asking = false
+				fmt.Println("取り消した")
+				u.show()
+				return false
+			}
+			u.asking = false
+			u.decide(Msg{Type: "relaxdecide", ID: r.ID, Status: access.Question, Question: line})
+			return false
+		}
+		switch line {
+		case "1":
+			u.decide(Msg{Type: "relaxdecide", ID: r.ID, Status: access.Approved, Kind: access.Once})
+		case "2":
+			u.decide(Msg{Type: "relaxdecide", ID: r.ID, Status: access.Approved, Kind: access.Session})
+		case "d":
+			u.decide(Msg{Type: "relaxdecide", ID: r.ID, Status: access.Denied})
+		case "q":
+			u.asking = true
+			fmt.Print("エージェントへの質問 (空で取り消し): ")
+		default:
+			fmt.Print("1 / 2 / d / q のどれか > ")
 		}
 		return false
 	}

@@ -12,12 +12,14 @@ import (
 	"time"
 
 	"github.com/nananek/quagent/internal/access"
+	"github.com/nananek/quagent/internal/headerpolicy"
 	"github.com/nananek/quagent/internal/netns"
 )
 
 type noApply struct{}
 
-func (noApply) SetGrants([]netns.Grant) error { return nil }
+func (noApply) SetGrants([]netns.Grant) error                         { return nil }
+func (noApply) SetRelaxations(map[string]headerpolicy.HostRule) error { return nil }
 
 func TestSanitize(t *testing.T) {
 	cases := map[string]string{
@@ -452,4 +454,145 @@ func TestServerTriggerQuit(t *testing.T) {
 
 	// 2 回呼んでも panic しない
 	s.TriggerQuit()
+}
+
+func TestRelaxationConsoleIntegration(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "console-relax.sock")
+	m, err := access.NewManager(noApply{}, filepath.Join(t.TempDir(), "always.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(m, sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	c, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	enc, dec := json.NewEncoder(c), json.NewDecoder(c)
+	if err := enc.Encode(Msg{Type: "ui"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 申請を提出
+	relReq, err := m.SubmitRelaxation(access.Relaxation{
+		Host:      "api.github.com",
+		Headers:   []string{"Authorization"},
+		Methods:   []string{"POST"},
+		AllowBody: true,
+	}, "Testing relaxation in console")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// UI に relaxrequest が届くのを待つ
+	var reqMsg Msg
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		_ = c.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		var msg Msg
+		if err := dec.Decode(&msg); err != nil {
+			continue
+		}
+		if msg.Type == "relaxrequest" && msg.ID == relReq.ID {
+			reqMsg = msg
+			break
+		}
+	}
+	if reqMsg.ID != relReq.ID || reqMsg.RelaxHost != "api.github.com" {
+		t.Fatalf("expected relaxrequest for api.github.com, got: %+v", reqMsg)
+	}
+
+	// UI から relaxdecide (Approved, Once) を返す
+	if err := enc.Encode(Msg{Type: "relaxdecide", ID: reqMsg.ID, Status: access.Approved, Kind: access.Once}); err != nil {
+		t.Fatal(err)
+	}
+
+	// UI に relaxsettled が届くのを待つ
+	var settledMsg Msg
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		_ = c.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		var msg Msg
+		if err := dec.Decode(&msg); err != nil {
+			continue
+		}
+		if msg.Type == "relaxsettled" && msg.ID == relReq.ID {
+			settledMsg = msg
+			break
+		}
+	}
+	if settledMsg.ID != relReq.ID || settledMsg.Status != access.Approved {
+		t.Fatalf("expected relaxsettled approved, got: %+v", settledMsg)
+	}
+}
+
+func TestClientUIRelaxation(t *testing.T) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	ui := &clientUI{enc: enc}
+
+	// 1. relaxrequest の受信
+	ui.onMsg(Msg{
+		Type:         "relaxrequest",
+		ID:           42,
+		RelaxHost:    "api.openai.com",
+		RelaxHeaders: []string{"Authorization"},
+		RelaxMethods: []string{"POST"},
+		AllowBody:    true,
+		Reason:       "call LLM",
+		Deadline:     "12:00:00",
+	})
+	if len(ui.queue) != 1 {
+		t.Fatalf("expected 1 in queue, got %d", len(ui.queue))
+	}
+	if !strings.Contains(ui.prompt(), "今回のみ") {
+		t.Errorf("unexpected prompt: %q", ui.prompt())
+	}
+
+	// 2. "1" (今回のみ) の入力
+	ui.onLine("1")
+	var m Msg
+	_ = json.Unmarshal(buf.Bytes(), &m)
+	if m.Type != "relaxdecide" || m.Status != access.Approved || m.Kind != access.Once {
+		t.Errorf("expected relaxdecide Approved Once, got %+v", m)
+	}
+
+	// 3. relaxsettled の受信
+	ui.onMsg(Msg{Type: "relaxsettled", ID: 42, Status: access.Approved, Kind: access.Once})
+	if len(ui.queue) != 0 {
+		t.Fatalf("expected empty queue after settled, got %d", len(ui.queue))
+	}
+
+	// 4. "2", "d", "q" のテスト
+	ui.onMsg(Msg{Type: "relaxrequest", ID: 43, RelaxHost: "api.slack.com"})
+	buf.Reset()
+	ui.onLine("2")
+	_ = json.Unmarshal(buf.Bytes(), &m)
+	if m.Type != "relaxdecide" || m.Kind != access.Session {
+		t.Errorf("expected session relaxation, got %+v", m)
+	}
+
+	buf.Reset()
+	ui.onLine("d")
+	_ = json.Unmarshal(buf.Bytes(), &m)
+	if m.Type != "relaxdecide" || m.Status != access.Denied {
+		t.Errorf("expected denied relaxation, got %+v", m)
+	}
+
+	buf.Reset()
+	ui.onLine("q")
+	if !ui.asking {
+		t.Error("expected asking state")
+	}
+	ui.onLine("何のエンドポイント?")
+	_ = json.Unmarshal(buf.Bytes(), &m)
+	if m.Type != "relaxdecide" || m.Status != access.Question || m.Question != "何のエンドポイント?" {
+		t.Errorf("expected question relaxation, got %+v", m)
+	}
 }

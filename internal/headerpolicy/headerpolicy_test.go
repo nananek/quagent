@@ -287,3 +287,72 @@ func TestReadRequestParsing(t *testing.T) {
 		})
 	}
 }
+
+func TestRulesWithDynamic(t *testing.T) {
+	policy := &Policy{
+		Enabled:         true,
+		DenyRequestBody: true,
+		AllowedMethods:  []string{"GET"},
+		Hosts: map[string]HostRule{
+			"static.example": {Allow: []string{"X-Static"}},
+		},
+	}
+
+	dynamic := map[string]HostRule{
+		"*.dynamic.example": {
+			Allow:            []string{"X-Dynamic-*"},
+			AllowRequestBody: true,
+			AllowedMethods:   []string{"POST"},
+			UserAgent:        "dynamic-agent",
+		},
+	}
+
+	// 1. static ホスト (動的ルール非該当)
+	rules1 := policy.RulesWithDynamic("static.example", dynamic)
+	h1 := http.Header{}
+	h1.Set("X-Static", "s")
+	h1.Set("X-Dynamic-Test", "d")
+	rules1.Apply(h1)
+	if h1.Get("X-Static") != "s" {
+		t.Errorf("X-Static was dropped")
+	}
+	if h1.Get("X-Dynamic-Test") != "" {
+		t.Errorf("X-Dynamic-Test should be dropped for static.example")
+	}
+	if !rules1.DenyRequestBody() {
+		t.Errorf("DenyRequestBody should be true for static.example")
+	}
+	if !rules1.MethodAllowed("GET") || rules1.MethodAllowed("POST") {
+		t.Errorf("Methods mismatch for static.example")
+	}
+
+	// 2. dynamic ホスト (動的ルール該当)
+	rules2 := policy.RulesWithDynamic("api.dynamic.example", dynamic)
+	h2 := http.Header{}
+	h2.Set("X-Dynamic-Test", "d")
+	h2.Set("User-Agent", "my-agent")
+	rules2.Apply(h2)
+	if h2.Get("X-Dynamic-Test") != "d" {
+		t.Errorf("X-Dynamic-Test was dropped for dynamic host")
+	}
+	if h2.Get("User-Agent") != "dynamic-agent" {
+		t.Errorf("User-Agent = %q, want dynamic-agent", h2.Get("User-Agent"))
+	}
+	if rules2.DenyRequestBody() {
+		t.Errorf("DenyRequestBody should be false for dynamic host")
+	}
+	if !rules2.MethodAllowed("GET") || !rules2.MethodAllowed("POST") {
+		t.Errorf("POST and GET should both be allowed for dynamic host")
+	}
+
+	// 3. MatchHost のテスト
+	if !MatchHost("*.example.com", "sub.example.com") {
+		t.Errorf("MatchHost failed for subdomain")
+	}
+	if MatchHost("*.example.com", "example.com") {
+		t.Errorf("MatchHost should fail for exact apex when wildcard")
+	}
+	if !MatchHost("example.com", "example.com") {
+		t.Errorf("MatchHost failed for exact match")
+	}
+}
