@@ -1,6 +1,6 @@
 # 開発ガイドライン
 
-本書は quagent 本体の開発者向けの開発指針およびコーディング規約です。基本的な使い方については [README](../README.md)、内部アーキテクチャや脅威モデルについては [design.md](design.md)、ベースイメージのレシピ作成については skill `recipe-authoring` を参照してください。
+本書は quagent 本体の開発者向けの開発指針およびコーディング規約です。基本的な使い方については [README](../README.md)、内部アーキテクチャや脅威モデルについては [design.md](design.md)、ベースイメージのレシピ作成については skill `recipe-authoring`、ドキュメントの構成・整理については skill `document-authoring` を参照してください。
 
 ## ビルドとテスト
 
@@ -65,3 +65,4 @@ make build
 - `docs/design.md` … 設計と脅威モデル（隔離機構、アクセス制限、プロキシの内部仕様）。
 - `docs/development.md` … 本書（開発の進め方とコーディング規約）。
 - `.opencode/skills/recipe-authoring/` … ベースイメージレシピの作成規約（エージェントがレシピを追加・変更する際に参照）。
+- `.opencode/skills/document-authoring/` … ドキュメント構成・作成規約（エージェントがドキュメントを作成・整理する際に参照）。
