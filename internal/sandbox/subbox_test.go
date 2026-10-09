@@ -1,6 +1,8 @@
 package sandbox
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -93,6 +95,8 @@ func TestRunSubboxWith_ExecInsideNS(t *testing.T) {
 	}
 }
 
+const exitSkipMountUnsupported = 77
+
 func TestSubboxHelperProcess(t *testing.T) {
 	if os.Getenv("QUAGENT_TEST_SUBBOX_HELPER") != "1" {
 		return
@@ -100,13 +104,26 @@ func TestSubboxHelperProcess(t *testing.T) {
 	// Subprocess called inside new user namespace
 	home := os.Getenv("TEST_HOME")
 	if home != "" {
-		_ = MaskSensitivePaths(home, []string{".gemini", ".claude.json"})
-		entries, _ := os.ReadDir(filepath.Join(home, ".gemini"))
+		if err := MaskSensitivePaths(home, []string{".gemini", ".claude.json"}); err != nil {
+			fmt.Fprintf(os.Stderr, "MaskSensitivePaths failed: %v\n", err)
+			// CI 環境（Docker コンテナ内等）で非特権マウントが制限されている場合
+			if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EINVAL) {
+				os.Exit(exitSkipMountUnsupported)
+			}
+			os.Exit(2)
+		}
+		entries, err := os.ReadDir(filepath.Join(home, ".gemini"))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ReadDir failed: %v\n", err)
+			os.Exit(5)
+		}
 		if len(entries) != 0 {
+			fmt.Fprintf(os.Stderr, "expected empty entries in masked dir, got %d items\n", len(entries))
 			os.Exit(3)
 		}
 		st, err := os.Stat(filepath.Join(home, ".claude.json"))
 		if err != nil || st.Size() != 0 {
+			fmt.Fprintf(os.Stderr, "expected empty claude.json, got size %d (err: %v)\n", st.Size(), err)
 			os.Exit(4)
 		}
 	}
@@ -139,7 +156,18 @@ func TestRunSubbox_ForkNamespace(t *testing.T) {
 			{ContainerID: 0, HostID: os.Getgid(), Size: 1},
 		},
 	}
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("subbox helper execution failed: %v", err)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			if ee.ExitCode() == exitSkipMountUnsupported {
+				t.Skipf("skipping: unprivileged mount is not permitted in this environment (CI/container): %s", strings.TrimSpace(string(out)))
+			}
+		}
+		// ホストで CLONE_NEWUSER 自体が制限されている環境（Ubuntu 24.04 AppArmor 等）
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+			t.Skipf("skipping: unprivileged user namespace is not permitted: %v", err)
+		}
+		t.Fatalf("subbox helper execution failed: %v, output: %s", err, string(out))
 	}
 }

@@ -16,6 +16,10 @@ func MaskSensitivePaths(home string, paths []string) error {
 	if home == "" {
 		return nil
 	}
+	// マウント名前空間が親と共有 (MS_SHARED) されている場合、
+	// 非特権でのマウント伝播が拒否されるため、マウント名前空間をプライベート化する
+	_ = syscall.Mount("none", "/", "", syscall.MS_REC|syscall.MS_PRIVATE, "")
+
 	for _, rel := range paths {
 		if rel == "" {
 			continue
