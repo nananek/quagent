@@ -221,3 +221,27 @@ func TestProbeQemuSeccomp(t *testing.T) {
 	// ProbeQemuSeccomp does not panic whether qemu is installed or not
 	_ = ProbeQemuSeccomp()
 }
+
+func TestQemuArgvThrottling(t *testing.T) {
+	opts := QemuOpts{
+		Disk: "disk.qcow2", Seed: "seed.iso", CPUs: 1, MemMiB: 256, ConsoleLog: "console.log",
+		IOReadBPS: 104857600, IOWriteBPS: 52428800,
+	}
+	argv, err := QemuArgv(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := ""
+	for i, a := range argv {
+		if a == "-drive" && i+1 < len(argv) && strings.Contains(argv[i+1], "id=root") {
+			root = argv[i+1]
+			break
+		}
+	}
+	if !strings.Contains(root, "throttling.bps-read=104857600") {
+		t.Errorf("expected throttling.bps-read in root drive, got %q", root)
+	}
+	if !strings.Contains(root, "throttling.bps-write=52428800") {
+		t.Errorf("expected throttling.bps-write in root drive, got %q", root)
+	}
+}

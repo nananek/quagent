@@ -185,9 +185,14 @@ func (s *Server) serve(c net.Conn) {
 		case "prdecide":
 			s.settlePR(msg.ID, msg.Status)
 		case "quit":
-			s.quitOnce.Do(func() { close(s.Quit) })
+			s.TriggerQuit()
 		}
 	}
+}
+
+// TriggerQuit はコンソールの終了シグナルを発火する。
+func (s *Server) TriggerQuit() {
+	s.quitOnce.Do(func() { close(s.Quit) })
 }
 
 // register は UI として名乗った接続に、溜めたログと承認待ちを送り、以後の通知先にする。

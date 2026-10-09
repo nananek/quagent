@@ -51,6 +51,18 @@ func TestApplyResourceLimits(t *testing.T) {
 	if err := ApplyResourceLimits(); err != nil {
 		t.Fatalf("ApplyResourceLimits() failed: %v", err)
 	}
+	var rlim unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_CORE, &rlim); err != nil {
+		t.Errorf("Getrlimit RLIMIT_CORE failed: %v", err)
+	} else if rlim.Cur != 0 {
+		t.Errorf("RLIMIT_CORE = %d, want 0", rlim.Cur)
+	}
+}
+
+func TestApplyProcessPriorities(t *testing.T) {
+	// nice / oom_score_adj の適用呼び出しが安全に行えることを確認
+	ApplyProcessPriorities(0, 0)
+	ApplyProcessPriorities(10, 500)
 }
 
 func TestIsolateHomeInNamespace(t *testing.T) {

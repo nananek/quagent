@@ -258,3 +258,65 @@ func TestExpandHome(t *testing.T) {
 		t.Errorf("expandHome(relative) = %q, want relative/path", got)
 	}
 }
+
+func TestResourcePolicy(t *testing.T) {
+	// 1. デフォルト値の検証
+	def := DefaultResourcePolicy()
+	if def.Enabled == nil || !*def.Enabled {
+		t.Errorf("expected Enabled true, got %v", def.Enabled)
+	}
+	if def.MinFreeDiskGiB != 10 {
+		t.Errorf("expected MinFreeDiskGiB 10, got %d", def.MinFreeDiskGiB)
+	}
+	if def.HostSafetyFreeGiB != 2 {
+		t.Errorf("expected HostSafetyFreeGiB 2, got %d", def.HostSafetyFreeGiB)
+	}
+	if def.DiskWarnPercent != 80 {
+		t.Errorf("expected DiskWarnPercent 80, got %d", def.DiskWarnPercent)
+	}
+	if def.DiskStopPercent != 95 {
+		t.Errorf("expected DiskStopPercent 95, got %d", def.DiskStopPercent)
+	}
+	if def.Nice != 10 {
+		t.Errorf("expected Nice 10, got %d", def.Nice)
+	}
+	if def.OOMScoreAdj != 500 {
+		t.Errorf("expected OOMScoreAdj 500, got %d", def.OOMScoreAdj)
+	}
+	if def.MaxLogSizeMiB != 50 {
+		t.Errorf("expected MaxLogSizeMiB 50, got %d", def.MaxLogSizeMiB)
+	}
+
+	// 2. nil Config での補完
+	var nilCfg *Config
+	resNil := nilCfg.ResourcePolicyOrDefault()
+	if resNil.MinFreeDiskGiB != 10 {
+		t.Errorf("expected 10 from nil config, got %d", resNil.MinFreeDiskGiB)
+	}
+
+	// 3. 一部指定時の補完
+	f := false
+	customCfg := &Config{
+		Resources: &ResourcePolicy{
+			Enabled:        &f,
+			MinFreeDiskGiB: 20,
+			Nice:           15,
+		},
+	}
+	resCustom := customCfg.ResourcePolicyOrDefault()
+	if resCustom.Enabled == nil || *resCustom.Enabled != false {
+		t.Errorf("expected Enabled false, got %v", resCustom.Enabled)
+	}
+	if resCustom.MinFreeDiskGiB != 20 {
+		t.Errorf("expected MinFreeDiskGiB 20, got %d", resCustom.MinFreeDiskGiB)
+	}
+	if resCustom.HostSafetyFreeGiB != 2 {
+		t.Errorf("expected HostSafetyFreeGiB default 2, got %d", resCustom.HostSafetyFreeGiB)
+	}
+	if resCustom.Nice != 15 {
+		t.Errorf("expected Nice 15, got %d", resCustom.Nice)
+	}
+	if resCustom.OOMScoreAdj != 500 {
+		t.Errorf("expected OOMScoreAdj default 500, got %d", resCustom.OOMScoreAdj)
+	}
+}

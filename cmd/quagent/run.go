@@ -29,6 +29,7 @@ import (
 	"github.com/nananek/quagent/internal/netns"
 	"github.com/nananek/quagent/internal/paths"
 	"github.com/nananek/quagent/internal/pr"
+	"github.com/nananek/quagent/internal/resourcemon"
 	"github.com/nananek/quagent/internal/sandbox"
 	"github.com/nananek/quagent/internal/tlsmitm"
 	"github.com/nananek/quagent/internal/vm"
@@ -185,6 +186,14 @@ func run(o runOpts) error {
 		return err
 	}
 	sweepRuns()
+
+	resPolicy := cfg.ResourcePolicyOrDefault()
+	if resPolicy.Enabled != nil && *resPolicy.Enabled {
+		if err := resourcemon.CheckHostFreeSpace(paths.RunsDir(), resPolicy.MinFreeDiskGiB); err != nil {
+			return err
+		}
+	}
+
 	id := time.Now().Format("20060102-150405")
 	work, err := os.MkdirTemp(paths.RunsDir(), id+"-")
 	if err != nil {
@@ -436,7 +445,9 @@ runcmd:
 		Disk: overlay, Seed: seed, CPUs: o.CPUs, MemMiB: o.MemMiB,
 		ConsoleLog: filepath.Join(work, "console.log"),
 		Netdev:     netdev, VsockCID: g.cid, DataDisks: disks, NestedVirt: o.NestedVirt,
-		UEFI: img.Firmware == "uefi",
+		UEFI:       img.Firmware == "uefi",
+		IOReadBPS:  resPolicy.IOReadBPS,
+		IOWriteBPS: resPolicy.IOWriteBPS,
 	})
 	if err != nil {
 		return err
@@ -449,6 +460,11 @@ runcmd:
 	spec := netns.Spec{
 		WorkDir: work, SSHPort: sshPort, DNS: dns, Allow: o.Allow, QemuArgv: qemu,
 		BaseDisk: base, DataDiskPaths: dataDiskPaths,
+		Nice:              resPolicy.Nice,
+		OOMScoreAdj:       resPolicy.OOMScoreAdj,
+		CPUQuotaPercent:   resPolicy.CPUQuotaPercent,
+		MemMiB:            o.MemMiB,
+		MemoryOverheadMiB: resPolicy.MemoryOverheadMiB,
 	}
 	if cfg.QemuSandbox != nil && cfg.QemuSandbox.Enabled != nil && !*cfg.QemuSandbox.Enabled {
 		spec.DisableHostSandbox = true
@@ -496,6 +512,29 @@ runcmd:
 	con.Clipboard, err = clipboardSink(cfg.Clipboard)
 	if err != nil {
 		return err
+	}
+	if resPolicy.Enabled != nil && *resPolicy.Enabled {
+		monCtx, monCancel := context.WithCancel(context.Background())
+		defer monCancel()
+		mon := resourcemon.New(resourcemon.Config{
+			WorkDir:           work,
+			OverlayPath:       overlay,
+			BaseDiskPath:      base,
+			HostSafetyFreeGiB: resPolicy.HostSafetyFreeGiB,
+			DiskWarnPercent:   resPolicy.DiskWarnPercent,
+			DiskStopPercent:   resPolicy.DiskStopPercent,
+			MaxLogSizeMiB:     resPolicy.MaxLogSizeMiB,
+		})
+		mon.OnAlert = func(msg string) {
+			con.Log("[警告] " + msg)
+		}
+		mon.OnStop = func(reason string) {
+			con.Log("[リソース保護停止] " + reason)
+			logger.Printf("resource limit stop: %s", reason)
+			con.TriggerQuit()
+			l.Stop()
+		}
+		go mon.Start(monCtx)
 	}
 	if agyEgress != nil {
 		agyEgress.mgr = mgr

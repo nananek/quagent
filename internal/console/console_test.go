@@ -429,3 +429,27 @@ func TestClientUIOnMsg(t *testing.T) {
 		t.Fatalf("expected queue to be empty after settled, got %d", len(ui.queue))
 	}
 }
+
+func TestServerTriggerQuit(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "console-quit.sock")
+	m, err := access.NewManager(noApply{}, filepath.Join(t.TempDir(), "always.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(m, sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	s.TriggerQuit()
+	select {
+	case <-s.Quit:
+		// OK
+	default:
+		t.Fatal("expected s.Quit channel to be closed by TriggerQuit")
+	}
+
+	// 2 回呼んでも panic しない
+	s.TriggerQuit()
+}

@@ -17,6 +17,7 @@ import (
 	"github.com/nananek/quagent/internal/hostsvc"
 	"github.com/nananek/quagent/internal/netns"
 	"github.com/nananek/quagent/internal/paths"
+	"github.com/nananek/quagent/internal/resourcemon"
 )
 
 func TestNormalizePassthrough(t *testing.T) {
@@ -380,5 +381,25 @@ func TestServerOnRejectLogging(t *testing.T) {
 
 	if !strings.Contains(buf.String(), "reject: test reject (remote=127.0.0.1:12345)") {
 		t.Fatalf("unexpected log output: %q", buf.String())
+	}
+}
+
+func TestResourcePolicyIntegration(t *testing.T) {
+	cfg := &config.Config{
+		Resources: &config.ResourcePolicy{
+			MinFreeDiskGiB:  1,
+			DiskWarnPercent: 80,
+			DiskStopPercent: 95,
+			Nice:            10,
+		},
+	}
+	policy := cfg.ResourcePolicyOrDefault()
+	if policy.MinFreeDiskGiB != 1 {
+		t.Errorf("expected MinFreeDiskGiB 1, got %d", policy.MinFreeDiskGiB)
+	}
+
+	tmp := t.TempDir()
+	if err := resourcemon.CheckHostFreeSpace(tmp, policy.MinFreeDiskGiB); err != nil {
+		t.Fatalf("unexpected CheckHostFreeSpace error: %v", err)
 	}
 }
