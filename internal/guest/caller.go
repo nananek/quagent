@@ -35,13 +35,20 @@ func GetSessionPID() int {
 	return sessionPID
 }
 
+// CallerPIDFunc は CallerPID の実体。テストで差し替え可能。
+var CallerPIDFunc = defaultCallerPID
+
 // CallerPID はローカル TCP 接続の接続元プロセスの PID を特定する。
 func CallerPID(remoteAddr net.Addr) (int, error) {
+	return CallerPIDFunc(remoteAddr)
+}
+
+func defaultCallerPID(remoteAddr net.Addr) (int, error) {
 	tcpAddr, ok := remoteAddr.(*net.TCPAddr)
 	if !ok {
 		return 0, fmt.Errorf("TCPAddr ではない: %v", remoteAddr)
 	}
-	inode, err := findInodeForPort(procNetTCPPath, tcpAddr.Port)
+	inode, err := findInodeForPortExt(procNetTCPPath, tcpAddr.Port, 0, true)
 	if err != nil {
 		return 0, err
 	}
@@ -50,6 +57,12 @@ func CallerPID(remoteAddr net.Addr) (int, error) {
 
 // findInodeForPort は /proc/net/tcp から指定ポート番号のソケット inode を探す。
 func findInodeForPort(tcpFile string, targetPort int) (uint64, error) {
+	return findInodeForPortExt(tcpFile, targetPort, 0, false)
+}
+
+// findInodeForPortExt は /proc/net/tcp から指定ポートおよび任意のリモートポートのソケット inode を探す。
+// onlyEstablished が true の場合、ソケット状態が ESTABLISHED (01) であることを検証する。
+func findInodeForPortExt(tcpFile string, targetPort int, targetRemPort int, onlyEstablished bool) (uint64, error) {
 	f, err := os.Open(tcpFile)
 	if err != nil {
 		return 0, err
@@ -65,6 +78,10 @@ func findInodeForPort(tcpFile string, targetPort int) (uint64, error) {
 		if len(fields) < 10 {
 			continue
 		}
+		// ソケット状態が TCP_ESTABLISHED (01) であることを検証 (TIME_WAIT, CLOSE, LISTEN等を除外)
+		if onlyEstablished && fields[3] != "01" {
+			continue
+		}
 		localAddr := fields[1]
 		idx := strings.IndexByte(localAddr, ':')
 		if idx < 0 {
@@ -75,13 +92,25 @@ func findInodeForPort(tcpFile string, targetPort int) (uint64, error) {
 		if err != nil {
 			continue
 		}
-		if int(port) == targetPort {
-			inode, err := strconv.ParseUint(fields[9], 10, 64)
-			if err != nil {
-				continue
-			}
-			return inode, nil
+		if int(port) != targetPort {
+			continue
 		}
+		if targetRemPort > 0 {
+			remAddr := fields[2]
+			ridx := strings.IndexByte(remAddr, ':')
+			if ridx >= 0 {
+				remPortHex := remAddr[ridx+1:]
+				rport, err := strconv.ParseUint(remPortHex, 16, 16)
+				if err == nil && int(rport) != targetRemPort {
+					continue
+				}
+			}
+		}
+		inode, err := strconv.ParseUint(fields[9], 10, 64)
+		if err != nil {
+			continue
+		}
+		return inode, nil
 	}
 	return 0, fmt.Errorf("ポート %d のソケットが見つからない", targetPort)
 }
@@ -143,6 +172,15 @@ func ProcessComm(dir string, pid int) (string, error) {
 	return strings.TrimSpace(string(b)), nil
 }
 
+// ProcessExe は /proc/<pid>/exe のシンボリックリンク先から実行ファイルのパスを取得する。
+func ProcessExe(dir string, pid int) (string, error) {
+	link, err := os.Readlink(filepath.Join(dir, strconv.Itoa(pid), "exe"))
+	if err != nil {
+		return "", err
+	}
+	return link, nil
+}
+
 func isAgentProcess(comm string) bool {
 	switch comm {
 	case "opencode", "claude", "agy":
@@ -167,7 +205,9 @@ func IsAllowedCaller(dir string, callerPID int, sessionLeaderPID int) bool {
 	isChildOfAgent := false
 	reachesLeader := false
 
-	for curr > 1 && curr != sessionLeaderPID {
+	// 無限ループ・循環参照の防止 (最大 64 階層)
+	const maxDepth = 64
+	for depth := 0; depth < maxDepth && curr > 1 && curr != sessionLeaderPID; depth++ {
 		ppid, err := ParentPID(dir, curr)
 		if err != nil {
 			return false

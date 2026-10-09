@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mdlayher/vsock"
 )
@@ -248,4 +249,58 @@ func TestServeMaxConns(t *testing.T) {
 		_ = c.Close()
 	}
 	_ = c65a.Close()
+}
+
+func TestExitErrorString(t *testing.T) {
+	ee := &ExitError{Code: 42}
+	if got := ee.Error(); got != "終了コード 42" {
+		t.Errorf("ee.Error() = %q, want '終了コード 42'", got)
+	}
+}
+
+func TestWaitReadySuccess(t *testing.T) {
+	origDial := Dial
+	defer func() { Dial = origDial }()
+
+	Dial = func(uint32) (net.Conn, error) {
+		c1, _ := net.Pipe()
+		return c1, nil
+	}
+
+	if err := WaitReady(3, time.Second, nil); err != nil {
+		t.Fatalf("WaitReady failed: %v", err)
+	}
+}
+
+func TestWaitReadyFailFunc(t *testing.T) {
+	origDial := Dial
+	defer func() { Dial = origDial }()
+	Dial = func(uint32) (net.Conn, error) {
+		return nil, errors.New("not ready")
+	}
+
+	failErr := errors.New("vm died")
+	err := WaitReady(3, time.Second, func() error {
+		return failErr
+	})
+	if !errors.Is(err, failErr) {
+		t.Fatalf("expected failErr, got: %v", err)
+	}
+}
+
+func TestWaitReadyTimeout(t *testing.T) {
+	origDial := Dial
+	defer func() { Dial = origDial }()
+	Dial = func(uint32) (net.Conn, error) {
+		return nil, errors.New("not ready")
+	}
+
+	err := WaitReady(3, 20*time.Millisecond, nil)
+	if err == nil || !strings.Contains(err.Error(), "接続できなかった") {
+		t.Fatalf("expected timeout error, got: %v", err)
+	}
+}
+
+func TestAvailable(t *testing.T) {
+	_ = Available()
 }

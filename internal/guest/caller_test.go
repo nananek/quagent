@@ -229,3 +229,246 @@ func TestSetGetSessionPID(t *testing.T) {
 		t.Errorf("GetSessionPID() = %d, want 0", got)
 	}
 }
+
+func TestFindInodeForPortExt(t *testing.T) {
+	tmp := t.TempDir()
+	tcpPath := filepath.Join(tmp, "tcp")
+	content := `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:1B9E 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 12345 2 0000000000000000 99 0 0 10 0
+   1: short line
+   2: 0100007F:XXXX 00000000:0000 01 00000000:00000000 00:00000000 00000000  1000        0 22222 2 0000000000000000 99 0 0 10 0
+   3: no_colon 00000000:0000 01 00000000:00000000 00:00000000 00000000  1000        0 33333 2 0000000000000000 99 0 0 10 0
+   4: 0100007F:D431 0100007F:1B9E 01 00000000:00000000 00:00000000 00000000  1000        0 67890 2 0000000000000000 99 0 0 10 0
+   5: 0100007F:D432 0100007F:1B9F 01 00000000:00000000 00:00000000 00000000  1000        0 badinode 2 0000000000000000 99 0 0 10 0
+   6: 0100007F:D433 0100007F:1B9E 06 00000000:00000000 00:00000000 00000000  1000        0 77777 2 0000000000000000 99 0 0 10 0
+`
+	if err := os.WriteFile(tcpPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. onlyEstablished = true のとき、ESTABLISHED (01) のみマッチ
+	inode, err := findInodeForPortExt(tcpPath, 54321, 0, true)
+	if err != nil || inode != 67890 {
+		t.Fatalf("expected inode 67890, got %d, err: %v", inode, err)
+	}
+
+	// 2. onlyEstablished = true のとき、TIME_WAIT (06) は除外される
+	_, err = findInodeForPortExt(tcpPath, 54323, 0, true)
+	if err == nil {
+		t.Error("expected error for non-established socket when onlyEstablished=true")
+	}
+
+	// 3. targetRemPort の一致
+	inode, err = findInodeForPortExt(tcpPath, 54321, 7070, true)
+	if err != nil || inode != 67890 {
+		t.Fatalf("expected inode 67890 with matching remPort, got %d, err: %v", inode, err)
+	}
+
+	// 4. targetRemPort の不一致
+	_, err = findInodeForPortExt(tcpPath, 54321, 9999, true)
+	if err == nil {
+		t.Error("expected error for mismatched remPort")
+	}
+
+	// 5. 存在しないファイル
+	_, err = findInodeForPortExt(filepath.Join(tmp, "nonexistent"), 54321, 0, true)
+	if err == nil {
+		t.Error("expected error for non-existent file")
+	}
+
+	// 6. 空ファイル
+	emptyPath := filepath.Join(tmp, "empty")
+	_ = os.WriteFile(emptyPath, []byte(""), 0o644)
+	_, err = findInodeForPortExt(emptyPath, 54321, 0, true)
+	if err == nil {
+		t.Error("expected error for empty file")
+	}
+}
+
+func TestFindPIDForInode_Edges(t *testing.T) {
+	tmp := t.TempDir()
+
+	// 1. 存在しないディレクトリ
+	_, err := findPIDForInode(filepath.Join(tmp, "nonexistent"), 12345)
+	if err == nil {
+		t.Error("expected error for non-existent dir")
+	}
+
+	// 2. 数字以外のエントリ (self, sys 等)
+	_ = os.MkdirAll(filepath.Join(tmp, "self"), 0o755)
+	_ = os.MkdirAll(filepath.Join(tmp, "sys"), 0o755)
+
+	// 3. fd ディレクトリが存在しない PID ディレクトリ
+	_ = os.MkdirAll(filepath.Join(tmp, "101"), 0o755)
+
+	// 4. socket 以外のリンクを持つ PID ディレクトリ
+	pid102FD := filepath.Join(tmp, "102", "fd")
+	_ = os.MkdirAll(pid102FD, 0o755)
+	_ = os.Symlink("/dev/null", filepath.Join(pid102FD, "0"))
+	_ = os.Symlink("pipe:[9999]", filepath.Join(pid102FD, "1"))
+
+	_, err = findPIDForInode(tmp, 12345)
+	if err == nil {
+		t.Error("expected error when inode not found")
+	}
+}
+
+func TestParentPID_Edges(t *testing.T) {
+	tmp := t.TempDir()
+
+	// 1. 存在しない PID
+	_, err := ParentPID(tmp, 9999)
+	if err == nil {
+		t.Error("expected error for non-existent PID")
+	}
+
+	// 2. 括弧が閉じられていない stat
+	pDir1 := filepath.Join(tmp, "1")
+	_ = os.MkdirAll(pDir1, 0o755)
+	_ = os.WriteFile(filepath.Join(pDir1, "stat"), []byte("1 (unclosed_name S 0 0\n"), 0o644)
+	_, err = ParentPID(tmp, 1)
+	if err == nil {
+		t.Error("expected error for unclosed comm in stat")
+	}
+
+	// 3. フィールド不足の stat
+	pDir2 := filepath.Join(tmp, "2")
+	_ = os.MkdirAll(pDir2, 0o755)
+	_ = os.WriteFile(filepath.Join(pDir2, "stat"), []byte("2 (name) \n"), 0o644)
+	_, err = ParentPID(tmp, 2)
+	if err == nil {
+		t.Error("expected error for insufficient fields in stat")
+	}
+}
+
+func TestProcessComm_Edges(t *testing.T) {
+	tmp := t.TempDir()
+	_, err := ProcessComm(tmp, 9999)
+	if err == nil {
+		t.Error("expected error for non-existent comm")
+	}
+}
+
+func TestProcessExe(t *testing.T) {
+	tmp := t.TempDir()
+	pDir := filepath.Join(tmp, "100")
+	_ = os.MkdirAll(pDir, 0o755)
+	exePath := filepath.Join(tmp, "mybin")
+	_ = os.WriteFile(exePath, []byte("#!/bin/sh\n"), 0o755)
+	_ = os.Symlink(exePath, filepath.Join(pDir, "exe"))
+
+	got, err := ProcessExe(tmp, 100)
+	if err != nil {
+		t.Fatalf("ProcessExe failed: %v", err)
+	}
+	if got != exePath {
+		t.Errorf("ProcessExe got %q, want %q", got, exePath)
+	}
+
+	// 存在しない PID
+	_, err = ProcessExe(tmp, 9999)
+	if err == nil {
+		t.Error("expected error for non-existent exe")
+	}
+}
+
+func TestIsAllowedCaller_AdvancedCases(t *testing.T) {
+	tmp := t.TempDir()
+
+	makeProc := func(pid int, comm string, ppid int) {
+		pDir := filepath.Join(tmp, fmt.Sprint(pid))
+		_ = os.MkdirAll(pDir, 0o755)
+		_ = os.WriteFile(filepath.Join(pDir, "stat"), []byte(fmt.Sprintf("%d (%s) S %d 100 0\n", pid, comm, ppid)), 0o644)
+		_ = os.WriteFile(filepath.Join(pDir, "comm"), []byte(comm+"\n"), 0o644)
+	}
+
+	leader := 50
+	makeProc(leader, "bash", 1)
+
+	// 1. callerPID <= 0 の拒否
+	if IsAllowedCaller(tmp, 0, leader) || IsAllowedCaller(tmp, -1, leader) {
+		t.Error("expected callerPID <= 0 to be denied")
+	}
+
+	// 2. セッションリーダー自身 -> 即時許可
+	if !IsAllowedCaller(tmp, leader, leader) {
+		t.Error("expected session leader itself to be allowed")
+	}
+
+	// 3. opencode 本体と claude 本体
+	makeProc(60, "opencode", leader)
+	makeProc(70, "claude", leader)
+	if !IsAllowedCaller(tmp, 60, leader) {
+		t.Error("expected opencode to be allowed")
+	}
+	if !IsAllowedCaller(tmp, 70, leader) {
+		t.Error("expected claude to be allowed")
+	}
+
+	// 4. 多段子孫プロセス (agy -> bash -> python -> pytest: 拒否)
+	makeProc(80, "agy", leader)
+	makeProc(81, "bash", 80)
+	makeProc(82, "python", 81)
+	makeProc(83, "pytest", 82)
+	if IsAllowedCaller(tmp, 83, leader) {
+		t.Error("expected deeply nested test process under agent to be denied")
+	}
+
+	// 5. セッションリーダー直下だが未許可のコマンド (curl, python 等)
+	makeProc(90, "curl", leader)
+	if IsAllowedCaller(tmp, 90, leader) {
+		t.Error("expected curl under session leader to be denied")
+	}
+
+	// 6. 親を辿る途中で stat が読めなくなった場合 (安全に拒否)
+	makeProc(95, "agy", 94) // PPID 94 は存在しない
+	if IsAllowedCaller(tmp, 95, leader) {
+		t.Error("expected denial when parent stat is missing")
+	}
+
+	// 7. 循環参照プロセスツリー (PID 101 <-> PID 102)
+	makeProc(101, "loop1", 102)
+	makeProc(102, "loop2", 101)
+	if IsAllowedCaller(tmp, 101, leader) {
+		t.Error("expected denial on circular parent loop without hanging")
+	}
+}
+
+func TestDefaultCallerPID(t *testing.T) {
+	tmp := t.TempDir()
+	tcpFile := filepath.Join(tmp, "tcp")
+	content := `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:D431 0100007F:1B9E 01 00000000:00000000 00:00000000 00000000  1000        0 55555 2 0000000000000000 99 0 0 10 0
+`
+	if err := os.WriteFile(tcpFile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// proc/500/fd/3 -> socket:[55555]
+	fdDir := filepath.Join(tmp, "500", "fd")
+	_ = os.MkdirAll(fdDir, 0o755)
+	_ = os.Symlink("socket:[55555]", filepath.Join(fdDir, "3"))
+
+	origTCP := procNetTCPPath
+	origProc := procDir
+	procNetTCPPath = tcpFile
+	procDir = tmp
+	defer func() {
+		procNetTCPPath = origTCP
+		procDir = origProc
+	}()
+
+	pid, err := defaultCallerPID(&net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 54321})
+	if err != nil {
+		t.Fatalf("defaultCallerPID failed: %v", err)
+	}
+	if pid != 500 {
+		t.Errorf("got pid %d, want 500", pid)
+	}
+
+	// ソケットが見つからないポート
+	_, err = defaultCallerPID(&net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9999})
+	if err == nil {
+		t.Error("expected error for non-existent port")
+	}
+}
