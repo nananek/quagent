@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nananek/quagent/internal/contentguard"
 	"github.com/nananek/quagent/internal/hostsandbox"
 	"github.com/nananek/quagent/internal/tlsmitm"
 )
@@ -176,29 +177,16 @@ func (c *child) run() error {
 	}
 	eg := newEgress(c.nft, c.events, initial)
 
-	// 親からの指示 (許可の差し替え) を早くから受ける。
-	stdinClosed := make(chan error, 1)
-	go func() {
-		err := readControl(os.Stdin, func(ctl control) {
-			eg.setGrants(ctl.Grants)
-			c.events.send(Event{Applied: ctl.Seq})
-		})
-		stdinClosed <- err
-	}()
-
-	// 3. 子 netns 内の DNS サーバー (上流へは host の網から出る)
-	pc, tl, err := listenInNetns(c.holder.Process.Pid, "127.0.0.1:53")
-	if err != nil {
-		return fmt.Errorf("DNS の待ち受けに失敗: %w", err)
-	}
-	dns := &dnsServer{sem: make(chan struct{}, 64), upstream: c.spec.DNS, allowed: eg.allowed, onAnswer: eg.onAnswer, onDenied: eg.denied}
-	go dns.serveUDP(pc)
-	go dns.serveTCP(tl)
-
-	// 3.5 透明プロキシ: 許可した IP への Web 接続の SNI/Host を確かめる。nft の
+	// 3. 透明プロキシ: 許可した IP への Web 接続の SNI/Host を確かめる。nft の
 	// redirect 先が無いと接続が弾かれるので、qemu を起動する前に待ち受ける。
 	// TerminateHTTPS なら TLS を終端し、平文に戻した HTTP のヘッダを絞る。
-	web := newWebProxy(c.holder.Process.Pid, eg.allowed, eg.webBlocked)
+	web := newWebProxy(c.holder.Process.Pid, eg.allowed, func(reason string) {
+		if strings.HasPrefix(reason, "DLP ") {
+			c.events.send(Event{DLPBlocked: reason})
+		} else {
+			c.events.send(Event{Blocked: reason})
+		}
+	})
 	if c.spec.TerminateHTTPS {
 		ca, err := tlsmitm.FromPEM([]byte(c.spec.CACertPEM), []byte(c.spec.CAKeyPEM))
 		if err != nil {
@@ -210,6 +198,41 @@ func (c *child) run() error {
 	if c.spec.HeaderPolicy != nil && c.spec.HeaderPolicy.Enabled {
 		web.headers = c.spec.HeaderPolicy
 	}
+	if c.spec.DLPEnabled {
+		web.dlp = contentguard.NewDLPScanner()
+	}
+
+	// 親からの指示 (許可の差し替え、動的緩和) を受ける。
+	stdinClosed := make(chan error, 1)
+	go func() {
+		err := readControl(os.Stdin, func(ctl control) {
+			eg.setGrants(ctl.Grants)
+			if ctl.Relaxations != nil {
+				web.setRelaxations(ctl.Relaxations)
+			}
+			c.events.send(Event{Applied: ctl.Seq})
+		})
+		stdinClosed <- err
+	}()
+
+	// 3.5 子 netns 内の DNS サーバー (上流へは host の網から出る)
+	pc, tl, err := listenInNetns(c.holder.Process.Pid, "127.0.0.1:53")
+	if err != nil {
+		return fmt.Errorf("DNS の待ち受けに失敗: %w", err)
+	}
+	dns := &dnsServer{
+		sem:      make(chan struct{}, 64),
+		upstream: c.spec.DNS,
+		allowed:  eg.allowed,
+		onAnswer: eg.onAnswer,
+		onDenied: eg.denied,
+		onTunnelBlocked: func(name, reason string) {
+			c.events.send(Event{TunnelBlocked: fmt.Sprintf("%s (%s)", name, reason)})
+		},
+	}
+	go dns.serveUDP(pc)
+	go dns.serveTCP(tl)
+
 	for _, lp := range []struct {
 		port int
 		tls  bool

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nananek/quagent/internal/headerpolicy"
 )
 
 // Grant は 1 つの接続許可。Pattern は "example.com" (完全一致) か
@@ -26,8 +28,9 @@ func (g Grant) active(now time.Time) bool {
 
 // 親 -> ランチャ (stdin、1 行 1 JSON)
 type control struct {
-	Seq    int     `json:"seq"`
-	Grants []Grant `json:"grants"`
+	Seq         int                              `json:"seq"`
+	Grants      []Grant                          `json:"grants"`
+	Relaxations map[string]headerpolicy.HostRule `json:"relaxations,omitempty"`
 }
 
 // Event はランチャ -> 親 (stdout、1 行 1 JSON)。
@@ -38,6 +41,10 @@ type Event struct {
 	Denied string `json:"denied,omitempty"`
 	// Blocked は透明プロキシが許可外の名前 (SNI/Host) で止めた Web 接続。
 	Blocked string `json:"blocked,omitempty"`
+	// TunnelBlocked は DNS トンネリング検知で遮断したドメイン。
+	TunnelBlocked string `json:"tunnel_blocked,omitempty"`
+	// DLPBlocked は DLP 検査で遮断した通信。
+	DLPBlocked string `json:"dlp_blocked,omitempty"`
 }
 
 // egress は許可の状態と nft の allow set を同期させる。

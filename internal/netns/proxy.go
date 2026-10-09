@@ -13,9 +13,11 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/nananek/quagent/internal/contentguard"
 	"github.com/nananek/quagent/internal/headerpolicy"
 	"github.com/nananek/quagent/internal/tlsmitm"
 	"golang.org/x/sys/unix"
@@ -45,6 +47,11 @@ type webProxy struct {
 	// headers が nil でなければ、転送するリクエストのヘッダを絞り User-Agent を固定する
 	// (終端した HTTPS と、平文の HTTP が対象。素通しする接続の中身は見えない)。
 	headers *headerpolicy.Policy
+	// dlp が nil でなければ、リクエストボディやヘッダの機密情報を検査する。
+	dlp *contentguard.DLPScanner
+	// dynamicMu と dynamic はエージェントからの動的緩和ルール。
+	dynamicMu sync.RWMutex
+	dynamic   map[string]headerpolicy.HostRule
 	// upstreamRoots は張り直す先の証明書を検証するルート。nil なら system。
 	upstreamRoots *x509.CertPool
 	// dial は子 netns の中に外向き接続を張る。既定は dialInNetns (テストで差し替える)。
@@ -69,10 +76,27 @@ const (
 
 func newWebProxy(holderPid int, allowed func(name string) bool, blocked func(reason string)) *webProxy {
 	return &webProxy{holderPid: holderPid, allowed: allowed, blocked: blocked,
-		sem: make(chan struct{}, proxyMaxConns),
+		sem:     make(chan struct{}, proxyMaxConns),
+		dynamic: make(map[string]headerpolicy.HostRule),
 		dial: func(network, addr string, mark int) (net.Conn, error) {
 			return dialInNetns(holderPid, network, addr, mark)
 		}}
+}
+
+func (p *webProxy) setRelaxations(rules map[string]headerpolicy.HostRule) {
+	p.dynamicMu.Lock()
+	defer p.dynamicMu.Unlock()
+	p.dynamic = make(map[string]headerpolicy.HostRule, len(rules))
+	for k, v := range rules {
+		p.dynamic[k] = v
+	}
+}
+
+func (p *webProxy) currentRules(host string) headerpolicy.Rules {
+	p.dynamicMu.RLock()
+	dynamic := p.dynamic
+	p.dynamicMu.RUnlock()
+	return p.headers.RulesWithDynamic(host, dynamic)
 }
 
 // serve は listener で受けた接続を点検する。tls なら 443 の接続として SNI を、

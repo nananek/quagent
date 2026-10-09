@@ -44,6 +44,8 @@ type Spec struct {
 	// HeaderPolicy が有効なら、終端した (または平文の) リクエストのヘッダを絞り、
 	// User-Agent を固定する。
 	HeaderPolicy *headerpolicy.Policy `json:"header_policy,omitempty"`
+	// DLPEnabled は機密情報漏洩を検知・阻止するコンテンツ検査を有効化する。
+	DLPEnabled bool `json:"dlp_enabled,omitempty"`
 	// BaseDisk は backing file (base.qcow2) のパス。ホスト側ディレクトリ隔離で
 	// 読み取り許可に含めるために使う。
 	BaseDisk string `json:"base_disk,omitempty"`
@@ -77,10 +79,16 @@ type Launcher struct {
 	Denied chan string
 	// Blocked には透明プロキシが許可外の名前 (SNI/Host) で止めた Web 接続が流れる。
 	Blocked chan string
+	// TunnelBlocked には DNS トンネリング検知で遮断したドメインが流れる。
+	TunnelBlocked chan string
+	// DLPBlocked には DLP 検査で遮断した通信が流れる。
+	DLPBlocked chan string
 
-	mu      sync.Mutex
-	seq     int
-	waiters map[int]chan struct{}
+	mu              sync.Mutex
+	seq             int
+	waiters         map[int]chan struct{}
+	lastGrants      []Grant
+	lastRelaxations map[string]headerpolicy.HostRule
 }
 
 func (s Spec) file(name string) string { return filepath.Join(s.WorkDir, name) }
@@ -130,7 +138,12 @@ func Start(spec Spec) (*Launcher, error) {
 	}
 	l := &Launcher{
 		spec: spec, cmd: cmd, stdin: stdin, done: make(chan error, 1),
-		Denied: make(chan string, 64), Blocked: make(chan string, 64), waiters: map[int]chan struct{}{},
+		Denied:          make(chan string, 64),
+		Blocked:         make(chan string, 64),
+		TunnelBlocked:   make(chan string, 64),
+		DLPBlocked:      make(chan string, 64),
+		waiters:         map[int]chan struct{}{},
+		lastRelaxations: map[string]headerpolicy.HostRule{},
 	}
 	evDone := make(chan struct{})
 	go func() {
@@ -172,16 +185,27 @@ func (l *Launcher) handleEvent(ev Event) {
 		default:
 		}
 	}
+	if ev.TunnelBlocked != "" {
+		select {
+		case l.TunnelBlocked <- ev.TunnelBlocked:
+		default:
+		}
+	}
+	if ev.DLPBlocked != "" {
+		select {
+		case l.DLPBlocked <- ev.DLPBlocked:
+		default:
+		}
+	}
 }
 
-// SetGrants は許可の一覧を丸ごと差し替え、nft に反映されるまで待つ。
-func (l *Launcher) SetGrants(gs []Grant) error {
+func (l *Launcher) sendControl(gs []Grant, relax map[string]headerpolicy.HostRule) error {
 	l.mu.Lock()
 	l.seq++
 	seq := l.seq
 	ch := make(chan struct{})
 	l.waiters[seq] = ch
-	b, err := json.Marshal(control{Seq: seq, Grants: gs})
+	b, err := json.Marshal(control{Seq: seq, Grants: gs, Relaxations: relax})
 	if err == nil {
 		_, err = l.stdin.Write(append(b, '\n'))
 	}
@@ -195,6 +219,24 @@ func (l *Launcher) SetGrants(gs []Grant) error {
 	case <-time.After(10 * time.Second):
 		return fmt.Errorf("ランチャが許可の反映に応答しない")
 	}
+}
+
+// SetGrants は許可の一覧を丸ごと差し替え、nft に反映されるまで待つ。
+func (l *Launcher) SetGrants(gs []Grant) error {
+	l.mu.Lock()
+	l.lastGrants = gs
+	relax := l.lastRelaxations
+	l.mu.Unlock()
+	return l.sendControl(gs, relax)
+}
+
+// SetRelaxations は動的緩和ルールを差し替え、プロキシに反映されるまで待つ。
+func (l *Launcher) SetRelaxations(rules map[string]headerpolicy.HostRule) error {
+	l.mu.Lock()
+	l.lastRelaxations = rules
+	gs := l.lastGrants
+	l.mu.Unlock()
+	return l.sendControl(gs, rules)
 }
 
 // Failed はランチャが既に終了していればその理由を返す。

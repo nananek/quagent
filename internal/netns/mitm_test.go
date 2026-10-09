@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nananek/quagent/internal/contentguard"
 	"github.com/nananek/quagent/internal/headerpolicy"
 	"github.com/nananek/quagent/internal/tlsmitm"
 	"golang.org/x/net/http2"
@@ -871,5 +872,165 @@ func TestMITMWildcardHostRelaxation(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("PUT status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestProxyDLPBlock(t *testing.T) {
+	ca, _ := tlsmitm.NewCA()
+	proxyCA, _ := tlsmitm.NewCA()
+	upstreamAddr, roots := testUpstream(t, ca, "allowed.example", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+
+	var blockedReason string
+	p := &webProxy{
+		allowed: func(name string) bool { return name == "allowed.example" },
+		blocked: func(reason string) {
+			blockedReason = reason
+		},
+		mitm:          proxyCA,
+		upstreamRoots: roots,
+		sem:           make(chan struct{}, 8),
+		dlp:           contentguard.NewDLPScanner(),
+		dial: func(network, addr string, mark int) (net.Conn, error) {
+			return net.Dial(network, upstreamAddr)
+		},
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go p.terminate(c, upstreamAddr, "allowed.example")
+		}
+	}()
+
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: poolFor(t, proxyCA), ServerName: "allowed.example"},
+			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+				return net.Dial("tcp", ln.Addr().String())
+			},
+		},
+	}
+
+	// 1. 秘密情報を含むリクエストは 403 Forbidden で遮断されること
+	req, _ := http.NewRequest("POST", "https://allowed.example/upload", strings.NewReader("secret = "+"AK"+"IAIOSFODNN7EXAMPLE"))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 Forbidden", resp.StatusCode)
+	}
+	if !strings.Contains(blockedReason, "DLP") || !strings.Contains(blockedReason, "AWS Access Key") {
+		t.Fatalf("blockedReason = %q, want DLP with AWS Access Key", blockedReason)
+	}
+
+	// 2. クリーンなリクエストは 200 OK で通過すること
+	reqClean, _ := http.NewRequest("GET", "https://allowed.example/clean", nil)
+	respClean, err := client.Do(reqClean)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respClean.Body.Close()
+	if respClean.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 OK", respClean.StatusCode)
+	}
+}
+
+func TestProxyDynamicRelaxation(t *testing.T) {
+	ca, _ := tlsmitm.NewCA()
+	proxyCA, _ := tlsmitm.NewCA()
+	upstreamAddr, roots := testUpstream(t, ca, "allowed.example", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("echo: " + r.Header.Get("X-Dynamic-Header")))
+	}))
+
+	policy := &headerpolicy.Policy{
+		Enabled:         true,
+		AllowedMethods:  []string{"GET"},
+		DenyRequestBody: true,
+	}
+
+	p := &webProxy{
+		allowed:       func(name string) bool { return name == "allowed.example" },
+		mitm:          proxyCA,
+		headers:       policy,
+		dynamic:       make(map[string]headerpolicy.HostRule),
+		upstreamRoots: roots,
+		sem:           make(chan struct{}, 8),
+		dial: func(network, addr string, mark int) (net.Conn, error) {
+			return net.Dial(network, upstreamAddr)
+		},
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go p.terminate(c, upstreamAddr, "allowed.example")
+		}
+	}()
+
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: poolFor(t, proxyCA), ServerName: "allowed.example"},
+			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+				return net.Dial("tcp", ln.Addr().String())
+			},
+		},
+	}
+
+	// 1. 動的緩和前: POST は 405 Method Not Allowed
+	req, _ := http.NewRequest("POST", "https://allowed.example/test", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405 Method Not Allowed before relaxation", resp.StatusCode)
+	}
+
+	// 2. 動的緩和を適用: allowed.example で POST とボディ送信と X-Dynamic-Header を許可
+	p.setRelaxations(map[string]headerpolicy.HostRule{
+		"allowed.example": {
+			Allow:            []string{"X-Dynamic-Header"},
+			AllowedMethods:   []string{"POST"},
+			AllowRequestBody: true,
+		},
+	})
+
+	// 3. 動的緩和後: POST with body & custom header は 200 OK
+	reqRelaxed, _ := http.NewRequest("POST", "https://allowed.example/test", strings.NewReader("hello"))
+	reqRelaxed.Header.Set("X-Dynamic-Header", "secret-payload")
+	respRelaxed, err := client.Do(reqRelaxed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(respRelaxed.Body)
+	respRelaxed.Body.Close()
+	if respRelaxed.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 OK after relaxation", respRelaxed.StatusCode)
+	}
+	if string(body) != "echo: secret-payload" {
+		t.Fatalf("body = %q, want 'echo: secret-payload'", string(body))
 	}
 }

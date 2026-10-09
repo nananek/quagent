@@ -3,7 +3,7 @@ GO      ?= go
 PREFIX  ?= $(HOME)/.local
 BIN     := bin/quagent
 
-.PHONY: build install test vet clean
+.PHONY: build install test vet coverage clean
 
 build:
 	CGO_ENABLED=0 $(GO) build -o $(BIN) ./cmd/quagent
@@ -17,5 +17,9 @@ test:
 vet:
 	$(GO) vet ./...
 
+coverage:
+	$(GO) test -coverprofile=coverage.out ./...
+	$(GO) tool cover -func=coverage.out
+
 clean:
-	rm -rf bin
+	rm -rf bin coverage.out

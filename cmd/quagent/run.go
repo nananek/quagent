@@ -522,6 +522,13 @@ runcmd:
 	if headersOn {
 		spec.HeaderPolicy = cfg.HeaderPolicy
 	}
+	dlpOn := cfg.ContentGuard.IsEnabled()
+	spec.DLPEnabled = dlpOn
+	if dlpOn {
+		logf("Content Guard (DLP / DNS トンネリング検知): 有効")
+	} else {
+		logf("Content Guard: 無効")
+	}
 	l, err := netns.Start(spec)
 	if err != nil {
 		return err
@@ -578,6 +585,8 @@ runcmd:
 	}
 	go relayDenied(l, con)
 	go relayBlocked(l, con)
+	go relayTunnelBlocked(l, con)
+	go relayDLPBlocked(l, con)
 	go func() {
 		// 連打で承認コンソールを埋めないよう 1 分に 10 件まで (残りは host.log にある)
 		var window time.Time
@@ -956,6 +965,16 @@ func relayDenied(l *netns.Launcher, con *console.Server) {
 // relayBlocked は透明プロキシが許可外の名前 (SNI/Host) で止めた Web 接続を流す。
 func relayBlocked(l *netns.Launcher, con *console.Server) {
 	relayNames(l.Blocked, con, "Web で拒否: ")
+}
+
+// relayTunnelBlocked は DNS トンネリングの疑いで拒否したドメインを承認コンソールに流す。
+func relayTunnelBlocked(l *netns.Launcher, con *console.Server) {
+	relayNames(l.TunnelBlocked, con, "DNS トンネリング検知・遮断: ")
+}
+
+// relayDLPBlocked は DLP コンテンツ検査で遮断したリクエストを承認コンソールに流す。
+func relayDLPBlocked(l *netns.Launcher, con *console.Server) {
+	relayNames(l.DLPBlocked, con, "Content Guard (DLP) 遮断: ")
 }
 
 // relayNames は名前の連打を抑えて承認コンソールに流す (同じ名前は 1 分に 1 回、

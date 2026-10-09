@@ -72,6 +72,34 @@ type listOut struct {
 	Grants []grantOut `json:"grants"`
 }
 
+type relaxIn struct {
+	Host      string   `json:"host" jsonschema:"Host name to relax, e.g. \"api.github.com\" or \"*.example.com\""`
+	Headers   []string `json:"headers,omitempty" jsonschema:"Additional headers to allow forwarding (e.g. [\"Authorization\", \"X-Custom-*\"])"`
+	Methods   []string `json:"methods,omitempty" jsonschema:"Additional HTTP methods to allow (e.g. [\"POST\", \"PUT\"])"`
+	AllowBody bool     `json:"allow_body,omitempty" jsonschema:"Whether to allow sending HTTP request body (POST/PUT payloads)"`
+	Reason    string   `json:"reason" jsonschema:"Why this header/method relaxation is needed for the task"`
+}
+
+type waitRelaxIn struct {
+	RequestID int `json:"request_id" jsonschema:"request_id returned by request_header_relaxation with status pending"`
+}
+
+type releaseRelaxIn struct {
+	Host string `json:"host" jsonschema:"Host whose dynamic header relaxation is no longer needed"`
+}
+
+type relaxOut struct {
+	Host             string   `json:"host"`
+	AllowedHeaders   []string `json:"allowed_headers,omitempty"`
+	AllowedMethods   []string `json:"allowed_methods,omitempty"`
+	AllowRequestBody bool     `json:"allow_request_body"`
+	UserAgent        string   `json:"user_agent,omitempty"`
+}
+
+type listRelaxOut struct {
+	Relaxations []relaxOut `json:"relaxations"`
+}
+
 type resultOut struct {
 	access.Result
 	Message string `json:"message"`
@@ -177,6 +205,71 @@ func Handler(m *access.Manager, pub PRPublisher, logf func(string), extra ...fun
 		}
 		sort.Slice(out.Grants, func(i, j int) bool { return out.Grants[i].Domain < out.Grants[j].Domain })
 		out.Grants = nonNil(out.Grants)
+		return nil, out, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "request_header_relaxation",
+		Description: "Ask the human reviewer to relax HTTP headers, methods, or request body restrictions for a specific host. " +
+			"Use this when an API endpoint requires Authorization, custom headers, POST/PUT methods, or request body upload. " +
+			"Blocks for up to ~50s; if still undecided returns status=pending, then call wait_header_relaxation. " +
+			"Release when done using release_header_relaxation.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in relaxIn) (*mcp.CallToolResult, resultOut, error) {
+		r, err := m.SubmitRelaxation(access.Relaxation{
+			Host:      in.Host,
+			Headers:   in.Headers,
+			Methods:   in.Methods,
+			AllowBody: in.AllowBody,
+		}, in.Reason)
+		if err != nil {
+			return nil, resultOut{}, err
+		}
+		res, err := m.WaitRelaxation(ctx, r.ID, waitChunk)
+		if err != nil {
+			return nil, resultOut{}, err
+		}
+		return nil, describe(res), nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "wait_header_relaxation",
+		Description: "Keep waiting for a pending request_header_relaxation decision (blocks up to ~50s per call).",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in waitRelaxIn) (*mcp.CallToolResult, resultOut, error) {
+		res, err := m.WaitRelaxation(ctx, in.RequestID, waitChunk)
+		if err != nil {
+			return nil, resultOut{}, err
+		}
+		return nil, describe(res), nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "release_header_relaxation",
+		Description: "Give up dynamic header/method relaxation for a host you no longer need.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in releaseRelaxIn) (*mcp.CallToolResult, map[string]string, error) {
+		if err := m.ReleaseRelaxation(in.Host); err != nil {
+			return nil, nil, err
+		}
+		return nil, map[string]string{"released": in.Host}, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "list_header_relaxations",
+		Description: "List active dynamic header/method relaxations currently granted.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, listRelaxOut, error) {
+		var out listRelaxOut
+		for host, rule := range m.Relaxations() {
+			out.Relaxations = append(out.Relaxations, relaxOut{
+				Host:             host,
+				AllowedHeaders:   nonNil(rule.Allow),
+				AllowedMethods:   nonNil(rule.AllowedMethods),
+				AllowRequestBody: rule.AllowRequestBody,
+				UserAgent:        rule.UserAgent,
+			})
+		}
+		sort.Slice(out.Relaxations, func(i, j int) bool { return out.Relaxations[i].Host < out.Relaxations[j].Host })
+		if out.Relaxations == nil {
+			out.Relaxations = []relaxOut{}
+		}
 		return nil, out, nil
 	})
 

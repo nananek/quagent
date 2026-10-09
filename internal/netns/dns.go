@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"runtime"
 	"strings"
@@ -59,11 +60,12 @@ func listenInNetns(holderPid int, addr string) (net.PacketConn, net.Listener, er
 // 応答の A レコードの IP を onAnswer で通知し、許可外は REFUSED を返す。
 type dnsServer struct {
 	// sem は同時に処理する問い合わせの上限 (UDP と TCP の合計)。溢れた分は捨てる。
-	sem      chan struct{}
-	upstream string
-	allowed  func(name string) bool
-	onAnswer func(name string, ips []net.IP)
-	onDenied func(name string)
+	sem             chan struct{}
+	upstream        string
+	allowed         func(name string) bool
+	onAnswer        func(name string, ips []net.IP)
+	onDenied        func(name string)
+	onTunnelBlocked func(name, reason string)
 }
 
 func (s *dnsServer) serveUDP(pc net.PacketConn) {
@@ -139,6 +141,13 @@ func (s *dnsServer) handle(q []byte, proto string) []byte {
 	name := normalize(qs[0].Name.String())
 	if !s.allowed(name) {
 		s.onDenied(name)
+		return reply(hdr, qs, dnsmessage.RCodeRefused)
+	}
+	// 許可されたドメイン配下での DNS トンネリング疑いを検知
+	if suspicious, reason := detectTunneling(name, qs[0].Type); suspicious {
+		if s.onTunnelBlocked != nil {
+			s.onTunnelBlocked(name, reason)
+		}
 		return reply(hdr, qs, dnsmessage.RCodeRefused)
 	}
 	// 子 netns は IPv4 しか持たないので AAAA は空で返し、v4 を使わせる
@@ -259,4 +268,63 @@ func Matches(pattern, name string) bool {
 		return strings.HasSuffix(name, "."+suffix)
 	}
 	return name == pattern
+}
+
+// detectTunneling は DNS クエリ名およびクエリタイプから DNS トンネリング攻撃の疑いを検知する。
+func detectTunneling(name string, qtype dnsmessage.Type) (suspicious bool, reason string) {
+	name = normalize(name)
+
+	// 1. クエリ名総長 (RFC では 253 文字まで許容されるが、180 文字超はトンネリングの疑いが極めて高い)
+	if len(name) > 180 {
+		return true, fmt.Sprintf("クエリ名総長過大 (%d文字 > 180)", len(name))
+	}
+
+	labels := strings.Split(name, ".")
+	// 2. サブドメイン階層数 (6 階層超のラベルは異常)
+	if len(labels) > 6 {
+		return true, fmt.Sprintf("サブドメイン階層過大 (%d階層 > 6)", len(labels))
+	}
+
+	for _, label := range labels {
+		// 3. 単一ラベル長 (RFC 上限 63 文字だが、通常の運用で 45 文字超の単一ラベルはほぼ存在しない)
+		if len(label) > 45 {
+			return true, fmt.Sprintf("ラベル長過大 (%d文字 > 45)", len(label))
+		}
+
+		// 4. シャノンエントロピー (25 文字以上のラベルでエントロピー > 4.2 bits/char)
+		if len(label) >= 25 {
+			ent := shannonEntropy(label)
+			if ent > 4.2 {
+				return true, fmt.Sprintf("高エントロピーラベル検知 (%.2f bits/char > 4.2, 長さ %d)", ent, len(label))
+			}
+		}
+	}
+
+	// 5. 不審なレコードタイプ (TXT などでの持ち出し試行)
+	if qtype == dnsmessage.TypeTXT {
+		// 通常の A/AAAA 以外のクエリで、先頭ラベルが 30 文字以上ある場合はトンネリングと判断
+		if len(labels) > 0 && len(labels[0]) > 30 {
+			return true, fmt.Sprintf("異常なクエリタイプ (%s) かつ 長大ラベル", qtype.String())
+		}
+	}
+
+	return false, ""
+}
+
+// shannonEntropy は文字列のエントロピー (bits/char) を計算する。
+func shannonEntropy(s string) float64 {
+	if len(s) == 0 {
+		return 0
+	}
+	counts := make(map[rune]float64)
+	for _, r := range s {
+		counts[r]++
+	}
+	total := float64(len([]rune(s)))
+	var entropy float64
+	for _, c := range counts {
+		p := c / total
+		entropy -= p * math.Log2(p)
+	}
+	return entropy
 }

@@ -102,21 +102,42 @@ func (p *Policy) Rules(host string) Rules {
 		if !matchHost(pattern, host) {
 			continue
 		}
-		r.add(hr.Allow)
-		if hr.UserAgent != "" {
-			r.userAgent = hr.UserAgent
+		r.ApplyHostRule(hr)
+	}
+	return r
+}
+
+// ApplyHostRule は単一の HostRule を Rules に適用 (マージ) する。
+func (r *Rules) ApplyHostRule(hr HostRule) {
+	r.add(hr.Allow)
+	if hr.UserAgent != "" {
+		r.userAgent = hr.UserAgent
+	}
+	if hr.KeepUserAgent {
+		r.keepUserAgent = true
+	}
+	if hr.AllowRequestBody {
+		r.denyBody = false
+	}
+	for _, m := range hr.AllowedMethods {
+		m = strings.ToUpper(strings.TrimSpace(m))
+		if m != "" {
+			r.methods[m] = true
 		}
-		if hr.KeepUserAgent {
-			r.keepUserAgent = true
-		}
-		if hr.AllowRequestBody {
-			r.denyBody = false
-		}
-		for _, m := range hr.AllowedMethods {
-			m = strings.ToUpper(strings.TrimSpace(m))
-			if m != "" {
-				r.methods[m] = true
-			}
+	}
+}
+
+// RulesWithDynamic は静的ポリシーに動的緩和ルール (dynamicHosts) を足し合わせた解決済み規則を返す。
+func (p *Policy) RulesWithDynamic(host string, dynamicHosts map[string]HostRule) Rules {
+	var r Rules
+	if p != nil {
+		r = p.Rules(host)
+	} else {
+		r = (&Policy{Enabled: true}).Rules(host)
+	}
+	for pattern, hr := range dynamicHosts {
+		if MatchHost(pattern, host) {
+			r.ApplyHostRule(hr)
 		}
 	}
 	return r
@@ -176,14 +197,18 @@ func (r Rules) allowed(name string) bool {
 	return false
 }
 
-// matchHost は "example.com" (完全一致) か "*.example.com" (サブドメイン) を照合する。
-func matchHost(pattern, host string) bool {
+// MatchHost は "example.com" (完全一致) か "*.example.com" (サブドメイン) を照合する。
+func MatchHost(pattern, host string) bool {
 	pattern = strings.ToLower(pattern)
 	host = strings.ToLower(host)
 	if rest, ok := strings.CutPrefix(pattern, "*."); ok {
 		return strings.HasSuffix(host, "."+rest)
 	}
 	return pattern == host
+}
+
+func matchHost(pattern, host string) bool {
+	return MatchHost(pattern, host)
 }
 
 // DenyRequestBody はリクエストボディを拒否すべきかを返す。

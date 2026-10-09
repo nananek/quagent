@@ -43,6 +43,12 @@ type Msg struct {
 	Base   string `json:"base,omitempty"`
 	Title  string `json:"title,omitempty"`
 	Body   string `json:"body,omitempty"`
+
+	// 動的ヘッダ・メソッド緩和 (relaxrequest / relaxsettled) の内容。
+	RelaxHost    string   `json:"relax_host,omitempty"`
+	RelaxHeaders []string `json:"relax_headers,omitempty"`
+	RelaxMethods []string `json:"relax_methods,omitempty"`
+	AllowBody    bool     `json:"allow_body,omitempty"`
 }
 
 const (
@@ -67,11 +73,12 @@ type Server struct {
 	// Clipboard は承認されたクリップボードの中身を host に入れる (nil なら TmuxClipboard)。
 	Clipboard func([]byte) error
 
-	mu      sync.Mutex
-	clients map[*client]bool
-	shown   map[int]bool // UI に送った申請
-	backlog []Msg        // UI が繋がる前のログ
-	clip    clipState
+	mu         sync.Mutex
+	clients    map[*client]bool
+	shown      map[int]bool // UI に送った申請
+	shownRelax map[int]bool // UI に送った緩和申請
+	backlog    []Msg        // UI が繋がる前のログ
+	clip       clipState
 
 	// PR の作成承認。access.Manager とは別に、この Server が直接待つ。
 	prMu      sync.Mutex
@@ -108,7 +115,7 @@ func NewServer(m *access.Manager, sock string) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{m: m, sock: sock, l: l, Quit: make(chan struct{}),
-		clients: map[*client]bool{}, shown: map[int]bool{}}
+		clients: map[*client]bool{}, shown: map[int]bool{}, shownRelax: map[int]bool{}}
 	m.Log = s.Log
 	go s.accept()
 	go s.watch()
@@ -178,6 +185,11 @@ func (s *Server) serve(c net.Conn) {
 			if err != nil {
 				s.Log("判断を反映できない: " + err.Error())
 			}
+		case "relaxdecide":
+			err := s.m.DecideRelaxation(msg.ID, access.Decision{Status: msg.Status, Kind: msg.Kind, Question: msg.Question})
+			if err != nil {
+				s.Log("緩和判断を反映できない: " + err.Error())
+			}
 		case "clipboard":
 			s.onClipboard(msg)
 		case "clipdecide":
@@ -206,6 +218,9 @@ func (s *Server) register(cl *client) {
 	for _, r := range s.m.Pending() {
 		_ = s.send(cl, requestMsg(r))
 	}
+	for _, r := range s.m.PendingRelaxations() {
+		_ = s.send(cl, relaxRequestMsg(r))
+	}
 	if s.clip.pending != nil {
 		_ = s.send(cl, clipMsg(s.clip.pending))
 	}
@@ -220,6 +235,16 @@ func (s *Server) register(cl *client) {
 func requestMsg(r *access.Request) Msg {
 	return Msg{Type: "request", ID: r.ID, Domains: r.Domains, Reason: r.Reason,
 		Deadline: r.Created.Add(access.DecisionTimeout).Format("15:04:05")}
+}
+
+func relaxRequestMsg(r *access.RelaxRequest) Msg {
+	return Msg{Type: "relaxrequest", ID: r.ID,
+		RelaxHost:    r.Relaxation.Host,
+		RelaxHeaders: r.Relaxation.Headers,
+		RelaxMethods: r.Relaxation.Methods,
+		AllowBody:    r.Relaxation.AllowBody,
+		Reason:       r.Reason,
+		Deadline:     r.Created.Add(access.DecisionTimeout).Format("15:04:05")}
 }
 
 // AskPR は PR の作成を承認コンソールに諮り、承認されるまで待つ。拒否・時間切れ・
@@ -314,6 +339,34 @@ func (s *Server) watch() {
 		for _, id := range settled {
 			msg := Msg{Type: "settled", ID: id}
 			if res, ok := s.m.Settled(id); ok {
+				msg.Status, msg.Kind = res.Status, res.Kind
+			}
+			s.broadcast(msg)
+		}
+
+		pendingRelax := map[int]bool{}
+		for _, r := range s.m.PendingRelaxations() {
+			pendingRelax[r.ID] = true
+			s.mu.Lock()
+			isNew := !s.shownRelax[r.ID]
+			s.shownRelax[r.ID] = true
+			s.mu.Unlock()
+			if isNew {
+				s.broadcast(relaxRequestMsg(r))
+			}
+		}
+		s.mu.Lock()
+		var settledRelax []int
+		for id := range s.shownRelax {
+			if !pendingRelax[id] {
+				settledRelax = append(settledRelax, id)
+				delete(s.shownRelax, id)
+			}
+		}
+		s.mu.Unlock()
+		for _, id := range settledRelax {
+			msg := Msg{Type: "relaxsettled", ID: id}
+			if res, ok := s.m.SettledRelaxation(id); ok {
 				msg.Status, msg.Kind = res.Status, res.Kind
 			}
 			s.broadcast(msg)

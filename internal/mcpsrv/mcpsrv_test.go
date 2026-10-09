@@ -10,13 +10,15 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/nananek/quagent/internal/access"
+	"github.com/nananek/quagent/internal/headerpolicy"
 	"github.com/nananek/quagent/internal/netns"
 	"github.com/nananek/quagent/internal/pr"
 )
 
 type dummyApplier struct{}
 
-func (dummyApplier) SetGrants([]netns.Grant) error { return nil }
+func (dummyApplier) SetGrants([]netns.Grant) error                         { return nil }
+func (dummyApplier) SetRelaxations(map[string]headerpolicy.HostRule) error { return nil }
 
 type testPublisher struct {
 	res pr.Result
@@ -212,5 +214,112 @@ func TestHandlerExtraTools(t *testing.T) {
 	h := Handler(nil, nil, func(string) {}, extra)
 	if h == nil || !extraCalled {
 		t.Error("expected extra registrar to be called")
+	}
+}
+
+func TestRelaxationToolsIntegration(t *testing.T) {
+	tmpDir := t.TempDir()
+	alwaysFile := filepath.Join(tmpDir, "always.json")
+	mgr, err := access.NewManager(dummyApplier{}, alwaysFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h := Handler(mgr, testPublisher{}, func(string) {})
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
+	transport := &mcp.StreamableClientTransport{
+		Endpoint:             ts.URL + "/mcp",
+		DisableStandaloneSSE: true,
+	}
+	session, err := client.Connect(ctx, transport, nil)
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+	defer session.Close()
+
+	// 非同期で承認する goroutine
+	go func() {
+		for {
+			pending := mgr.PendingRelaxations()
+			if len(pending) > 0 {
+				_ = mgr.DecideRelaxation(pending[0].ID, access.Decision{Status: access.Approved, Kind: access.Once})
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	// 1. request_header_relaxation
+	res, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "request_header_relaxation",
+		Arguments: map[string]any{
+			"host":       "api.github.com",
+			"headers":    []string{"Authorization"},
+			"methods":    []string{"POST"},
+			"allow_body": true,
+			"reason":     "Need to push changes",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool request_header_relaxation failed: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("request_header_relaxation returned error: %v", res.Content)
+	}
+
+	// 1b. wait_header_relaxation
+	waitRes, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "wait_header_relaxation",
+		Arguments: map[string]any{
+			"request_id": 1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool wait_header_relaxation failed: %v", err)
+	}
+	if waitRes.IsError {
+		t.Fatalf("wait_header_relaxation returned error: %v", waitRes.Content)
+	}
+
+	// 2. list_header_relaxations
+	listRes, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "list_header_relaxations",
+	})
+	if err != nil {
+		t.Fatalf("CallTool list_header_relaxations failed: %v", err)
+	}
+	if listRes.IsError {
+		t.Fatalf("list_header_relaxations returned error: %v", listRes.Content)
+	}
+
+	// 3. release_header_relaxation
+	relRes, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "release_header_relaxation",
+		Arguments: map[string]any{
+			"host": "api.github.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool release_header_relaxation failed: %v", err)
+	}
+	if relRes.IsError {
+		t.Fatalf("release_header_relaxation returned error: %v", relRes.Content)
+	}
+
+	// 4. release 後は一覧が空
+	listAfter, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "list_header_relaxations",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listAfter.IsError {
+		t.Fatal(listAfter.Content)
 	}
 }

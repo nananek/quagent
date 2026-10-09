@@ -24,6 +24,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/nananek/quagent/internal/headerpolicy"
 	"github.com/nananek/quagent/internal/netns"
 	"github.com/nananek/quagent/internal/paths"
 )
@@ -65,7 +66,8 @@ type Result struct {
 	RequestID int      `json:"request_id"`
 	Status    Status   `json:"status"`
 	Kind      Kind     `json:"kind,omitempty"`
-	Domains   []string `json:"domains"`
+	Domains   []string `json:"domains,omitempty"`
+	Host      string   `json:"host,omitempty"`
 	// ExpiresAt は Once の許可が新規接続を止める時刻 (RFC3339)。
 	ExpiresAt string `json:"expires_at,omitempty"`
 	// Question は Status が question のときの承認者の問い。
@@ -86,6 +88,26 @@ type Request struct {
 	claimed bool // 決着させる権利を誰かが取った (m.mu で保護)
 }
 
+// Relaxation は特定ホストに対する通信の緩和内容。
+type Relaxation struct {
+	Host      string   `json:"host"`
+	Headers   []string `json:"headers,omitempty"`
+	Methods   []string `json:"methods,omitempty"`
+	AllowBody bool     `json:"allow_body,omitempty"`
+}
+
+// RelaxRequest は承認待ちの動的緩和申請。
+type RelaxRequest struct {
+	ID         int
+	Relaxation Relaxation
+	Reason     string
+	Created    time.Time
+
+	done    chan struct{}
+	result  Result
+	claimed bool
+}
+
 // Decision は承認者の判断。
 type Decision struct {
 	Status   Status // Approved / Denied / Question
@@ -93,9 +115,10 @@ type Decision struct {
 	Question string // Question のとき
 }
 
-// Applier は許可の一覧を egress に反映する (netns.Launcher)。
+// Applier は許可の一覧を egress とプロキシに反映する (netns.Launcher)。
 type Applier interface {
 	SetGrants([]netns.Grant) error
+	SetRelaxations(map[string]headerpolicy.HostRule) error
 }
 
 // Manager は申請・許可の状態を持つ。
@@ -113,6 +136,12 @@ type Manager struct {
 	byID    map[int]*Request
 	settled []int                // 決着した順の申請 ID (古いものから忘れる)
 	denied  map[string]time.Time // 拒否されたドメイン -> 再申請できるようになる時刻
+
+	relaxations      map[string]headerpolicy.HostRule // host -> HostRule
+	relaxExpirations map[string]int64                 // host -> unix 秒
+	relaxSession     map[string]bool                  // このセッションでは確認しない
+	relaxPending     []*RelaxRequest
+	relaxByID        map[int]*RelaxRequest
 
 	// Notify には新しい申請が来るたびに通知が入る (UI 用)。
 	Notify chan struct{}
@@ -142,12 +171,32 @@ func (m *Manager) Settled(id int) (Result, bool) {
 	}
 }
 
+// SettledRelaxation は決着済みの動的緩和申請の結果を返す。
+func (m *Manager) SettledRelaxation(id int) (Result, bool) {
+	m.mu.Lock()
+	r, ok := m.relaxByID[id]
+	m.mu.Unlock()
+	if !ok {
+		return Result{}, false
+	}
+	select {
+	case <-r.done:
+		return r.result, true
+	default:
+		return Result{}, false
+	}
+}
+
 // NewManager は Manager を作る。alwaysPath は「以後確認しない」の保存先。
 func NewManager(apply Applier, alwaysPath string) (*Manager, error) {
 	m := &Manager{
 		apply: apply, alwaysPath: alwaysPath, now: time.Now,
 		grants: map[string]int64{}, session: map[string]bool{}, always: map[string]bool{},
 		byID: map[int]*Request{}, denied: map[string]time.Time{}, Notify: make(chan struct{}, 1),
+		relaxations:      map[string]headerpolicy.HostRule{},
+		relaxExpirations: map[string]int64{},
+		relaxSession:     map[string]bool{},
+		relaxByID:        map[int]*RelaxRequest{},
 	}
 	b, err := os.ReadFile(alwaysPath)
 	switch {
@@ -585,4 +634,253 @@ func nonNilStrings(s []string) []string {
 		return []string{}
 	}
 	return s
+}
+
+// SubmitRelaxation は宛先ごとのヘッダ・メソッド・ボディ緩和を申請する。
+func (m *Manager) SubmitRelaxation(rel Relaxation, reason string) (*RelaxRequest, error) {
+	rel.Host = strings.TrimSpace(rel.Host)
+	if rel.Host == "" {
+		return nil, errors.New("ホスト名が指定されていません")
+	}
+	normalized, err := NormalizeDomains([]string{rel.Host})
+	if err != nil {
+		return nil, fmt.Errorf("ホスト名が不正です: %w", err)
+	}
+	rel.Host = normalized[0]
+
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return nil, errors.New("申請の理由が必要です")
+	}
+	if utf8.RuneCountInString(reason) > MaxReasonRunes {
+		return nil, fmt.Errorf("申請の理由は %d 文字以内にしてください", MaxReasonRunes)
+	}
+
+	m.mu.Lock()
+	m.nextID++
+	id := m.nextID
+	r := &RelaxRequest{
+		ID:         id,
+		Relaxation: rel,
+		Reason:     reason,
+		Created:    m.now(),
+		done:       make(chan struct{}),
+	}
+	m.relaxByID[id] = r
+
+	// このセッションですでに許可されているホストなら確認なしで通す
+	if m.relaxSession[rel.Host] {
+		m.mu.Unlock()
+		res, err := m.approveRelaxation(r, Session, true)
+		if err != nil {
+			return nil, err
+		}
+		m.settleRelaxation(r, res)
+		return r, nil
+	}
+
+	m.relaxPending = append(m.relaxPending, r)
+	m.mu.Unlock()
+
+	select {
+	case m.Notify <- struct{}{}:
+	default:
+	}
+
+	time.AfterFunc(DecisionTimeout, func() {
+		m.mu.Lock()
+		if r.claimed {
+			m.mu.Unlock()
+			return
+		}
+		r.claimed = true
+		m.removeRelaxPendingLocked(r.ID)
+		m.mu.Unlock()
+		m.settleRelaxation(r, Result{
+			RequestID: r.ID,
+			Host:      rel.Host,
+			Status:    TimedOut,
+		})
+	})
+
+	return r, nil
+}
+
+func (m *Manager) removeRelaxPendingLocked(id int) {
+	for i, p := range m.relaxPending {
+		if p.ID == id {
+			m.relaxPending = append(m.relaxPending[:i], m.relaxPending[i+1:]...)
+			return
+		}
+	}
+}
+
+func (m *Manager) settleRelaxation(r *RelaxRequest, res Result) {
+	m.mu.Lock()
+	r.result = res
+	close(r.done)
+	m.mu.Unlock()
+	select {
+	case m.Notify <- struct{}{}:
+	default:
+	}
+}
+
+// DecideRelaxation は承認コンソールからの判断を反映する。
+func (m *Manager) DecideRelaxation(id int, d Decision) error {
+	m.mu.Lock()
+	r, ok := m.relaxByID[id]
+	if !ok {
+		m.mu.Unlock()
+		return errors.New("申請が見つかりません")
+	}
+	if r.claimed {
+		m.mu.Unlock()
+		return errors.New("既に決着済みの申請です")
+	}
+	r.claimed = true
+	m.removeRelaxPendingLocked(id)
+	m.mu.Unlock()
+
+	switch d.Status {
+	case Approved:
+		res, err := m.approveRelaxation(r, d.Kind, false)
+		if err != nil {
+			return err
+		}
+		m.settleRelaxation(r, res)
+	case Denied:
+		m.settleRelaxation(r, Result{RequestID: id, Host: r.Relaxation.Host, Status: Denied})
+	case Question:
+		m.settleRelaxation(r, Result{RequestID: id, Host: r.Relaxation.Host, Status: Question, Question: d.Question})
+	default:
+		return fmt.Errorf("不正な判断ステータス: %s", d.Status)
+	}
+	return nil
+}
+
+func (m *Manager) approveRelaxation(r *RelaxRequest, kind Kind, auto bool) (Result, error) {
+	var expires int64
+	host := r.Relaxation.Host
+	switch kind {
+	case Once:
+		expires = m.now().Add(OnceTTL).Unix()
+	case Session, Always:
+		m.mu.Lock()
+		m.relaxSession[host] = true
+		m.mu.Unlock()
+	}
+
+	rule := headerpolicy.HostRule{
+		Allow:            r.Relaxation.Headers,
+		AllowedMethods:   r.Relaxation.Methods,
+		AllowRequestBody: r.Relaxation.AllowBody,
+	}
+
+	m.mu.Lock()
+	m.relaxations[host] = rule
+	if expires != 0 {
+		m.relaxExpirations[host] = expires
+	} else {
+		delete(m.relaxExpirations, host)
+	}
+	m.mu.Unlock()
+
+	if err := m.syncRelaxations(); err != nil {
+		return Result{}, err
+	}
+
+	res := Result{
+		RequestID: r.ID,
+		Status:    Approved,
+		Kind:      kind,
+		Host:      host,
+		Auto:      auto,
+	}
+	if expires != 0 {
+		res.ExpiresAt = time.Unix(expires, 0).Format(time.RFC3339)
+	}
+	return res, nil
+}
+
+func (m *Manager) syncRelaxations() error {
+	m.mu.Lock()
+	now := m.now().Unix()
+	active := make(map[string]headerpolicy.HostRule)
+	for host, rule := range m.relaxations {
+		exp, hasExp := m.relaxExpirations[host]
+		if hasExp && exp != 0 && now >= exp {
+			delete(m.relaxations, host)
+			delete(m.relaxExpirations, host)
+			continue
+		}
+		active[host] = rule
+	}
+	m.mu.Unlock()
+
+	if m.apply != nil {
+		return m.apply.SetRelaxations(active)
+	}
+	return nil
+}
+
+// WaitRelaxation は申請の決着を timeout まで待つ。
+func (m *Manager) WaitRelaxation(ctx context.Context, id int, timeout time.Duration) (Result, error) {
+	m.mu.Lock()
+	r, ok := m.relaxByID[id]
+	m.mu.Unlock()
+	if !ok {
+		return Result{}, errors.New("申請が見つかりません")
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-r.done:
+		return r.result, nil
+	case <-ctx.Done():
+		return Result{}, ctx.Err()
+	case <-timer.C:
+		return Result{RequestID: id, Status: Pending, Host: r.Relaxation.Host}, nil
+	}
+}
+
+// ReleaseRelaxation は指定ホストの動的緩和を破棄する。
+func (m *Manager) ReleaseRelaxation(host string) error {
+	host = strings.TrimSpace(host)
+	normalized, err := NormalizeDomains([]string{host})
+	if err == nil && len(normalized) > 0 {
+		host = normalized[0]
+	}
+
+	m.mu.Lock()
+	delete(m.relaxations, host)
+	delete(m.relaxExpirations, host)
+	m.mu.Unlock()
+
+	m.logf("エージェントが動的緩和を放棄: %s", host)
+	return m.syncRelaxations()
+}
+
+// Relaxations は現在有効な動的緩和一覧を返す。
+func (m *Manager) Relaxations() map[string]headerpolicy.HostRule {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.now().Unix()
+	out := make(map[string]headerpolicy.HostRule)
+	for host, rule := range m.relaxations {
+		exp, ok := m.relaxExpirations[host]
+		if !ok || exp == 0 || now < exp {
+			out[host] = rule
+		}
+	}
+	return out
+}
+
+// PendingRelaxations は承認待ちの動的緩和申請を返す。
+func (m *Manager) PendingRelaxations() []*RelaxRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]*RelaxRequest(nil), m.relaxPending...)
 }

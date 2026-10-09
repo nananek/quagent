@@ -14,6 +14,7 @@ import (
 	"github.com/nananek/quagent/internal/access"
 	"github.com/nananek/quagent/internal/config"
 	"github.com/nananek/quagent/internal/console"
+	"github.com/nananek/quagent/internal/headerpolicy"
 	"github.com/nananek/quagent/internal/hostsvc"
 	"github.com/nananek/quagent/internal/netns"
 	"github.com/nananek/quagent/internal/paths"
@@ -257,7 +258,8 @@ func TestSaveLogs(t *testing.T) {
 
 type noopApplier struct{}
 
-func (noopApplier) SetGrants([]netns.Grant) error { return nil }
+func (noopApplier) SetGrants([]netns.Grant) error                         { return nil }
+func (noopApplier) SetRelaxations(map[string]headerpolicy.HostRule) error { return nil }
 
 func TestRelayNames(t *testing.T) {
 	tmp := t.TempDir()
@@ -288,6 +290,35 @@ func TestRelayNames(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("relayNames did not exit on channel close")
 	}
+}
+
+func TestRelayTunnelAndDLPBlocked(t *testing.T) {
+	tmp := t.TempDir()
+	m, err := access.NewManager(noopApplier{}, filepath.Join(tmp, "always.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(tmp, "console.sock")
+	srv, err := console.NewServer(m, sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.Close)
+
+	tunnelCh := make(chan string, 1)
+	dlpCh := make(chan string, 1)
+	l := &netns.Launcher{
+		TunnelBlocked: tunnelCh,
+		DLPBlocked:    dlpCh,
+	}
+
+	go relayTunnelBlocked(l, srv)
+	go relayDLPBlocked(l, srv)
+
+	tunnelCh <- "tunnel.attacker.com"
+	dlpCh <- "dlp.attacker.com"
+	close(tunnelCh)
+	close(dlpCh)
 }
 
 func TestSweepRuns(t *testing.T) {
