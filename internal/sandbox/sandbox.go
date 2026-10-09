@@ -36,6 +36,9 @@ type Policy struct {
 	Mode string `json:"mode,omitempty"`
 	// ExtraDeny は追加で拒否する syscall 名 (例 "chroot")。
 	ExtraDeny []string `json:"extra_deny,omitempty"`
+	// DenyVsock を false にすると AF_VSOCK ソケット作成の遮断を無効化する。
+	// 省略 (null) または true なら有効 (既定: 有効)。
+	DenyVsock *bool `json:"deny_vsock,omitempty"`
 	// Landlock を true にすると、書き込み・作成・削除などのファイル操作を
 	// ReadWritePaths の下だけに限る (読み取りは制限しない)。
 	Landlock bool `json:"landlock,omitempty"`
@@ -49,6 +52,9 @@ func Default() *Policy { return &Policy{Enabled: boolPtr(true), Mode: "compat"} 
 
 // On は方針が有効かを返す。Enabled が省略 (null) なら有効とみなす。
 func (p *Policy) On() bool { return p != nil && (p.Enabled == nil || *p.Enabled) }
+
+// DenyVsockOn は AF_VSOCK ソケットの作成を遮断するかを返す (既定: 有効)。
+func (p *Policy) DenyVsockOn() bool { return p == nil || p.DenyVsock == nil || *p.DenyVsock }
 
 func boolPtr(b bool) *bool { return &b }
 
@@ -235,8 +241,8 @@ func (p *Policy) Apply() error {
 	if err != nil {
 		return err
 	}
-	if len(deny) > 0 {
-		if err := applySeccomp(deny); err != nil {
+	if len(deny) > 0 || p.DenyVsockOn() {
+		if err := applySeccomp(deny, p.DenyVsockOn()); err != nil {
 			return err
 		}
 	}

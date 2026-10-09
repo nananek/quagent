@@ -213,6 +213,75 @@ func TestSyscallNumbers(t *testing.T) {
 	}
 }
 
+func TestDenyVsockPolicy(t *testing.T) {
+	var pNil *Policy
+	if !pNil.DenyVsockOn() {
+		t.Fatal("nil policy should have DenyVsockOn = true")
+	}
+
+	pDef := Default()
+	if !pDef.DenyVsockOn() {
+		t.Fatal("default policy should have DenyVsockOn = true")
+	}
+
+	pEmpty := &Policy{}
+	if !pEmpty.DenyVsockOn() {
+		t.Fatal("empty policy should have DenyVsockOn = true")
+	}
+
+	tFalse := false
+	pOff := &Policy{DenyVsock: &tFalse}
+	if pOff.DenyVsockOn() {
+		t.Fatal("policy with DenyVsock=false should have DenyVsockOn = false")
+	}
+
+	tTrue := true
+	pOn := &Policy{DenyVsock: &tTrue}
+	if !pOn.DenyVsockOn() {
+		t.Fatal("policy with DenyVsock=true should have DenyVsockOn = true")
+	}
+
+	b, err := pOff.JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpFile := filepath.Join(t.TempDir(), "policy.json")
+	if err := os.WriteFile(tmpFile, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(tmpFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.DenyVsockOn() {
+		t.Fatal("loaded policy should preserve DenyVsock = false")
+	}
+}
+
+func TestBuildSeccompFilter(t *testing.T) {
+	// amd64, denyVsock=false
+	f1 := buildSeccompFilter(unix.AUDIT_ARCH_X86_64, uint32(unix.EPERM), []int{unix.SYS_GETPPID}, false)
+	// amd64, denyVsock=true
+	f2 := buildSeccompFilter(unix.AUDIT_ARCH_X86_64, uint32(unix.EPERM), []int{unix.SYS_GETPPID}, true)
+	if len(f2) <= len(f1) {
+		t.Fatalf("expected f2 (with vsock deny) to have more instructions than f1: %d <= %d", len(f2), len(f1))
+	}
+
+	// arm64, denyVsock=false
+	f3 := buildSeccompFilter(unix.AUDIT_ARCH_AARCH64, uint32(unix.EPERM), nil, false)
+	// arm64, denyVsock=true
+	f4 := buildSeccompFilter(unix.AUDIT_ARCH_AARCH64, uint32(unix.EPERM), nil, true)
+	if len(f4) <= len(f3) {
+		t.Fatalf("expected f4 to have more instructions than f3: %d <= %d", len(f4), len(f3))
+	}
+
+	// 未知のアーキテクチャ
+	f5 := buildSeccompFilter(0x1234, uint32(unix.EPERM), nil, true)
+	if len(f5) == 0 {
+		t.Fatal("expected filter for unknown arch")
+	}
+}
+
 func contains(xs []int, v int) bool {
 	for _, x := range xs {
 		if x == v {

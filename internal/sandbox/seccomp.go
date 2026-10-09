@@ -35,8 +35,9 @@ func auditArch() (uint32, bool) {
 }
 
 // buildSeccompFilter は denylist 方式の BPF を組む。arch が一致しなければ殺し、
+// denyVsock が有効なら AF_VSOCK ソケットの作成を拒否し、
 // nr が deny のどれかなら errno を返し、それ以外は許可する。
-func buildSeccompFilter(arch uint32, errno uint32, deny []int) []unix.SockFilter {
+func buildSeccompFilter(arch uint32, errno uint32, deny []int, denyVsock bool) []unix.SockFilter {
 	f := []unix.SockFilter{
 		{Code: bpfLD, K: 4},                   // seccomp_data.arch
 		{Code: bpfJEQ, Jt: 1, Jf: 0, K: arch}, // 一致すれば LD nr へ、しなければ次 (KILL)
@@ -51,6 +52,28 @@ func buildSeccompFilter(arch uint32, errno uint32, deny []int) []unix.SockFilter
 			unix.SockFilter{Code: bpfRET, K: unix.SECCOMP_RET_KILL_PROCESS},
 		)
 	}
+	if denyVsock {
+		var sysSocket uint32
+		switch arch {
+		case unix.AUDIT_ARCH_X86_64:
+			sysSocket = unix.SYS_SOCKET
+		case unix.AUDIT_ARCH_AARCH64:
+			sysSocket = 198
+		}
+		if sysSocket != 0 {
+			f = append(f,
+				// nr == SYS_SOCKET なら次へ、不一致なら 4 命令スキップ
+				unix.SockFilter{Code: bpfJEQ, Jt: 0, Jf: 4, K: sysSocket},
+				// A = args[0] (domain)
+				unix.SockFilter{Code: bpfLD, K: 16},
+				// domain == AF_VSOCK なら次へ、不一致なら 1 命令スキップ
+				unix.SockFilter{Code: bpfJEQ, Jt: 0, Jf: 1, K: unix.AF_VSOCK},
+				unix.SockFilter{Code: bpfRET, K: unix.SECCOMP_RET_ERRNO | (errno & 0xffff)},
+				// A = seccomp_data.nr を復元
+				unix.SockFilter{Code: bpfLD, K: 0},
+			)
+		}
+	}
 	for _, nr := range deny {
 		f = append(f,
 			unix.SockFilter{Code: bpfJEQ, Jt: 0, Jf: 1, K: uint32(nr)}, // 一致 -> RET errno、不一致 -> 次へ
@@ -63,13 +86,13 @@ func buildSeccompFilter(arch uint32, errno uint32, deny []int) []unix.SockFilter
 // applySeccomp は現在のスレッドにフィルタをかける。フィルタはスレッド単位だが
 // exec でほかのスレッドは消えるので、exec を呼ぶこのスレッドに固定すれば新しい
 // イメージ (とその子孫) に必ず継承される。
-func applySeccomp(deny []int) error {
+func applySeccomp(deny []int, denyVsock bool) error {
 	arch, ok := auditArch()
 	if !ok {
 		return fmt.Errorf("このアーキテクチャ (%s) では seccomp の方針を組めない", runtime.GOARCH)
 	}
 	runtime.LockOSThread()
-	filter := buildSeccompFilter(arch, uint32(unix.EPERM), deny)
+	filter := buildSeccompFilter(arch, uint32(unix.EPERM), deny, denyVsock)
 	prog := unix.SockFprog{Len: uint16(len(filter)), Filter: &filter[0]}
 	if _, _, errno := unix.Syscall(unix.SYS_SECCOMP, unix.SECCOMP_SET_MODE_FILTER, 0, uintptr(unsafe.Pointer(&prog))); errno != 0 {
 		return fmt.Errorf("seccomp をかけられない: %w", errno)
@@ -79,5 +102,10 @@ func applySeccomp(deny []int) error {
 
 // ApplySeccomp は現在のスレッドに seccomp フィルタをかける。
 func ApplySeccomp(deny []int) error {
-	return applySeccomp(deny)
+	return applySeccomp(deny, false)
+}
+
+// ApplySeccompWithVsock は現在のスレッドに seccomp フィルタをかけ、任意で AF_VSOCK を拒否する。
+func ApplySeccompWithVsock(deny []int, denyVsock bool) error {
+	return applySeccomp(deny, denyVsock)
 }

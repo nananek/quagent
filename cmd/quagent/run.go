@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand/v2"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -234,6 +235,9 @@ func run(o runOpts) error {
 	// VM の中の記録と違い改変されない (host.log に残る)。
 	svc.Audit = func(e hostsvc.AuditEvent) {
 		logger.Print(e.LogLine())
+	}
+	svc.OnReject = func(reason string, remote net.Addr) {
+		logger.Printf("reject: %s (remote=%v)", reason, remote)
 	}
 	// 許可していない LLM API の操作は、承認コンソールができてからそこに出す
 	llmDenied := make(chan string, 16)

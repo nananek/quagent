@@ -17,9 +17,9 @@ host ◄─ vsock (run ごとのポート、この VM の CID だけ) ◄─ gue
                      + Web の透過プロキシ (SNI/Host を許可名と照合。任意で TLS 終端してヘッダ制限)
 ```
 
-ホストから VM の操作（コマンド実行、仮想端末、リポジトリの同期、PR 作成用の git fetch など）はすべて vsock 経由で行われます。通常のネットワークを経由しないため、nftables や DNS の影響を受けず、SSH も使用しません。VM 内部では quagent 自身が作業ユーザー権限で vsock 接続を待ち受けます（実行ごとに cloud-init の seed ISO でバイナリを持ち込むため、quagent を更新してもベースイメージを再ビルドする必要はありません。また接続はホストからのもののみを受け付けます）。
+ホストから VM の操作（コマンド実行、仮想端末、リポジトリの同期、PR 作成用の git fetch など）はすべて vsock 経由で行われます。通常のネットワークを経由しないため、nftables や DNS の影響を受けず、SSH も使用しません。VM 内部では quagent 自身が作業ユーザー権限で vsock 接続を待ち受けます（実行ごとに cloud-init の seed ISO でバイナリを持ち込むため、quagent を更新してもベースイメージを再ビルドする必要はありません。また接続はホストからのもののみを受け付け、同時接続上限も設けています）。
 
-なお、vsock では VM からホスト側の vsock リスナーへも接続可能です（通常のホスト環境では待受ポートは存在しませんが、vsock でリッスンするサービスがホスト側で動作している場合は VM から到達可能です）。
+なお、VM 内部で実行される一般コマンドに対しては seccomp フィルタにより `AF_VSOCK` ソケットの作成自体を遮断しているため、エージェントやビルド・テストプロセスからホスト側 vsock の任意待受ポートへ直接接続・ポートスキャンすることはできません（ホスト側の LLM/MCP 窓口への通信は `quagent.host:7070` 経由で常駐デーモン `quagent-guest` が中継します）。
 
 sshd は既定で停止されます（systemd-ssh-generator が生成する vsock / UNIX ソケットの sshd も含めて mask され、停止していない場合は VM の起動を中断します）。`quagent run --ssh` を指定した場合に限り、一時的な使い捨て鍵を用いてホストの `127.0.0.1` からユーザーが SSH 接続できるように構成されます（接続用コマンドは承認コンソールに表示されます）。
 
@@ -41,7 +41,7 @@ sshd は既定で停止されます（systemd-ssh-generator が生成する vsoc
 
 ホスト側の境界防御に加えて、VM 内部で実行されるコマンドに対してもエージェント自身では解除できない制限を適用します。ホスト側がポリシーを cloud-init 経由で `/etc/quagent/sandbox.json`（root 所有、パーミッション 0644）に配置し、VM 側の受信デーモン（`quagent-guest`）がすべてのコマンドをサンドボックス起動プロセス（`quagent-guest __sandbox`）経由で実行します。起動プロセスは `no_new_privs` フラグを設定した上で seccomp（システムコールの拒否）および Landlock（ファイルシステム書き込みの制限）を適用し、本来のコマンドへ `exec` します。一度適用された制限は昇格・解除できず、すべての子プロセスへ継承されます。VM 内部の作業ユーザーは非 root であるため、エージェントが自力で制限を解除することは不可能です。
 
-- **seccomp** (既定モード: `mode: "compat"`): `bpf`、カーネルモジュール操作 (`init_module` 等)、`kexec`、`reboot`、`ptrace`、`userfaultfd`、カーネル鍵操作 (`add_key` 等)、`name_to_handle_at`、`open_by_handle_at` を EPERM で拒否します。`mode: "strict"` ではさらに `mount`、`umount2`、`unshare`、`setns`、`chroot`、`pivot_root`、`io_uring`、`perf_event_open`、`process_vm_readv` なども拒否されます。rootless Docker デーモンはエージェントのプロセスツリー外（systemd 管理）で動作しているため通常は影響しませんが、エージェント自身が直接 `unshare`、`bwrap`、`io_uring` を使用するタスクは制限されます。
+- **seccomp** (既定モード: `mode: "compat"`): `bpf`、カーネルモジュール操作 (`init_module` 等)、`kexec`、`reboot`、`ptrace`、`userfaultfd`、カーネル鍵操作 (`add_key` 等)、`name_to_handle_at`、`open_by_handle_at` を EPERM で拒否します。また、`socket(AF_VSOCK)` の作成を EPERM で遮断し、VM 内部からホスト側の任意 vsock ポートへの直接接続やポートスキャンを防止します（`deny_vsock: false` で無効化可能）。`mode: "strict"` ではさらに `mount`、`umount2`、`unshare`、`setns`、`chroot`、`pivot_root`、`io_uring`、`perf_event_open`、`process_vm_readv` なども拒否されます。rootless Docker デーモンはエージェントのプロセスツリー外（systemd 管理）で動作しているため通常は影響しませんが、エージェント自身が直接 `unshare`、`bwrap`、`io_uring` を使用するタスクは制限されます。
   また、異なる ABI からの同一番号システムコール（32bit の `int 0x80`、x32 など）はアーキテクチャの詐称を含めて拒否され、プロセスは強制終了されます。64bit 以外のバイナリは実行できません。
 - **Landlock** (`landlock: true`、既定: 無効): ファイルやディレクトリの書き込み・作成・削除・リネームを `read_write_paths`（既定: ホームディレクトリ、`/work`、`/tmp`、`/var/tmp`、`/run/user/<uid>`、`/dev/shm`）の配下に限定します。読み取り操作は制限されません。カーネルが Landlock に未対応の場合は起動プロセスがエラーを返します（暗黙的な無効化は行いません）。`read_write_paths` を明示指定した際に存在しないパスが含まれている場合もエラーとなります（タイポ等によって意図せず全書き込みが拒否される事故を防ぐため）。カーネルの Landlock ABI バージョンが古い場合、`rename` / `link`（ABI < 2）や `truncate`（ABI < 3）は制限対象外となります。
 
@@ -49,11 +49,12 @@ sshd は既定で停止されます（systemd-ssh-generator が生成する vsoc
 "sandbox": {
   "enabled": true,
   "mode": "compat",
+  "deny_vsock": true,
   "landlock": false
 }
 ```
 
-`enabled` を省略した場合は有効（既定）となります。無効化する場合は `"enabled": false` を指定します。`extra_deny` に拒否対象とするシステムコール名を追加することも可能です（例: `["chroot"]`）。`read_write_paths` で Landlock の書き込み許可パスをカスタマイズできます。
+`enabled` を省略した場合は有効（既定）となります。無効化する場合は `"enabled": false` を指定します。`extra_deny` に拒否対象とするシステムコール名を追加することも可能です（例: `["chroot"]`）。`deny_vsock: false` で AF_VSOCK 遮断のみを無効化できます。`read_write_paths` で Landlock の書き込み許可パスをカスタマイズできます。
 
 この仕組みはホスト側の許可制を代替するものではなく、VM 内部における危険なシステムコールの侵入経路を最小化するための追加レイヤーです。作業に必要なシステムコールが遮断されてしまう場合は、`enabled: false` で無効化できます（なお、`__sandbox` は quagent の内部サブコマンドです）。
 
@@ -66,12 +67,12 @@ VM 内のエージェントがホストのリソースや人間の承認者を�
 - **DNS:** 同時処理クエリ数は最大 64 件、キャッシュするホスト名数は最大 4096 件です。
 - **Web 透過プロキシ:** 許可された IP 宛ての TCP 80/443 通信は透過プロキシを経由し、接続開始時に TLS の SNI または HTTP の Host ヘッダーが許可済みドメインと一致するかを検査します。ヘッダーの読み取り上限は 64 KiB です。ドメイン名を確認できない接続は安全側に倒して切断されます。`header_policy` が有効な場合は TLS 終端を行い、ヘッダの制限を実施します（平文 HTTP も同様に制限）。同時接続数は最大 64 本です。
 - **プルリクエスト (PR):** タイトルは最大 256 文字、本文は最大 60000 バイト、1 回の PR あたり最大 500 コミット、1 run あたり最大 10 ブランチ、PR 作成依頼の間隔は 10 秒以上を要求します。リポジトリ取り込み時のファイルサイズは 1 ファイルあたり 2 GiB まで、Git 操作のタイムアウトは 10 分です。
-- **ホストから VM へのコマンド実行:** コマンド出力は最大 1 MiB、実行タイムアウトは 10 分です。
+- **ホストから VM へのコマンド実行:** コマンド出力は最大 1 MiB、実行タイムアウトは 10 分、ゲスト側 vsock リスナーはホスト (CID 2) 以外を拒否し同時接続数は最大 64 本です。
 - **tmux 制御:** VM の出力によるウィンドウ名の改変、および tmux をバイパスするパススルーシーケンス（passthrough）は無効化されます。
-- **サービス窓口 (LLM プロキシ・MCP):** run ごとに生成される一時認証トークンを要求します。ホストの vsock でリッスンし、該当 run の VM（CID）以外からの接続は即座に切断します。同時接続数は最大 64 本であり、接続ごとにホスト側で別プロセスをフォークすることはありません。
+- **サービス窓口 (LLM プロキシ・MCP):** run ごとに生成される一時認証トークンを要求します。ホストの vsock でリッスンし、該当 run の VM（CID）以外からの接続は即座に切断してホスト監査ログに記録します。同時接続数は最大 64 本であり、接続ごとにホスト側で別プロセスをフォークすることはありません。
 - **ホスト側 QEMU のサンドボックス:** QEMU ネイティブ seccomp（`-sandbox on,spawn=deny` 等）、ホスト側 cBPF seccomp（`bpf`、`ptrace`、`mount` 等 31 種拒否）、Landlock（書き込みパス制限）、ホームディレクトリのホワイトリスト化、PID/IPC/UTS 名前空間の分離、コアダンプ無効化（`RLIMIT_CORE = 0`）により、万が一 VM エスケープが発生してもホスト環境への攻撃や秘密情報窃取を遮断します。
-- **VM 内部コマンドのサンドボックス:** seccomp により `bpf`、モジュール操作、`kexec`、`reboot`、`ptrace`、`userfaultfd`、カーネル鍵操作、`open_by_handle_at` などを拒否します。任意で Landlock によりファイル書き込みパスを制限します。
-- **ホスト監査ログ (vsock):** ゲストからのリクエストは 1 件ずつホスト側の `host.log` に記録されます（認証トークンが存在しない不正リクエストも含みます）。ホスト側で記録されるため、VM 内部から改変することはできません。
+- **VM 内部コマンドのサンドボックス:** seccomp により `bpf`、モジュール操作、`kexec`、`reboot`、`ptrace`、`userfaultfd`、カーネル鍵操作、`open_by_handle_at`、および `socket(AF_VSOCK)` を拒否します。任意で Landlock によりファイル書き込みパスを制限します。
+- **ホスト監査ログ (vsock):** ゲストからのリクエストおよび vsock 接続の拒否（CID 不一致・上限超過）は 1 件ずつホスト側の `host.log` に記録されます（認証トークンが存在しない不正リクエストも含みます）。ホスト側で記録されるため、VM 内部から改変することはできません。
 
 現時点での残存リスク・未制限事項: VM の仮想ディスク（overlay、最大 40 GiB）への書き込み制限はないため、ホスト側の空きディスク容量が消費される可能性があります。また、外部 LLM API の利用量（課金コスト）に対するクォータ制限は設けていません。
 

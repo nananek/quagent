@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/mdlayher/vsock"
 )
 
 // unix socket の上で受け口を動かし、Dial をそこへ向ける。
@@ -162,4 +164,88 @@ func TestFrameStream(t *testing.T) {
 	if tType != fStderr || string(data) != "error output" {
 		t.Fatalf("got (%d, %q), want (%d, 'error output')", tType, data, fStderr)
 	}
+}
+
+type mockAddrConn struct {
+	net.Conn
+	addr net.Addr
+}
+
+func (c *mockAddrConn) RemoteAddr() net.Addr { return c.addr }
+
+type mockGuestListener struct {
+	conns chan net.Conn
+}
+
+func (m *mockGuestListener) Accept() (net.Conn, error) {
+	c, ok := <-m.conns
+	if !ok {
+		return nil, net.ErrClosed
+	}
+	return c, nil
+}
+
+func (m *mockGuestListener) Close() error {
+	close(m.conns)
+	return nil
+}
+
+func (m *mockGuestListener) Addr() net.Addr {
+	return &vsock.Addr{ContextID: 2}
+}
+
+func TestHostOnlyVsockAddr(t *testing.T) {
+	ml := &mockGuestListener{conns: make(chan net.Conn, 5)}
+	l := &hostOnly{ml}
+
+	p1, p2 := net.Pipe()
+	p3, p4 := net.Pipe()
+	defer p1.Close()
+	defer p3.Close()
+
+	// 1. CID 3 (Host 以外) -> 拒否
+	ml.conns <- &mockAddrConn{Conn: p2, addr: &vsock.Addr{ContextID: 3}}
+	// 2. CID 2 (vsock.Host) -> 受付
+	ml.conns <- &mockAddrConn{Conn: p4, addr: &vsock.Addr{ContextID: vsock.Host}}
+
+	c, err := l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if a, ok := c.RemoteAddr().(*vsock.Addr); !ok || a.ContextID != vsock.Host {
+		t.Fatalf("expected vsock.Host conn, got %v", c.RemoteAddr())
+	}
+}
+
+func TestServeMaxConns(t *testing.T) {
+	ml := &mockGuestListener{conns: make(chan net.Conn, 70)}
+	defer ml.Close()
+
+	go func() {
+		_ = serve(ml)
+	}()
+
+	// maxGuestConns (64) 本の接続を流す (handle 内でヘッダ待ちになる)
+	conns := make([]net.Conn, maxGuestConns)
+	for i := 0; i < maxGuestConns; i++ {
+		c1, c2 := net.Pipe()
+		conns[i] = c1
+		ml.conns <- c2
+	}
+
+	// 65本目を流す -> セマフォ満杯のため即座に切断される
+	c65a, c65b := net.Pipe()
+	ml.conns <- c65b
+
+	buf := make([]byte, 1)
+	_, err := c65a.Read(buf)
+	if err == nil {
+		t.Fatal("expected 65th connection to be closed immediately")
+	}
+
+	for _, c := range conns {
+		_ = c.Close()
+	}
+	_ = c65a.Close()
 }

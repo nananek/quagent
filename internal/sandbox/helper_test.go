@@ -50,12 +50,42 @@ func TestSandboxHelper(t *testing.T) {
 			os.Exit(3)
 		}
 		wantGetppidEPERM()
+	case "exported-seccomp-with-vsock":
+		_ = unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+		if err := ApplySeccompWithVsock([]int{unix.SYS_GETPPID}, false); err != nil {
+			os.Exit(3)
+		}
+		wantGetppidEPERM()
 	case "exported-landlock":
 		_ = unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
 		dir := os.Getenv("QUAGENT_LANDLOCK_DIR")
 		if err := ApplyLandlock([]string{dir}, false); err != nil {
 			os.Exit(3)
 		}
+		os.Exit(0)
+	case "vsock-denied":
+		_ = unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+		if err := ApplySeccompWithVsock(nil, true); err != nil {
+			os.Exit(3)
+		}
+		// AF_VSOCK のソケット作成を試みる -> EPERM になるはず
+		fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
+		if err == nil {
+			unix.Close(fd)
+			fmt.Fprintln(os.Stderr, "AF_VSOCK ソケットの作成が成功してしまった")
+			os.Exit(4)
+		}
+		if !errors.Is(err, unix.EPERM) {
+			fmt.Fprintf(os.Stderr, "want EPERM, got: %v\n", err)
+			os.Exit(5)
+		}
+		// AF_UNIX のソケット作成を試みる -> 成功するはず
+		ufd, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "AF_UNIX ソケットの作成に失敗: %v\n", err)
+			os.Exit(6)
+		}
+		unix.Close(ufd)
 		os.Exit(0)
 	}
 }
@@ -272,6 +302,7 @@ func runHelper(t *testing.T, env map[string]string) {
 
 func TestExportedApply(t *testing.T) {
 	runHelper(t, map[string]string{"QUAGENT_SANDBOX_HELPER": "exported-seccomp"})
+	runHelper(t, map[string]string{"QUAGENT_SANDBOX_HELPER": "exported-seccomp-with-vsock"})
 
 	if err := ApplyLandlock([]string{"/nonexistent/path/for/test"}, true); err == nil {
 		t.Fatal("expected error for nonexistent path")
@@ -282,4 +313,8 @@ func TestExportedApply(t *testing.T) {
 		"QUAGENT_SANDBOX_HELPER": "exported-landlock",
 		"QUAGENT_LANDLOCK_DIR":   t.TempDir(),
 	})
+}
+
+func TestVsockDenied(t *testing.T) {
+	runHelper(t, map[string]string{"QUAGENT_SANDBOX_HELPER": "vsock-denied"})
 }

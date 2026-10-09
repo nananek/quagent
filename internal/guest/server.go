@@ -74,6 +74,7 @@ func (l *hostOnly) Accept() (net.Conn, error) {
 		if a, ok := c.RemoteAddr().(*vsock.Addr); ok && a.ContextID == vsock.Host {
 			return c, nil
 		}
+		log.Printf("vsock host 以外からの接続を拒否: remote=%v", c.RemoteAddr())
 		c.Close()
 	}
 }
@@ -115,14 +116,27 @@ func closeWrite(c net.Conn) {
 	}
 }
 
+// maxGuestConns は VM 内の受け口で同時に受け付けるコマンド接続の上限。
+const maxGuestConns = 64
+
 func serve(l net.Listener) error {
 	env := baseEnv()
+	sem := make(chan struct{}, maxGuestConns)
 	for {
 		c, err := l.Accept()
 		if err != nil {
 			return err
 		}
-		go handle(c, env)
+		select {
+		case sem <- struct{}{}:
+			go func() {
+				defer func() { <-sem }()
+				handle(c, env)
+			}()
+		default:
+			log.Printf("vsock 同時接続上限 (%d) 超過のため拒否: remote=%v", maxGuestConns, c.RemoteAddr())
+			c.Close()
+		}
 	}
 }
 
