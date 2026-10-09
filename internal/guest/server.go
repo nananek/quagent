@@ -88,18 +88,21 @@ func relay(l net.Listener, dial func() (net.Conn, error)) {
 			return
 		}
 		leader := GetSessionPID()
-		if leader > 0 {
-			callerPID, err := CallerPID(c.RemoteAddr())
-			if err != nil {
-				log.Printf("relay: 接続元プロセスの特定に失敗したため拒否 (remote=%v): %v", c.RemoteAddr(), err)
-				c.Close()
-				continue
-			}
-			if !IsAllowedCaller(procDir, callerPID, leader) {
-				log.Printf("relay: 未許可プロセス (PID %d) からの窓口接続を遮断 (sessionLeader=%d)", callerPID, leader)
-				c.Close()
-				continue
-			}
+		if leader <= 0 {
+			log.Printf("relay: セッションリーダー未設定のため窓口接続を遮断 (remote=%v)", c.RemoteAddr())
+			c.Close()
+			continue
+		}
+		callerPID, err := CallerPID(c.RemoteAddr())
+		if err != nil {
+			log.Printf("relay: 接続元プロセスの特定に失敗したため拒否 (remote=%v): %v", c.RemoteAddr(), err)
+			c.Close()
+			continue
+		}
+		if !IsAllowedCaller(procDir, callerPID, leader) {
+			log.Printf("relay: 未許可プロセス (PID %d) からの窓口接続を遮断 (sessionLeader=%d)", callerPID, leader)
+			c.Close()
+			continue
 		}
 		select {
 		case sem <- struct{}{}:
