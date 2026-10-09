@@ -182,8 +182,15 @@ func (m *mockGuestListener) Accept() (net.Conn, error) {
 	}
 	return c, nil
 }
-func (m *mockGuestListener) Close() error   { close(m.conns); return nil }
-func (m *mockGuestListener) Addr() net.Addr { return &vsock.Addr{ContextID: 2} }
+
+func (m *mockGuestListener) Close() error {
+	close(m.conns)
+	return nil
+}
+
+func (m *mockGuestListener) Addr() net.Addr {
+	return &vsock.Addr{ContextID: 2}
+}
 
 func TestHostOnlyVsockAddr(t *testing.T) {
 	ml := &mockGuestListener{conns: make(chan net.Conn, 5)}

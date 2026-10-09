@@ -62,11 +62,15 @@ func buildSeccompFilter(arch uint32, errno uint32, deny []int, denyVsock bool) [
 		}
 		if sysSocket != 0 {
 			f = append(f,
-				unix.SockFilter{Code: bpfJEQ, Jt: 0, Jf: 4, K: sysSocket}, // nr == SYS_SOCKET なら次へ、不一致なら 4 命令スキップ
-				unix.SockFilter{Code: bpfLD, K: 16},                       // A = args[0] (domain)
-				unix.SockFilter{Code: bpfJEQ, Jt: 0, Jf: 1, K: unix.AF_VSOCK}, // domain == AF_VSOCK なら次へ、不一致なら 1 命令スキップ
+				// nr == SYS_SOCKET なら次へ、不一致なら 4 命令スキップ
+				unix.SockFilter{Code: bpfJEQ, Jt: 0, Jf: 4, K: sysSocket},
+				// A = args[0] (domain)
+				unix.SockFilter{Code: bpfLD, K: 16},
+				// domain == AF_VSOCK なら次へ、不一致なら 1 命令スキップ
+				unix.SockFilter{Code: bpfJEQ, Jt: 0, Jf: 1, K: unix.AF_VSOCK},
 				unix.SockFilter{Code: bpfRET, K: unix.SECCOMP_RET_ERRNO | (errno & 0xffff)},
-				unix.SockFilter{Code: bpfLD, K: 0}, // A = seccomp_data.nr を復元
+				// A = seccomp_data.nr を復元
+				unix.SockFilter{Code: bpfLD, K: 0},
 			)
 		}
 	}
