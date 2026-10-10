@@ -34,3 +34,6 @@ func LogsDir() string { return filepath.Join(StateDir(), "logs") }
 
 // ConfigFile はユーザー設定ファイル (~/.config/quagent/config.json)。
 func ConfigFile() string { return filepath.Join(xdg("XDG_CONFIG_HOME", ".config"), "config.json") }
+
+// SkillsDir はユーザー共通スキル (~/.config/quagent/skills) の置き場。
+func SkillsDir() string { return filepath.Join(xdg("XDG_CONFIG_HOME", ".config"), "skills") }

@@ -49,6 +49,22 @@ type Config struct {
 	QemuSandbox *QemuSandboxPolicy `json:"qemu_sandbox,omitempty"`
 	// Resources はホスト側の計算資源 (ストレージ、CPU、メモリ、I/O) の保護設定。
 	Resources *ResourcePolicy `json:"resources,omitempty"`
+	// SkillsDir はユーザー共通スキルの置き場 (ホスト側)。未指定なら paths.SkillsDir()。
+	SkillsDir string `json:"skills_dir,omitempty"`
+}
+
+// SkillsDirResolved は共通スキルのホスト側パスを返す (未指定なら paths.SkillsDir())。
+// チルダ (~/) で始まるパスはホームディレクトリに展開する。
+func (c *Config) SkillsDirResolved() string {
+	if c != nil && c.SkillsDir != "" {
+		if strings.HasPrefix(c.SkillsDir, "~/") {
+			if home, err := os.UserHomeDir(); err == nil {
+				return filepath.Join(home, c.SkillsDir[2:])
+			}
+		}
+		return c.SkillsDir
+	}
+	return paths.SkillsDir()
 }
 
 // ContentGuardPolicy は秘密情報・認証情報の漏洩防止 (DLP) 検査の設定。

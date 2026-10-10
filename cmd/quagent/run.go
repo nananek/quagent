@@ -663,6 +663,9 @@ runcmd:
 		}
 		defer finishTmp(g, tmpDir, work)
 	}
+	if err := copySkills(g, cfg.SkillsDirResolved()); err != nil {
+		return err
+	}
 	if err := ag.setup(g, cfg, providers, svc.Token); err != nil {
 		return err
 	}

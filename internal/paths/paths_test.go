@@ -34,6 +34,9 @@ func TestPathsWithEnv(t *testing.T) {
 	if got := ConfigFile(); got != filepath.Join(tmp, "config", "quagent", "config.json") {
 		t.Errorf("ConfigFile() = %q, want %q", got, filepath.Join(tmp, "config", "quagent", "config.json"))
 	}
+	if got := SkillsDir(); got != filepath.Join(tmp, "config", "quagent", "skills") {
+		t.Errorf("SkillsDir() = %q, want %q", got, filepath.Join(tmp, "config", "quagent", "skills"))
+	}
 }
 
 func TestPathsFallback(t *testing.T) {
@@ -58,5 +61,8 @@ func TestPathsFallback(t *testing.T) {
 	}
 	if got := ConfigFile(); got != filepath.Join(home, ".config", "quagent", "config.json") {
 		t.Errorf("ConfigFile() = %q, want %q", got, filepath.Join(home, ".config", "quagent", "config.json"))
+	}
+	if got := SkillsDir(); got != filepath.Join(home, ".config", "quagent", "skills") {
+		t.Errorf("SkillsDir() = %q, want %q", got, filepath.Join(home, ".config", "quagent", "skills"))
 	}
 }

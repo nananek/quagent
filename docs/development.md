@@ -25,7 +25,7 @@ make build
 
 ## リポジトリ構成
 
-- `cmd/quagent` … CLI および TUI のエントリポイント、VM 実行制御 (`run.go`、`guestops.go` など)
+- `cmd/quagent` … CLI および TUI のエントリポイント、VM 実行制御 (`run.go`、`guestops.go`、`skills.go` など)
 - `internal/image` … ベースイメージのビルドおよび管理（レシピは `recipes/<名前>/`）
 - `internal/vm` … QEMU 起動コンポーネント（seed ISO 作成、overlay、起動パラメータ構築）
 - `internal/netns` … 子 netns 内の nftables 制御、自前 DNS、透過プロキシ、TLS 終端
