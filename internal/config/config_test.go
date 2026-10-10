@@ -344,3 +344,34 @@ func TestContentGuardPolicy(t *testing.T) {
 		t.Error("explicitly enabled policy should be enabled")
 	}
 }
+
+func TestSkillsDirResolved(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+
+	var nilCfg *Config
+	wantDefault := filepath.Join(tmp, "quagent", "skills")
+	if got := nilCfg.SkillsDirResolved(); got != wantDefault {
+		t.Errorf("nilCfg.SkillsDirResolved() = %q, want %q", got, wantDefault)
+	}
+
+	emptyCfg := &Config{}
+	if got := emptyCfg.SkillsDirResolved(); got != wantDefault {
+		t.Errorf("emptyCfg.SkillsDirResolved() = %q, want %q", got, wantDefault)
+	}
+
+	customDir := filepath.Join(tmp, "custom-skills")
+	customCfg := &Config{SkillsDir: customDir}
+	if got := customCfg.SkillsDirResolved(); got != customDir {
+		t.Errorf("customCfg.SkillsDirResolved() = %q, want %q", got, customDir)
+	}
+
+	home, err := os.UserHomeDir()
+	if err == nil {
+		tildeCfg := &Config{SkillsDir: "~/my-skills"}
+		wantTilde := filepath.Join(home, "my-skills")
+		if got := tildeCfg.SkillsDirResolved(); got != wantTilde {
+			t.Errorf("tildeCfg.SkillsDirResolved() = %q, want %q", got, wantTilde)
+		}
+	}
+}
