@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 
@@ -148,27 +149,75 @@ type AfterChoice struct {
 	DiscardLogs bool
 }
 
+// agentRestartOptions は再起動先のエージェント候補に「(再起動をやめて) 戻る」を足した選択肢を返す。
+func agentRestartOptions(agents []string) []huh.Option[string] {
+	var opts []huh.Option[string]
+	for _, a := range agents {
+		opts = append(opts, huh.NewOption(a, a))
+	}
+	opts = append(opts, huh.NewOption("(再起動をやめて) 戻る", "back"))
+	return opts
+}
+
+// initialAgentChoice は現在または直前のエージェント名から、選択初期値を決める。
+func initialAgentChoice(agents []string, current, picked string) string {
+	if picked != "" && picked != "back" && slices.Contains(agents, picked) {
+		return picked
+	}
+	if slices.Contains(agents, current) {
+		return current
+	}
+	if len(agents) > 0 {
+		return agents[0]
+	}
+	return ""
+}
+
 // AfterSession はセッション終了後に、エージェントを選び直して再起動するか終了するかを尋ね、
 // 終了のときだけログを残すかを尋ねる。current は直前まで動かしていたエージェント (選択の初期値)。
+// 再起動のエージェント選択では「(再起動をやめて) 戻る」や Esc で次の操作の選択に戻れる。
 // 中断 (Ctrl-C) されたときは、従来どおり「終了・ログを残す」として扱う。
 func AfterSession(agents []string, current string) AfterChoice {
 	action, agent, logs := "restart", current, "keep"
-	var agentOpts []huh.Option[string]
-	for _, a := range agents {
-		agentOpts = append(agentOpts, huh.NewOption(a, a))
+	agentOpts := agentRestartOptions(agents)
+	for {
+		err := newForm(
+			huh.NewGroup(
+				huh.NewNote().Title("エージェントが終了した").
+					Description("再起動は同じ VM のまま行う。終了すると VM は破棄される (VM の中の作業は残らない)。"),
+				huh.NewSelect[string]().Title("次の操作").Options(
+					huh.NewOption("エージェントを選び直して再起動 (同じ VM のまま)", "restart"),
+					huh.NewOption("終了", "quit"),
+				).Value(&action),
+			),
+		).Run()
+		if err != nil {
+			return AfterChoice{}
+		}
+		if action == "quit" {
+			break
+		}
+
+		picked := initialAgentChoice(agents, current, agent)
+
+		km := huh.NewDefaultKeyMap()
+		km.Quit = key.NewBinding(key.WithKeys("ctrl+c", "esc"))
+
+		err = newForm(
+			huh.NewGroup(
+				huh.NewSelect[string]().Title("エージェント").Options(agentOpts...).Value(&picked),
+			),
+		).WithKeyMap(km).Run()
+
+		if err != nil || picked == "back" {
+			// 「(再起動をやめて) 戻る」または Esc が押されたら、再起動をやめて次の操作の選択に戻る。
+			continue
+		}
+
+		return AfterChoice{Restart: true, Agent: picked}
 	}
+
 	err := newForm(
-		huh.NewGroup(
-			huh.NewNote().Title("エージェントが終了した").
-				Description("再起動は同じ VM のまま行う。終了すると VM は破棄される (VM の中の作業は残らない)。"),
-			huh.NewSelect[string]().Title("次の操作").Options(
-				huh.NewOption("エージェントを選び直して再起動 (同じ VM のまま)", "restart"),
-				huh.NewOption("終了", "quit"),
-			).Value(&action),
-		),
-		huh.NewGroup(
-			huh.NewSelect[string]().Title("エージェント").Options(agentOpts...).Value(&agent),
-		).WithHideFunc(func() bool { return action != "restart" }),
 		huh.NewGroup(
 			huh.NewSelect[string]().Title("この VM のログ").
 				Description("host.log などの host 側の記録 (VM の中のものではない)").
@@ -176,12 +225,12 @@ func AfterSession(agents []string, current string) AfterChoice {
 					huh.NewOption("残す", "keep"),
 					huh.NewOption("残さない", "discard"),
 				).Value(&logs),
-		).WithHideFunc(func() bool { return action != "quit" }),
+		),
 	).Run()
 	if err != nil {
 		return AfterChoice{}
 	}
-	return AfterChoice{Restart: action == "restart", Agent: agent, DiscardLogs: logs == "discard"}
+	return AfterChoice{Restart: false, DiscardLogs: logs == "discard"}
 }
 
 var errBack = errors.New("back")

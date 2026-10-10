@@ -176,3 +176,55 @@ func TestHasAnyImage(t *testing.T) {
 		t.Error("expected hasAnyImage = true when an image exists")
 	}
 }
+
+func TestAgentRestartOptions(t *testing.T) {
+	agents := []string{"opencode", "claude", "agy", "codex"}
+	opts := agentRestartOptions(agents)
+
+	if len(opts) != len(agents)+1 {
+		t.Fatalf("len(opts) = %d, want %d", len(opts), len(agents)+1)
+	}
+
+	for i, a := range agents {
+		if opts[i].Value != a || opts[i].Key != a {
+			t.Errorf("opts[%d] = Key:%q Value:%q, want %q", i, opts[i].Key, opts[i].Value, a)
+		}
+	}
+
+	last := opts[len(opts)-1]
+	if last.Value != "back" {
+		t.Errorf("last option value = %q, want %q", last.Value, "back")
+	}
+	if last.Key != "(再起動をやめて) 戻る" {
+		t.Errorf("last option label = %q, want %q", last.Key, "(再起動をやめて) 戻る")
+	}
+}
+
+func TestInitialAgentChoice(t *testing.T) {
+	agents := []string{"opencode", "claude", "agy"}
+
+	// picked が有効な場合
+	if got := initialAgentChoice(agents, "opencode", "claude"); got != "claude" {
+		t.Errorf("initialAgentChoice with valid picked = %q, want %q", got, "claude")
+	}
+
+	// picked が "back" の場合は current に戻る
+	if got := initialAgentChoice(agents, "opencode", "back"); got != "opencode" {
+		t.Errorf("initialAgentChoice with 'back' picked = %q, want %q", got, "opencode")
+	}
+
+	// picked が空文字の場合は current になる
+	if got := initialAgentChoice(agents, "agy", ""); got != "agy" {
+		t.Errorf("initialAgentChoice with empty picked = %q, want %q", got, "agy")
+	}
+
+	// current がリストにない場合は先頭のエージェントになる
+	if got := initialAgentChoice(agents, "unknown", ""); got != "opencode" {
+		t.Errorf("initialAgentChoice with unknown current = %q, want %q", got, "opencode")
+	}
+
+	// エージェントリストが空の場合
+	if got := initialAgentChoice(nil, "current", ""); got != "" {
+		t.Errorf("initialAgentChoice with empty agents = %q, want empty string", got)
+	}
+}
