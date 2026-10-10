@@ -189,6 +189,19 @@ func TestArchHardeningSettings(t *testing.T) {
 	}
 }
 
+// arch の焼き込みは、開始直後に serial-getty を止める。ttyS0 を getty が
+// 再初期化すると焼き込みの出力や完了マーカーが消え、ビルドが失敗扱いになる
+// (放置された VM が login プロンプトで止まって見えるのと同じ症状)。
+func TestArchStopsSerialGetty(t *testing.T) {
+	r, err := FindRecipe("arch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(r.userData, "systemctl stop serial-getty@ttyS0.service") {
+		t.Error("arch の user-data に serial-getty の停止が無い")
+	}
+}
+
 // 差分更新なのに前回のイメージが無ければ、何も焼かずにエラーにする。
 func TestBuildIncrementalNeedsPrevious(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
