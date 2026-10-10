@@ -105,12 +105,17 @@ rootless Docker コンテナに対しても、`sandbox.Policy` に基づく secc
 
 この仕組みはホスト側の境界制御を代替するものではなく、VM 内部における攻撃面を最小化するための追加レイヤーです。作業に必要なシステムコールが遮断されてしまう場合は、`"enabled": false` で無効化できます。
 
-### 6. rootless Docker 向け OCI Pull-through Cache（承認制・vsock中継）
-使い捨て VM では終了時に Docker ストレージが破棄されるため、ベースイメージの取得が頻発します。quagent はホスト側に専用の OCI/Docker レジストリ Pull-through Cache を配備し、vsock 経由（ゲスト側 `127.0.0.1:5000`）で安全にイメージを中継・キャッシュします。
-- **承認制 upstream ダウンロード:** キャッシュヒット時は完全オフラインかつ承認不要で即時返却されます。キャッシュミス時にホスト側が外部レジストリ（Docker Hub / ghcr.io）からダウンロードする際は、承認コンソールで利用者に確認（`y`/`n`）を求めます。同一セッションで承認されたリポジトリは再確認なしにスムーズにダウンロードされます。
-- **マルチレジストリ対応:** Docker Hub (`docker.io`) は `daemon.json` の `registry-mirrors` により完全自動・透過でミラーされ、`ghcr.io` は `127.0.0.1:5000/ghcr.io/...` プレフィックスでキャッシュを取得可能です。
-- **読み取り専用と完全性検証:** キャッシュサーバーは `GET`/`HEAD` のみを許可し、VM からの書き込み（プッシュ）は `405 Method Not Allowed` で拒否します。取得したレイヤー blob は SHA256 ダイジェストを照合した上でコンテンツアドレス形式で保存されます。
-- **ホストリソース保護と管理:** キャッシュ容量（既定 10 GiB）を制限し、LRU で古い blob を自動パージします。CLI コマンド（`quagent cache ls`, `quagent cache clean`）および TUI から全クリアが可能です。
+### 6. rootless Docker & 言語パッケージ向け Pull-through Cache（承認制・vsock中継）
+使い捨て VM では終了時にストレージが破棄されるため、ベースイメージや言語パッケージの再取得が頻発します。quagent はホスト側に専用の Pull-through Cache プロキシを配備し、vsock 経由（ゲスト側 `127.0.0.1:5000`）で安全にイメージおよびパッケージを中継・キャッシュします。
+- **マルチエコシステム対応:**
+  - **Docker:** `docker.io` は `registry-mirrors` により透過ミラー、`ghcr.io` はプレフィックス形式で取得。
+  - **Go:** `GOPROXY="http://127.0.0.1:5000/go,direct"` による Go モジュールキャッシュ。
+  - **Cargo (Rust):** `sparse+http://127.0.0.1:5000/cargo/index/` による crates.io Sparse Index & Crates キャッシュ（`config.json` の `dl` を自動書き換え）。
+  - **npm (Node.js):** `registry=http://127.0.0.1:5000/npm/` による npm レジストリ & tarball キャッシュ（メタデータ内の tarball URL を自動書き換え）。
+  - **PyPI (Python):** `index-url=http://127.0.0.1:5000/pypi/simple/` による Simple API & Wheel キャッシュ（リンクを自動書き換え）。
+- **バッチ集約承認 (連打防止):** 短時間に大量の並行・連続リクエストが発生する言語パッケージマネージャーに対し、デバウンスウィンドウ（400ms）による集約キューを配備。複数パッケージを 1 つのバッチに集約して承認コンソールで一括確認（`[y]` 今回承認 / `[a]` セッション中常に承認 / `[n]` 拒否）を求め、依存関係インストール時の承認連打を根本から防止します。
+- **読み取り専用と完全性検証:** キャッシュサーバーは `GET`/`HEAD` のみを許可し、VM からの書き込みは `405 Method Not Allowed` で拒否します。取得したファイルは SHA256 ダイジェスト等を検証した上で保存されます。
+- **ホストリソース保護と管理:** キャッシュ容量（既定 10 GiB）を制限し、LRU で古いファイルを自動パージします。CLI コマンド（`quagent cache ls`, `quagent cache clean [ecosystem]`）および TUI から確認・削除が可能です。
 
 ## 暴走エージェント対策: 全インターフェースに上限を設けてホスト資源枯渇を防ぐ
 

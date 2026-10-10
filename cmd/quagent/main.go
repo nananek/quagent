@@ -263,38 +263,79 @@ func cmdCache(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Docker キャッシュ (%s):\n", cacheDir)
-		fmt.Printf("  レイヤー数: %d\n", stats.TotalBlobs)
-		fmt.Printf("  合計サイズ: %s\n", dockercache.FormatSize(stats.TotalBlobBytes))
+		var totalBytes int64 = stats.TotalBlobBytes
+		for _, es := range stats.Packages {
+			totalBytes += es.TotalBytes
+		}
+
+		fmt.Printf("キャッシュ状況 (%s):\n", cacheDir)
+		fmt.Printf("  Docker: %d レイヤー (%s)\n", stats.TotalBlobs, dockercache.FormatSize(stats.TotalBlobBytes))
+		for _, eco := range []string{"go", "cargo", "npm", "pypi"} {
+			if es, ok := stats.Packages[eco]; ok {
+				fmt.Printf("  %s: %d ファイル (%s)\n", eco, es.TotalFiles, dockercache.FormatSize(es.TotalBytes))
+			} else {
+				fmt.Printf("  %s: なし\n", eco)
+			}
+		}
+		fmt.Printf("  合計使用量: %s\n", dockercache.FormatSize(totalBytes))
+
 		if len(stats.Images) > 0 {
-			fmt.Println("  キャッシュされたイメージ:")
+			fmt.Println("  キャッシュされた Docker イメージ:")
 			for _, img := range stats.Images {
 				fmt.Printf("    - %s/%s:%s (取得日時: %s)\n",
 					img.Registry, img.Repository, img.Reference,
 					img.CachedAt.Format("2006-01-02 15:04:05"))
 			}
-		} else {
-			fmt.Println("  キャッシュされたイメージ: なし")
 		}
 		return nil
 	}
 	if args[0] == "clean" || args[0] == "clear" || args[0] == "rm" {
+		target := "all"
+		if len(args) > 1 {
+			target = args[1]
+		}
 		stats, _ := dockercache.InspectCache(cacheDir)
 		freedSize := ""
 		if stats != nil {
-			freedSize = dockercache.FormatSize(stats.TotalBlobBytes)
+			var total int64
+			if target == "all" {
+				total = stats.TotalBlobBytes
+				for _, es := range stats.Packages {
+					total += es.TotalBytes
+				}
+			} else if target == "docker" {
+				total = stats.TotalBlobBytes
+			} else if es, ok := stats.Packages[target]; ok {
+				total = es.TotalBytes
+			}
+			if total > 0 {
+				freedSize = dockercache.FormatSize(total)
+			}
 		}
-		if err := dockercache.CleanCache(cacheDir); err != nil {
-			return fmt.Errorf("キャッシュ削除失敗: %w", err)
+
+		if target == "all" {
+			if err := dockercache.CleanCache(cacheDir); err != nil {
+				return fmt.Errorf("キャッシュ削除失敗: %w", err)
+			}
+			if freedSize != "" {
+				fmt.Printf("キャッシュを全削除しました (%s 解放)\n", freedSize)
+			} else {
+				fmt.Println("キャッシュを全削除しました")
+			}
+			return nil
+		}
+
+		if err := dockercache.CleanEcosystemCache(cacheDir, target); err != nil {
+			return err
 		}
 		if freedSize != "" {
-			fmt.Printf("Docker キャッシュを全削除しました (%s 解放)\n", freedSize)
+			fmt.Printf("%s キャッシュを削除しました (%s 解放)\n", target, freedSize)
 		} else {
-			fmt.Println("Docker キャッシュを全削除しました")
+			fmt.Printf("%s キャッシュを削除しました\n", target)
 		}
 		return nil
 	}
-	return fmt.Errorf("cache: ls または clean を指定してください")
+	return fmt.Errorf("cache: ls または clean [docker|go|cargo|npm|pypi|all] を指定してください")
 }
 
 // consoleCommand は承認コンソール UI を動かす隠しサブコマンド名。

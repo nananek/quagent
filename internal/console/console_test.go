@@ -181,6 +181,100 @@ func TestAskDockerDownload(t *testing.T) {
 	}
 }
 
+func TestAskBatchDownload(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "console-batch.sock")
+	m, err := access.NewManager(noApply{}, filepath.Join(t.TempDir(), "always.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(m, sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+
+	c, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	enc, dec := json.NewEncoder(c), json.NewDecoder(c)
+	if err := enc.Encode(Msg{Type: "ui"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var lastID int
+	ask := func(info BatchDownloadInfo) (chan struct {
+		kind access.Kind
+		err  error
+	}, Msg) {
+		resCh := make(chan struct {
+			kind access.Kind
+			err  error
+		}, 1)
+		go func() {
+			k, e := s.AskBatchDownload(info)
+			resCh <- struct {
+				kind access.Kind
+				err  error
+			}{k, e}
+		}()
+		for {
+			_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+			var msg Msg
+			if err := dec.Decode(&msg); err != nil {
+				t.Fatal(err)
+			}
+			if msg.Type == "batchrequest" && msg.ID > lastID {
+				lastID = msg.ID
+				return resCh, msg
+			}
+		}
+	}
+
+	// 1. 今回のみ承認 (access.Once)
+	resCh, req := ask(BatchDownloadInfo{
+		Ecosystem: "cargo",
+		Items:     []BatchItem{{Ecosystem: "cargo", Name: "serde", Version: "1.0.197"}},
+	})
+	if req.BatchEcosystem != "cargo" || len(req.BatchItems) != 1 || req.BatchItems[0].Name != "serde" {
+		t.Fatalf("バッチリクエスト内容が違う: %+v", req)
+	}
+	if err := enc.Encode(Msg{Type: "batchdecide", ID: req.ID, Status: access.Approved, Kind: access.Once}); err != nil {
+		t.Fatal(err)
+	}
+	res := <-resCh
+	if res.err != nil || res.kind != access.Once {
+		t.Fatalf("Once 承認期待だが got kind=%v, err=%v", res.kind, res.err)
+	}
+
+	// 2. セッション承認 (access.Session)
+	resCh, req = ask(BatchDownloadInfo{
+		Ecosystem: "npm",
+		Items:     []BatchItem{{Ecosystem: "npm", Name: "express", Version: "4.18.2"}},
+	})
+	if err := enc.Encode(Msg{Type: "batchdecide", ID: req.ID, Status: access.Approved, Kind: access.Session}); err != nil {
+		t.Fatal(err)
+	}
+	res = <-resCh
+	if res.err != nil || res.kind != access.Session {
+		t.Fatalf("Session 承認期待だが got kind=%v, err=%v", res.kind, res.err)
+	}
+
+	// 3. 拒否
+	resCh, req = ask(BatchDownloadInfo{
+		Ecosystem: "pypi",
+		Items:     []BatchItem{{Ecosystem: "pypi", Name: "malicious-pkg", Version: "0.1.0"}},
+	})
+	if err := enc.Encode(Msg{Type: "batchdecide", ID: req.ID, Status: access.Denied}); err != nil {
+		t.Fatal(err)
+	}
+	res = <-resCh
+	if res.err == nil {
+		t.Fatal("拒否したのに nil が返った")
+	}
+}
+
 func TestClipboardPreview(t *testing.T) {
 	// 1. 通常テキスト
 	if got := preview([]byte("hello world")); got != "hello world" {
@@ -458,6 +552,27 @@ func TestTUIModelDecisions(t *testing.T) {
 	}
 	// dockerrequest の決着
 	newM, _ = m.Update(socketMsg(Msg{Type: "dockersettled", ID: 3, Status: access.Approved}))
+	m = newM.(model)
+
+	// 3.6 batchrequest 要求 (y で Once, a で Session)
+	newM, _ = m.Update(socketMsg(Msg{
+		Type:           "batchrequest",
+		ID:             4,
+		BatchEcosystem: "cargo",
+		BatchItems:     []BatchItem{{Ecosystem: "cargo", Name: "serde", Version: "1.0.197"}},
+	}))
+	m = newM.(model)
+	newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m = newM.(model)
+	select {
+	case out := <-m.outChan:
+		if out.Type != "batchdecide" || out.Status != access.Approved || out.Kind != access.Session {
+			t.Errorf("expected session batchdecide, got %+v", out)
+		}
+	default:
+		t.Fatal("expected batchdecide on outChan")
+	}
+	newM, _ = m.Update(socketMsg(Msg{Type: "batchsettled", ID: 4, Status: access.Approved, Kind: access.Session}))
 	m = newM.(model)
 
 	// 4. request 申請と決定 (1, 2, 3, d, q)

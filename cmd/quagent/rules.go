@@ -30,6 +30,10 @@ const guestRulesContent = `# quagent VM 実行環境の制約と運用ルール
 - **Docker Hub (docker.io)**: daemon.json の registry-mirrors により自動的にホスト側のローカルキャッシュ (127.0.0.1:5000) へ問い合わせます。通常通り docker pull <image> や docker run 等を実行してください（初回のみホスト側で取得承認を求められます）。
 - **GitHub Container Registry (ghcr.io)**: docker pull 127.0.0.1:5000/ghcr.io/<owner>/<repo>:<tag> のプレフィックス形式で指定することで、ホスト側のキャッシュプロキシ経由で取得できます。
 
+## 5. 言語パッケージのキャッシュとバッチ集約承認 (Go, Cargo, npm, PyPI)
+- 環境変数および設定ファイル (GOPROXY, config.toml, .npmrc, pip.conf) により、各パッケージマネージャーは自動的にローカルキャッシュ (127.0.0.1:5000) を参照します。
+- **バッチ集約承認**: 初回の未キャッシュ依存関係ダウンロード時は、短時間のリクエストが自動的に 1 つのバッチに集約され、承認コンソールで一括確認を求められます。[a] を選ぶとそのセッション中は該当エコシステムのダウンロードが常に自動承認されます。
+- **キャッシュヒット**: 一度キャッシュされたパッケージは完全オフラインかつ承認不要で即座に高速返却されます。
 `
 
 // linkRulesScript は VM 内の ~/.quagent/rules.md を各エージェント

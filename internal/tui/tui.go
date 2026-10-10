@@ -151,15 +151,19 @@ func cleanCacheMenu() error {
 	if err != nil {
 		return err
 	}
-	desc := fmt.Sprintf("現在のキャッシュ: レイヤー %d 個 (%s)", stats.TotalBlobs, dockercache.FormatSize(stats.TotalBlobBytes))
-	if stats.TotalBlobs == 0 {
-		return newForm(huh.NewGroup(huh.NewNote().Title("Docker キャッシュ").Description("キャッシュは空です。"))).Run()
+	var totalBytes int64 = stats.TotalBlobBytes
+	for _, es := range stats.Packages {
+		totalBytes += es.TotalBytes
+	}
+	desc := fmt.Sprintf("現在のキャッシュ: Docker %d レイヤー, 合計 %s", stats.TotalBlobs, dockercache.FormatSize(totalBytes))
+	if totalBytes == 0 {
+		return newForm(huh.NewGroup(huh.NewNote().Title("キャッシュ").Description("キャッシュは空です。"))).Run()
 	}
 
 	var confirm bool
 	err = newForm(huh.NewGroup(
 		huh.NewConfirm().
-			Title("Docker キャッシュを全削除しますか?").
+			Title("キャッシュを全削除しますか?").
 			Description(desc).
 			Value(&confirm),
 	)).Run()
@@ -170,7 +174,7 @@ func cleanCacheMenu() error {
 	if err := dockercache.CleanCache(paths.DockerCacheDir()); err != nil {
 		return fmt.Errorf("キャッシュ削除失敗: %w", err)
 	}
-	return newForm(huh.NewGroup(huh.NewNote().Title("完了").Description("Docker キャッシュを全削除しました。"))).Run()
+	return newForm(huh.NewGroup(huh.NewNote().Title("完了").Description("キャッシュを全削除しました。"))).Run()
 }
 
 // AfterChoice はエージェントのセッションが終わったあとに選んだ次の操作。

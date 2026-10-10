@@ -187,12 +187,12 @@ VM からの新規アウトバウンド通信は既定ですべて遮断され�
 - 「今後常に許可」したドメインは `~/.local/share/quagent/always-allow.json` に保存され、`quagent always ls` / `quagent always rm` から確認・削除できます。
 - 許可ドメインであっても、プライベート IP や内部向けアドレスへの通信、および SNI/Host ヘッダーが一致しない通信は即座に切断されます。
 
-- **Docker イメージの Pull-through キャッシュ:**
-  - VM 内の rootless Docker によるイメージ取得は、vsock 経由でホスト側のローカルキャッシュ（`127.0.0.1:5000`）へ自動転送されます。
+- **Docker および言語パッケージの Pull-through キャッシュ:**
+  - VM 内の rootless Docker および主要言語パッケージマネージャー（Go, Cargo, npm, pip）による取得は、vsock 経由でホスト側のローカルキャッシュ（`127.0.0.1:5000`）へ自動転送されます。
   - **キャッシュヒット時:** 完全オフラインかつ承認不要で即座に高速返却されます。
-  - **upstream 取得時 (キャッシュミス時):** 外部レジストリからレイヤーをダウンロードする際は、承認コンソールで人間への確認（`[y]` 承認 / `[n]` 拒否）が求められます。
-  - **レジストリ対応:** Docker Hub (`docker.io`) は通常通り `docker pull <image>` で完全透過、`ghcr.io` は `docker pull 127.0.0.1:5000/ghcr.io/...` で取得可能です。
-  - **管理:** `quagent cache ls` でキャッシュ状況の確認、`quagent cache clean` または TUI から全クリアが可能です。
+  - **バッチ集約承認 (連打防止):** キャッシュミス時に外部からダウンロードする際は、短時間のリクエストを自動で 1 つのバッチに集約し、承認コンソールで一括確認（`[y]` 今回承認 / `[a]` セッション中常に承認 / `[n]` 拒否）を求めます。何十個ものパッケージを 1 回の承認でまとめて取得可能です。
+  - **エコシステム対応:** Docker Hub (`docker.io`), `ghcr.io`, Go (`proxy.golang.org`), Cargo (`crates.io`), npm (`registry.npmjs.org`), PyPI (`pypi.org`) に標準対応。
+  - **管理:** `quagent cache ls` で各エコシステムのキャッシュ状況の確認、`quagent cache clean [ecosystem]` または TUI から削除が可能です。
 
 ---
 
