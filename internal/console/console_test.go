@@ -1012,6 +1012,10 @@ func TestTUIModelMouseDecisions(t *testing.T) {
 		t.Fatal("expected clipdecide on outChan after mouse click")
 	}
 
+	// clip 決着
+	newM, _ = m.Update(socketMsg(Msg{Type: "clipsettled", ID: 11, Status: access.Approved}))
+	m = newM.(model)
+
 	// 3. batchrequest 要求に対するマウスクリック ([y] 今回承認 / [a] セッション承認 / [n] 拒否)
 	newM, _ = m.Update(socketMsg(Msg{
 		Type:           "batchrequest",
@@ -1033,6 +1037,9 @@ func TestTUIModelMouseDecisions(t *testing.T) {
 		t.Fatal("expected batchdecide on outChan after mouse click")
 	}
 
+	newM, _ = m.Update(socketMsg(Msg{Type: "batchsettled", ID: 12, Status: access.Approved, Kind: access.Once}))
+	m = newM.(model)
+
 	// [a] セッション承認 (18 <= X < 40)
 	newM, _ = m.Update(socketMsg(Msg{
 		Type:           "batchrequest",
@@ -1052,6 +1059,9 @@ func TestTUIModelMouseDecisions(t *testing.T) {
 		t.Fatal("expected batchdecide Session on outChan after mouse click")
 	}
 
+	newM, _ = m.Update(socketMsg(Msg{Type: "batchsettled", ID: 13, Status: access.Approved, Kind: access.Session}))
+	m = newM.(model)
+
 	// [n] 拒否 (X >= 40)
 	newM, _ = m.Update(socketMsg(Msg{
 		Type:           "batchrequest",
@@ -1070,6 +1080,9 @@ func TestTUIModelMouseDecisions(t *testing.T) {
 	default:
 		t.Fatal("expected batchdecide Denied on outChan after mouse click")
 	}
+
+	newM, _ = m.Update(socketMsg(Msg{Type: "batchsettled", ID: 14, Status: access.Denied}))
+	m = newM.(model)
 }
 
 func TestTUIModelMouseScrollAndModals(t *testing.T) {
