@@ -352,6 +352,9 @@ func TestTUIModelDecisions(t *testing.T) {
 	default:
 		t.Fatal("expected clipdecide on outChan")
 	}
+	// clip の決着
+	newM, _ = m.Update(socketMsg(Msg{Type: "clipsettled", ID: 1, Status: access.Approved}))
+	m = newM.(model)
 
 	// 3. prrequest 要求
 	newM, _ = m.Update(socketMsg(Msg{Type: "prrequest", ID: 2, Title: "PR Title"}))
@@ -366,6 +369,9 @@ func TestTUIModelDecisions(t *testing.T) {
 	default:
 		t.Fatal("expected prdecide on outChan")
 	}
+	// prrequest の決着
+	newM, _ = m.Update(socketMsg(Msg{Type: "prsettled", ID: 2, Status: access.Denied}))
+	m = newM.(model)
 
 	// 4. request 申請と決定 (1, 2, 3, d, q)
 	newM, _ = m.Update(socketMsg(Msg{Type: "request", ID: 3, Domains: []string{"example.com"}}))
@@ -381,6 +387,9 @@ func TestTUIModelDecisions(t *testing.T) {
 	default:
 		t.Fatal("expected decide on outChan")
 	}
+	// request 3 の決着
+	newM, _ = m.Update(socketMsg(Msg{Type: "settled", ID: 3, Status: access.Approved, Kind: access.Once}))
+	m = newM.(model)
 
 	// 質問
 	newM, _ = m.Update(socketMsg(Msg{Type: "request", ID: 4, Domains: []string{"example.com"}}))
@@ -590,12 +599,14 @@ func TestTUIModelRelaxation(t *testing.T) {
 	m = newM.(model)
 	select {
 	case out := <-m.outChan:
-		if out.Type != "relaxdecide" || out.Kind != access.Session {
+		if out.Type != "relaxdecide" || out.Kind != access.Session || out.ID != 43 {
 			t.Errorf("expected session relaxation, got %+v", out)
 		}
 	default:
 		t.Fatal("expected session relaxation on outChan")
 	}
+	newM, _ = m.Update(socketMsg(Msg{Type: "relaxsettled", ID: 43, Status: access.Approved, Kind: access.Session}))
+	m = newM.(model)
 
 	newM, _ = m.Update(socketMsg(Msg{Type: "relaxrequest", ID: 44, RelaxHost: "api.slack.com"}))
 	m = newM.(model)
@@ -603,12 +614,14 @@ func TestTUIModelRelaxation(t *testing.T) {
 	m = newM.(model)
 	select {
 	case out := <-m.outChan:
-		if out.Type != "relaxdecide" || out.Status != access.Denied {
+		if out.Type != "relaxdecide" || out.Status != access.Denied || out.ID != 44 {
 			t.Errorf("expected denied relaxation, got %+v", out)
 		}
 	default:
 		t.Fatal("expected denied relaxation on outChan")
 	}
+	newM, _ = m.Update(socketMsg(Msg{Type: "relaxsettled", ID: 44, Status: access.Denied}))
+	m = newM.(model)
 
 	newM, _ = m.Update(socketMsg(Msg{Type: "relaxrequest", ID: 45, RelaxHost: "api.slack.com"}))
 	m = newM.(model)
@@ -625,7 +638,7 @@ func TestTUIModelRelaxation(t *testing.T) {
 	m = newM.(model)
 	select {
 	case out := <-m.outChan:
-		if out.Type != "relaxdecide" || out.Status != access.Question || out.Question != "何のエンドポイント?" {
+		if out.Type != "relaxdecide" || out.Status != access.Question || out.Question != "何のエンドポイント?" || out.ID != 45 {
 			t.Errorf("expected question relaxation, got %+v", out)
 		}
 	default:
