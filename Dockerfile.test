@@ -1,0 +1,12 @@
+# quagent CI 相当のテスト・ビルド検証用 Dockerfile
+FROM golang:latest
+
+# internal/image のテストに必要な gpgv 互換ラッパーを配置
+RUN echo '#!/bin/sh' > /usr/local/bin/gpgv && \
+    echo 'exec gpg --verify "$@"' >> /usr/local/bin/gpgv && \
+    chmod +x /usr/local/bin/gpgv
+
+WORKDIR /work
+
+# CI と同等の全検証 (gofmt, go mod tidy, go vet, go test, make build) を実行
+CMD ["sh", "-c", "test -z \"$(gofmt -l . | tee /dev/stderr)\" && go mod tidy -diff && go vet ./... && go test ./... && CGO_ENABLED=0 go build -o bin/quagent ./cmd/quagent"]

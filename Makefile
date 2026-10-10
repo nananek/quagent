@@ -3,7 +3,7 @@ GO      ?= go
 PREFIX  ?= $(HOME)/.local
 BIN     := bin/quagent
 
-.PHONY: build install test vet coverage clean
+.PHONY: build install test vet coverage clean docker-test
 
 build:
 	CGO_ENABLED=0 $(GO) build -o $(BIN) ./cmd/quagent
@@ -20,6 +20,10 @@ vet:
 coverage:
 	$(GO) test -coverprofile=coverage.out ./...
 	$(GO) tool cover -func=coverage.out
+
+docker-test:
+	docker build -f Dockerfile.test -t quagent-test .
+	docker run --net=host -e GOPROXY="http://127.0.0.1:5000/go,direct" --rm -v $(CURDIR):/work quagent-test
 
 clean:
 	rm -rf bin coverage.out
