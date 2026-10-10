@@ -3,13 +3,15 @@ package main
 import (
 	"errors"
 	"testing"
+
+	"github.com/nananek/quagent/internal/antigravity"
 )
 
 func TestAskRestartQuit(t *testing.T) {
 	o := runOpts{AfterSession: func(cur string, choices []string) (string, bool) {
 		return "", true
 	}}
-	next, discard := askRestart(o, "opencode", true)
+	next, discard := askRestart(o, "opencode", true, antigravity.RefreshSource{})
 	if next != "" || !discard {
 		t.Fatalf("終了のはず: %q %v", next, discard)
 	}
@@ -18,12 +20,12 @@ func TestAskRestartQuit(t *testing.T) {
 func TestAskRestartNonAgy(t *testing.T) {
 	calls := 0
 	old := agyWarmup
-	agyWarmup = func() error { calls++; return nil }
+	agyWarmup = func(antigravity.RefreshSource) error { calls++; return nil }
 	defer func() { agyWarmup = old }()
 	o := runOpts{AfterSession: func(cur string, choices []string) (string, bool) {
 		return "opencode", false
 	}}
-	next, _ := askRestart(o, "opencode", true)
+	next, _ := askRestart(o, "opencode", true, antigravity.RefreshSource{})
 	if next != "opencode" {
 		t.Fatalf("next=%q", next)
 	}
@@ -35,7 +37,7 @@ func TestAskRestartNonAgy(t *testing.T) {
 func TestAskRestartAgyWarmupFailThenReselect(t *testing.T) {
 	calls := 0
 	old := agyWarmup
-	agyWarmup = func() error {
+	agyWarmup = func(antigravity.RefreshSource) error {
 		calls++
 		if calls == 1 {
 			return errors.New("boom")
@@ -49,7 +51,7 @@ func TestAskRestartAgyWarmupFailThenReselect(t *testing.T) {
 		answers = answers[1:]
 		return a, false
 	}}
-	next, _ := askRestart(o, "opencode", true)
+	next, _ := askRestart(o, "opencode", true, antigravity.RefreshSource{})
 	if next != "opencode" {
 		t.Fatalf("選び直しのはず: %q", next)
 	}
@@ -61,12 +63,12 @@ func TestAskRestartAgyWarmupFailThenReselect(t *testing.T) {
 func TestAskRestartAgyWarmupOK(t *testing.T) {
 	calls := 0
 	old := agyWarmup
-	agyWarmup = func() error { calls++; return nil }
+	agyWarmup = func(antigravity.RefreshSource) error { calls++; return nil }
 	defer func() { agyWarmup = old }()
 	o := runOpts{AfterSession: func(cur string, choices []string) (string, bool) {
 		return "agy", false
 	}}
-	next, _ := askRestart(o, "opencode", true)
+	next, _ := askRestart(o, "opencode", true, antigravity.RefreshSource{})
 	if next != "agy" || calls != 1 {
 		t.Fatalf("next=%q calls=%d", next, calls)
 	}
@@ -75,12 +77,12 @@ func TestAskRestartAgyWarmupOK(t *testing.T) {
 func TestAskRestartAgyNoSubscription(t *testing.T) {
 	calls := 0
 	old := agyWarmup
-	agyWarmup = func() error { calls++; return nil }
+	agyWarmup = func(antigravity.RefreshSource) error { calls++; return nil }
 	defer func() { agyWarmup = old }()
 	o := runOpts{AfterSession: func(cur string, choices []string) (string, bool) {
 		return "agy", false
 	}}
-	next, _ := askRestart(o, "opencode", false)
+	next, _ := askRestart(o, "opencode", false, antigravity.RefreshSource{})
 	if next != "agy" || calls != 0 {
 		t.Fatalf("サブスク無しで warmup した: %q %d", next, calls)
 	}

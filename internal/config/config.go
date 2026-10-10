@@ -195,6 +195,15 @@ type Agy struct {
 	// を認証プロキシ経由で使う。providers の gemini (Gemini API キー) は要らない。
 	// false なら Gemini API キーで使う (providers に gemini が要る)。
 	Subscription bool `json:"subscription,omitempty"`
+	// RefreshTokenEnv / RefreshTokenFile / RefreshTokenCommand はサブスクリプション用の
+	// 長期 refresh_token の取り出し方 (どれか 1 つ。providers の secret_env 等と同じ)。
+	// agy がトークンを secret-service (キーリング) に書く環境や、pass 等で別管理して
+	// いる場合に指定する。出力はトークンファイルと同じ JSON でも素の refresh_token
+	// でもよい。3 つとも空ならトークンファイル
+	// (~/.gemini/antigravity-cli/antigravity-oauth-token) を読む。
+	RefreshTokenEnv     string   `json:"refresh_token_env,omitempty"`
+	RefreshTokenFile    string   `json:"refresh_token_file,omitempty"`
+	RefreshTokenCommand []string `json:"refresh_token_command,omitempty"`
 	// Seed はサブスクリプション用に host が run 開始時に作った短命トークン。
 	// guest のトークンファイルと窓口の追加の合言葉に使う。設定ファイルには書かない。
 	Seed string `json:"-"`

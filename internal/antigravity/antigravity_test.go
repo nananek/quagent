@@ -178,7 +178,7 @@ func TestTokenFileAndRefreshToken(t *testing.T) {
 	}
 
 	// 1. ファイルが存在しない
-	if _, err := refreshToken(); err == nil {
+	if _, err := refreshTokenFrom(RefreshSource{}); err == nil {
 		t.Fatal("expected error for missing token file")
 	}
 
@@ -191,7 +191,7 @@ func TestTokenFileAndRefreshToken(t *testing.T) {
 	if err := os.WriteFile(tf, []byte("invalid json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := refreshToken(); err == nil {
+	if _, err := refreshTokenFrom(RefreshSource{}); err == nil {
 		t.Fatal("expected error for invalid json")
 	}
 
@@ -199,7 +199,7 @@ func TestTokenFileAndRefreshToken(t *testing.T) {
 	if err := os.WriteFile(tf, []byte(`{"token":{}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := refreshToken(); err == nil {
+	if _, err := refreshTokenFrom(RefreshSource{}); err == nil {
 		t.Fatal("expected error for empty refresh token")
 	}
 
@@ -207,7 +207,7 @@ func TestTokenFileAndRefreshToken(t *testing.T) {
 	if err := os.WriteFile(tf, []byte(`{"token":{"refresh_token":"rt-xyz"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	rt, err := refreshToken()
+	rt, err := refreshTokenFrom(RefreshSource{})
 	if err != nil || rt != "rt-xyz" {
 		t.Fatalf("refreshToken() = %q, %v; want rt-xyz", rt, err)
 	}
@@ -279,7 +279,7 @@ func TestCheckLogin(t *testing.T) {
 	// トークンが無い場合
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
-	if err := CheckLogin(); err == nil {
+	if err := CheckLogin(RefreshSource{}); err == nil {
 		t.Fatal("expected error without token file")
 	}
 
@@ -291,7 +291,7 @@ func TestCheckLogin(t *testing.T) {
 	if err := os.WriteFile(tokenPath, []byte(`{"token":{"refresh_token":"rt-ok"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckLogin(); err != nil {
+	if err := CheckLogin(RefreshSource{}); err != nil {
 		t.Fatalf("CheckLogin() failed: %v", err)
 	}
 }
@@ -316,7 +316,7 @@ func TestWarmup(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Setenv("PATH", binDir)
-		if err := Warmup(context.Background()); err != nil {
+		if err := Warmup(context.Background(), RefreshSource{}); err != nil {
 			t.Fatalf("Warmup() failed: %v", err)
 		}
 	})
@@ -330,7 +330,7 @@ func TestWarmup(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Setenv("PATH", binDir)
-		if err := Warmup(context.Background()); err == nil || !strings.Contains(err.Error(), "auth failed") {
+		if err := Warmup(context.Background(), RefreshSource{}); err == nil || !strings.Contains(err.Error(), "auth failed") {
 			t.Fatalf("expected error with auth failed, got %v", err)
 		}
 	})
@@ -344,14 +344,14 @@ func TestWarmup(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Setenv("PATH", binDir)
-		if err := Warmup(context.Background()); err == nil {
+		if err := Warmup(context.Background(), RefreshSource{}); err == nil {
 			t.Fatal("expected error")
 		}
 	})
 }
 
 func TestNewMinter(t *testing.T) {
-	m := NewMinter()
+	m := NewMinter(RefreshSource{})
 	if m == nil || m.mint == nil {
 		t.Fatal("NewMinter() returned invalid instance")
 	}
@@ -359,7 +359,108 @@ func TestNewMinter(t *testing.T) {
 
 func TestMintError(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // トークンファイルが無い環境
-	if _, err := Mint(); err == nil {
+	if _, err := Mint(RefreshSource{}); err == nil {
 		t.Fatal("expected error from Mint when no token exists")
+	}
+}
+
+func TestRefreshSourceConfigured(t *testing.T) {
+	if (RefreshSource{}).Configured() {
+		t.Error("empty source should not be configured")
+	}
+	for _, src := range []RefreshSource{
+		{Env: "X"},
+		{File: "/tmp/x"},
+		{Command: []string{"echo", "x"}},
+	} {
+		if !src.Configured() {
+			t.Errorf("%+v should be configured", src)
+		}
+	}
+}
+
+func TestRefreshSourceFetch(t *testing.T) {
+	// 1. 何も指定しない
+	if _, err := (RefreshSource{}).fetch(); err == nil {
+		t.Error("expected error for empty source")
+	}
+
+	// 2. 環境変数
+	t.Setenv("TEST_QUAGENT_AGY_RT", "  rt-env  ")
+	out, err := (RefreshSource{Env: "TEST_QUAGENT_AGY_RT"}).fetch()
+	if err != nil || out != "rt-env" {
+		t.Errorf("fetch(env) = %q, %v; want rt-env", out, err)
+	}
+	if _, err := (RefreshSource{Env: "TEST_QUAGENT_AGY_RT_MISSING"}).fetch(); err == nil {
+		t.Error("expected error for missing env var")
+	}
+	t.Setenv("TEST_QUAGENT_AGY_RT_EMPTY", "  \n")
+	if _, err := (RefreshSource{Env: "TEST_QUAGENT_AGY_RT_EMPTY"}).fetch(); err == nil {
+		t.Error("expected error for empty env var")
+	}
+
+	// 3. ファイル (~/ 展開を含む)
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	rtFile := filepath.Join(tmp, "rt.json")
+	if err := os.WriteFile(rtFile, []byte(`{"token":{"refresh_token":"rt-file"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err = (RefreshSource{File: "~/rt.json"}).fetch()
+	if err != nil || out != `{"token":{"refresh_token":"rt-file"}}` {
+		t.Errorf("fetch(file ~/) = %q, %v", out, err)
+	}
+	if _, err := (RefreshSource{File: "~/no-such-file"}).fetch(); err == nil {
+		t.Error("expected error for missing file")
+	}
+
+	// 4. コマンド
+	out, err = (RefreshSource{Command: []string{"echo", "rt-cmd"}}).fetch()
+	if err != nil || out != "rt-cmd" {
+		t.Errorf("fetch(command) = %q, %v; want rt-cmd", out, err)
+	}
+	if _, err := (RefreshSource{Command: []string{"false"}}).fetch(); err == nil {
+		t.Error("expected error for failing command")
+	}
+}
+
+func TestExtractRefreshToken(t *testing.T) {
+	// 1. トークンファイルと同じ JSON
+	rt, err := extractRefreshToken(`{"token":{"access_token":"a","refresh_token":"rt-json"},"auth_method":"consumer"}`)
+	if err != nil || rt != "rt-json" {
+		t.Errorf("extract(json) = %q, %v; want rt-json", rt, err)
+	}
+
+	// 2. 素の refresh_token
+	rt, err = extractRefreshToken("rt-raw")
+	if err != nil || rt != "rt-raw" {
+		t.Errorf("extract(raw) = %q, %v; want rt-raw", rt, err)
+	}
+
+	// 3. JSON だが refresh_token が無い
+	if _, err := extractRefreshToken(`{"token":{}}`); err == nil {
+		t.Error("expected error for json without refresh token")
+	}
+}
+
+func TestRefreshTokenFromSource(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // ファイル側は使わない
+
+	// 1. JSON 出力のコマンド
+	rt, err := refreshTokenFrom(RefreshSource{Command: []string{"echo", `{"token":{"refresh_token":"rt-src-json"}}`}})
+	if err != nil || rt != "rt-src-json" {
+		t.Errorf("refreshTokenFrom(json cmd) = %q, %v; want rt-src-json", rt, err)
+	}
+
+	// 2. 素の refresh_token の環境変数
+	t.Setenv("TEST_QUAGENT_AGY_RT_RAW", "rt-src-raw")
+	rt, err = refreshTokenFrom(RefreshSource{Env: "TEST_QUAGENT_AGY_RT_RAW"})
+	if err != nil || rt != "rt-src-raw" {
+		t.Errorf("refreshTokenFrom(raw env) = %q, %v; want rt-src-raw", rt, err)
+	}
+
+	// 3. 失敗する取り出し方
+	if _, err := refreshTokenFrom(RefreshSource{Env: "TEST_QUAGENT_AGY_RT_MISSING"}); err == nil {
+		t.Error("expected error for missing env var")
 	}
 }
