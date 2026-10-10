@@ -727,6 +727,9 @@ runcmd:
 	if err := copySkills(g, cfg.SkillsDirResolved()); err != nil {
 		return err
 	}
+	if err := setupRules(g); err != nil {
+		return err
+	}
 	if err := ag.setup(g, cfg, providers, svc.Token); err != nil {
 		return err
 	}
