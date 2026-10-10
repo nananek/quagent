@@ -14,6 +14,8 @@ import (
 	"github.com/nananek/quagent/internal/access"
 	"github.com/nananek/quagent/internal/headerpolicy"
 	"github.com/nananek/quagent/internal/netns"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 type noApply struct{}
@@ -317,118 +319,127 @@ func TestTruncateRunes(t *testing.T) {
 	}
 }
 
-func TestClientUIPromptAndOnLine(t *testing.T) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	ui := &clientUI{enc: enc}
+func TestTUIModelDecisions(t *testing.T) {
+	m := newModel("test.sock")
 
-	// 1. 空のキュー
-	if p := ui.prompt(); p != "" {
-		t.Errorf("empty queue prompt = %q, want empty", p)
+	// 1. 空のキューでの終了確認
+	newM, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	m = newM.(model)
+	if !m.quiting {
+		t.Fatalf("expected quiting=true")
 	}
-
-	// 2. quit フロー
-	if done := ui.onLine("quit"); done || !ui.quiting {
-		t.Fatalf("onLine(quit) expected quiting=true, done=false")
-	}
-	buf.Reset()
-	if done := ui.onLine("y"); !done {
-		t.Fatalf("onLine(y) expected done=true")
-	}
-
-	// 3. clip 要求
-	ui.quiting = false
-	ui.queue = []Msg{{Type: "clip", ID: 1, Text: "clip test"}}
-	if !strings.Contains(ui.prompt(), "[y] コピーする") {
-		t.Errorf("clip prompt = %q", ui.prompt())
-	}
-	buf.Reset()
-	ui.onLine("y")
-	var m Msg
-	_ = json.Unmarshal(buf.Bytes(), &m)
-	if m.Type != "clipdecide" || m.Status != access.Approved {
-		t.Errorf("expected approved clipdecide, got %+v", m)
+	// y で終了
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	select {
+	case out := <-m.outChan:
+		if out.Type != "quit" {
+			t.Errorf("expected quit Msg, got %+v", out)
+		}
+	default:
+		t.Fatal("expected quit Msg on outChan")
 	}
 
-	// 4. prrequest 要求
-	ui.queue = []Msg{{Type: "prrequest", ID: 2, Title: "PR Title"}}
-	if !strings.Contains(ui.prompt(), "[y] 承認して PR を作る") {
-		t.Errorf("prrequest prompt = %q", ui.prompt())
-	}
-	buf.Reset()
-	ui.onLine("n")
-	_ = json.Unmarshal(buf.Bytes(), &m)
-	if m.Type != "prdecide" || m.Status != access.Denied {
-		t.Errorf("expected denied prdecide, got %+v", m)
-	}
-
-	// 5. request 申請と決定 (1, 2, 3, d, q)
-	ui.queue = []Msg{{Type: "request", ID: 3, Domains: []string{"example.com"}}}
-	buf.Reset()
-	ui.onLine("1")
-	_ = json.Unmarshal(buf.Bytes(), &m)
-	if m.Type != "decide" || m.Kind != access.Once {
-		t.Errorf("expected decide Once, got %+v", m)
+	// 2. clip 要求
+	m.quiting = false
+	newM, _ = m.Update(socketMsg(Msg{Type: "clip", ID: 1, Text: "clip test"}))
+	m = newM.(model)
+	newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m = newM.(model)
+	select {
+	case out := <-m.outChan:
+		if out.Type != "clipdecide" || out.Status != access.Approved {
+			t.Errorf("expected approved clipdecide, got %+v", out)
+		}
+	default:
+		t.Fatal("expected clipdecide on outChan")
 	}
 
-	buf.Reset()
-	ui.onLine("2")
-	_ = json.Unmarshal(buf.Bytes(), &m)
-	if m.Type != "decide" || m.Kind != access.Session {
-		t.Errorf("expected decide Session, got %+v", m)
+	// 3. prrequest 要求
+	newM, _ = m.Update(socketMsg(Msg{Type: "prrequest", ID: 2, Title: "PR Title"}))
+	m = newM.(model)
+	newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = newM.(model)
+	select {
+	case out := <-m.outChan:
+		if out.Type != "prdecide" || out.Status != access.Denied {
+			t.Errorf("expected denied prdecide, got %+v", out)
+		}
+	default:
+		t.Fatal("expected prdecide on outChan")
 	}
 
-	buf.Reset()
-	ui.onLine("3")
-	_ = json.Unmarshal(buf.Bytes(), &m)
-	if m.Type != "decide" || m.Kind != access.Always {
-		t.Errorf("expected decide Always, got %+v", m)
-	}
+	// 4. request 申請と決定 (1, 2, 3, d, q)
+	newM, _ = m.Update(socketMsg(Msg{Type: "request", ID: 3, Domains: []string{"example.com"}}))
+	m = newM.(model)
 
-	buf.Reset()
-	ui.onLine("d")
-	_ = json.Unmarshal(buf.Bytes(), &m)
-	if m.Type != "decide" || m.Status != access.Denied {
-		t.Errorf("expected decide Denied, got %+v", m)
+	newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	m = newM.(model)
+	select {
+	case out := <-m.outChan:
+		if out.Type != "decide" || out.Kind != access.Once {
+			t.Errorf("expected decide Once, got %+v", out)
+		}
+	default:
+		t.Fatal("expected decide on outChan")
 	}
 
 	// 質問
-	ui.onLine("q")
-	if !ui.asking || !strings.Contains(ui.prompt(), "エージェントへの質問") {
-		t.Errorf("asking state or prompt unexpected: %q", ui.prompt())
+	newM, _ = m.Update(socketMsg(Msg{Type: "request", ID: 4, Domains: []string{"example.com"}}))
+	m = newM.(model)
+	newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	m = newM.(model)
+	if !m.asking {
+		t.Fatal("expected asking=true")
 	}
-	buf.Reset()
-	ui.onLine("何に使うの?")
-	_ = json.Unmarshal(buf.Bytes(), &m)
-	if m.Type != "decide" || m.Status != access.Question || m.Question != "何に使うの?" {
-		t.Errorf("expected question decision, got %+v", m)
+	// 文字列入力
+	for _, r := range "何に使うの?" {
+		newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = newM.(model)
+	}
+	newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = newM.(model)
+	select {
+	case out := <-m.outChan:
+		if out.Type != "decide" || out.Status != access.Question || out.Question != "何に使うの?" {
+			t.Errorf("expected question decision, got %+v", out)
+		}
+	default:
+		t.Fatal("expected question on outChan")
 	}
 }
 
-func TestClientUIOnMsg(t *testing.T) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	ui := &clientUI{enc: enc}
+func TestTUIModelOnMsg(t *testing.T) {
+	m := newModel("test.sock")
 
 	// 1. log メッセージ
-	ui.onMsg(Msg{Type: "log", Text: "some log"})
+	newM, _ := m.Update(socketMsg(Msg{Type: "log", Text: "some log"}))
+	m = newM.(model)
+	if len(m.logs) != 1 {
+		t.Fatalf("expected 1 log, got %d", len(m.logs))
+	}
 
 	// 2. request 追加
-	ui.onMsg(Msg{Type: "request", ID: 10, Domains: []string{"test.com"}, Reason: "fetch"})
-	if len(ui.queue) != 1 {
-		t.Fatalf("expected 1 item in queue, got %d", len(ui.queue))
+	newM, _ = m.Update(socketMsg(Msg{Type: "request", ID: 10, Domains: []string{"test.com"}, Reason: "fetch"}))
+	m = newM.(model)
+	if len(m.pending) != 1 {
+		t.Fatalf("expected 1 pending item, got %d", len(m.pending))
 	}
 
 	// 重複追加は無視される
-	ui.onMsg(Msg{Type: "request", ID: 10})
-	if len(ui.queue) != 1 {
-		t.Fatalf("expected duplicate to be ignored, got %d", len(ui.queue))
+	newM, _ = m.Update(socketMsg(Msg{Type: "request", ID: 10}))
+	m = newM.(model)
+	if len(m.pending) != 1 {
+		t.Fatalf("expected duplicate to be ignored, got %d", len(m.pending))
 	}
 
-	// 3. settled でキューから削除される
-	ui.onMsg(Msg{Type: "settled", ID: 10, Status: access.Approved})
-	if len(ui.queue) != 0 {
-		t.Fatalf("expected queue to be empty after settled, got %d", len(ui.queue))
+	// 3. settled でキューから削除され履歴に追加される
+	newM, _ = m.Update(socketMsg(Msg{Type: "settled", ID: 10, Status: access.Approved}))
+	m = newM.(model)
+	if len(m.pending) != 0 {
+		t.Fatalf("expected pending to be empty after settled, got %d", len(m.pending))
+	}
+	if len(m.history) != 1 {
+		t.Fatalf("expected 1 history item, got %d", len(m.history))
 	}
 }
 
@@ -532,13 +543,11 @@ func TestRelaxationConsoleIntegration(t *testing.T) {
 	}
 }
 
-func TestClientUIRelaxation(t *testing.T) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	ui := &clientUI{enc: enc}
+func TestTUIModelRelaxation(t *testing.T) {
+	m := newModel("test.sock")
 
 	// 1. relaxrequest の受信
-	ui.onMsg(Msg{
+	newM, _ := m.Update(socketMsg(Msg{
 		Type:         "relaxrequest",
 		ID:           42,
 		RelaxHost:    "api.openai.com",
@@ -547,52 +556,173 @@ func TestClientUIRelaxation(t *testing.T) {
 		AllowBody:    true,
 		Reason:       "call LLM",
 		Deadline:     "12:00:00",
-	})
-	if len(ui.queue) != 1 {
-		t.Fatalf("expected 1 in queue, got %d", len(ui.queue))
-	}
-	if !strings.Contains(ui.prompt(), "今回のみ") {
-		t.Errorf("unexpected prompt: %q", ui.prompt())
+	}))
+	m = newM.(model)
+	if len(m.pending) != 1 {
+		t.Fatalf("expected 1 in pending, got %d", len(m.pending))
 	}
 
-	// 2. "1" (今回のみ) の入力
-	ui.onLine("1")
-	var m Msg
-	_ = json.Unmarshal(buf.Bytes(), &m)
-	if m.Type != "relaxdecide" || m.Status != access.Approved || m.Kind != access.Once {
-		t.Errorf("expected relaxdecide Approved Once, got %+v", m)
+	// 2. "1" (今回のみ)
+	newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	m = newM.(model)
+	select {
+	case out := <-m.outChan:
+		if out.Type != "relaxdecide" || out.Status != access.Approved || out.Kind != access.Once {
+			t.Errorf("expected relaxdecide Approved Once, got %+v", out)
+		}
+	default:
+		t.Fatal("expected relaxdecide on outChan")
 	}
 
 	// 3. relaxsettled の受信
-	ui.onMsg(Msg{Type: "relaxsettled", ID: 42, Status: access.Approved, Kind: access.Once})
-	if len(ui.queue) != 0 {
-		t.Fatalf("expected empty queue after settled, got %d", len(ui.queue))
+	newM, _ = m.Update(socketMsg(Msg{Type: "relaxsettled", ID: 42, Status: access.Approved, Kind: access.Once}))
+	m = newM.(model)
+	if len(m.pending) != 0 {
+		t.Fatalf("expected empty pending after settled, got %d", len(m.pending))
+	}
+	if len(m.history) != 1 {
+		t.Fatalf("expected 1 history item, got %d", len(m.history))
 	}
 
-	// 4. "2", "d", "q" のテスト
-	ui.onMsg(Msg{Type: "relaxrequest", ID: 43, RelaxHost: "api.slack.com"})
-	buf.Reset()
-	ui.onLine("2")
-	_ = json.Unmarshal(buf.Bytes(), &m)
-	if m.Type != "relaxdecide" || m.Kind != access.Session {
-		t.Errorf("expected session relaxation, got %+v", m)
+	// 4. "2", "d", "q"
+	newM, _ = m.Update(socketMsg(Msg{Type: "relaxrequest", ID: 43, RelaxHost: "api.slack.com"}))
+	m = newM.(model)
+	newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	m = newM.(model)
+	select {
+	case out := <-m.outChan:
+		if out.Type != "relaxdecide" || out.Kind != access.Session {
+			t.Errorf("expected session relaxation, got %+v", out)
+		}
+	default:
+		t.Fatal("expected session relaxation on outChan")
 	}
 
-	buf.Reset()
-	ui.onLine("d")
-	_ = json.Unmarshal(buf.Bytes(), &m)
-	if m.Type != "relaxdecide" || m.Status != access.Denied {
-		t.Errorf("expected denied relaxation, got %+v", m)
+	newM, _ = m.Update(socketMsg(Msg{Type: "relaxrequest", ID: 44, RelaxHost: "api.slack.com"}))
+	m = newM.(model)
+	newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	m = newM.(model)
+	select {
+	case out := <-m.outChan:
+		if out.Type != "relaxdecide" || out.Status != access.Denied {
+			t.Errorf("expected denied relaxation, got %+v", out)
+		}
+	default:
+		t.Fatal("expected denied relaxation on outChan")
 	}
 
-	buf.Reset()
-	ui.onLine("q")
-	if !ui.asking {
+	newM, _ = m.Update(socketMsg(Msg{Type: "relaxrequest", ID: 45, RelaxHost: "api.slack.com"}))
+	m = newM.(model)
+	newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	m = newM.(model)
+	if !m.asking {
 		t.Error("expected asking state")
 	}
-	ui.onLine("何のエンドポイント?")
-	_ = json.Unmarshal(buf.Bytes(), &m)
-	if m.Type != "relaxdecide" || m.Status != access.Question || m.Question != "何のエンドポイント?" {
-		t.Errorf("expected question relaxation, got %+v", m)
+	for _, r := range "何のエンドポイント?" {
+		newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = newM.(model)
+	}
+	newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = newM.(model)
+	select {
+	case out := <-m.outChan:
+		if out.Type != "relaxdecide" || out.Status != access.Question || out.Question != "何のエンドポイント?" {
+			t.Errorf("expected question relaxation, got %+v", out)
+		}
+	default:
+		t.Fatal("expected question relaxation on outChan")
+	}
+}
+
+func TestTUIModelTabSwitching(t *testing.T) {
+	m := newModel("test.sock")
+	if m.activeTab != tabPending {
+		t.Errorf("initial tab = %d, want tabPending", m.activeTab)
+	}
+
+	// Tab キーで tabLogs へ
+	newM, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = newM.(model)
+	if m.activeTab != tabLogs {
+		t.Errorf("after tab = %d, want tabLogs", m.activeTab)
+	}
+
+	// Tab キーで tabHistory へ
+	newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = newM.(model)
+	if m.activeTab != tabHistory {
+		t.Errorf("after tab = %d, want tabHistory", m.activeTab)
+	}
+
+	// Tab キーで tabPending へ一巡
+	newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = newM.(model)
+	if m.activeTab != tabPending {
+		t.Errorf("after tab = %d, want tabPending", m.activeTab)
+	}
+
+	// Shift+Tab で tabHistory へ逆順
+	newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = newM.(model)
+	if m.activeTab != tabHistory {
+		t.Errorf("after shift+tab = %d, want tabHistory", m.activeTab)
+	}
+
+	// 数字キー 1 で tabPending へジャンプ
+	newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	m = newM.(model)
+	if m.activeTab != tabPending {
+		t.Errorf("after '1' = %d, want tabPending", m.activeTab)
+	}
+}
+
+func TestTUIModelView(t *testing.T) {
+	m := newModel("test.sock")
+	// 初期化前
+	if view := m.View(); !strings.Contains(view, "初期化中") {
+		t.Errorf("unready view = %q", view)
+	}
+
+	// WindowSizeMsg でリサイズ
+	newM, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	m = newM.(model)
+
+	// 1. 空の承認待ちタブ
+	view := m.View()
+	if !strings.Contains(view, "承認待ち") || !strings.Contains(view, "承認待ちの申請はありません") {
+		t.Errorf("empty pending view unexpected: %q", view)
+	}
+
+	// 2. 申請あり
+	newM, _ = m.Update(socketMsg(Msg{Type: "request", ID: 1, Domains: []string{"example.com"}, Reason: "fetch"}))
+	m = newM.(model)
+	view = m.View()
+	if !strings.Contains(view, "ドメイン接続申請 #1") || !strings.Contains(view, "example.com") {
+		t.Errorf("pending view unexpected: %q", view)
+	}
+
+	// 3. ログタブ
+	newM, _ = m.Update(socketMsg(Msg{Type: "log", Text: "DNS で拒否: test.org"}))
+	m = newM.(model)
+	m.activeTab = tabLogs
+	view = m.View()
+	if !strings.Contains(view, "DNS で拒否: test.org") {
+		t.Errorf("logs view unexpected: %q", view)
+	}
+
+	// 4. 履歴タブ
+	newM, _ = m.Update(socketMsg(Msg{Type: "settled", ID: 1, Status: access.Approved, Kind: access.Once}))
+	m = newM.(model)
+	m.activeTab = tabHistory
+	view = m.View()
+	if !strings.Contains(view, "決着履歴") || !strings.Contains(view, "example.com") {
+		t.Errorf("history view unexpected: %q", view)
+	}
+
+	// 5. 終了確認モーダル
+	m.quiting = true
+	view = m.View()
+	if !strings.Contains(view, "VM を破棄して終了しますか?") {
+		t.Errorf("quit modal view unexpected: %q", view)
 	}
 }
