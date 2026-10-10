@@ -258,4 +258,45 @@ func TestPyPISimpleAndPackages(t *testing.T) {
 	if recWhl.Body.String() != "wheel-binary-bytes" {
 		t.Fatalf("unexpected wheel body: %s", recWhl.Body.String())
 	}
+
+	// 3. PEP 658 .metadata の承認バイパスと Content-Type 確認
+	batchCalled := false
+	srv.SetAskBatch(func(info console.BatchDownloadInfo) (access.Kind, error) {
+		batchCalled = true
+		return access.Once, nil
+	})
+	recMeta := httptest.NewRecorder()
+	reqMeta := httptest.NewRequest(http.MethodGet, "/pypi/packages/ab/cd/requests-2.31.0-py3-none-any.whl.metadata", nil)
+	srv.ServeHTTP(recMeta, reqMeta)
+
+	if recMeta.Code != http.StatusOK {
+		t.Fatalf("metadata expected 200, got %d", recMeta.Code)
+	}
+	if batchCalled {
+		t.Fatal("expected .metadata download to bypass batch approval, but AskBatch was called")
+	}
+	if recMeta.Header().Get("Content-Type") != "text/plain; charset=utf-8" {
+		t.Fatalf("expected text/plain; charset=utf-8, got %s", recMeta.Header().Get("Content-Type"))
+	}
+}
+
+func TestParsePyPIPackageFilename(t *testing.T) {
+	tests := []struct {
+		filename    string
+		wantPkg     string
+		wantVersion string
+	}{
+		{"jupyterlab-4.6.4-py3-none-any.whl", "jupyterlab", "4.6.4"},
+		{"jupyterlab-4.6.4-py3-none-any.whl.metadata", "jupyterlab", "4.6.4"},
+		{"jupyter_core-5.7.2-py3-none-any.whl", "jupyter_core", "5.7.2"},
+		{"jupyter-core-5.7.2.tar.gz", "jupyter-core", "5.7.2"},
+		{"requests-2.31.0.tar.gz", "requests", "2.31.0"},
+	}
+	for _, tc := range tests {
+		pkg, ver := parsePyPIPackageFilename(tc.filename)
+		if pkg != tc.wantPkg || ver != tc.wantVersion {
+			t.Errorf("parsePyPIPackageFilename(%q) = (%q, %q), want (%q, %q)",
+				tc.filename, pkg, ver, tc.wantPkg, tc.wantVersion)
+		}
+	}
 }

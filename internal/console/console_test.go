@@ -554,7 +554,7 @@ func TestTUIModelDecisions(t *testing.T) {
 	newM, _ = m.Update(socketMsg(Msg{Type: "dockersettled", ID: 3, Status: access.Approved}))
 	m = newM.(model)
 
-	// 3.6 batchrequest 要求 (y で Once, a で Session)
+	// 3.6 batchrequest 要求 (y/1 で Once, a/2 で Session)
 	newM, _ = m.Update(socketMsg(Msg{
 		Type:           "batchrequest",
 		ID:             4,
@@ -562,17 +562,17 @@ func TestTUIModelDecisions(t *testing.T) {
 		BatchItems:     []BatchItem{{Ecosystem: "cargo", Name: "serde", Version: "1.0.197"}},
 	}))
 	m = newM.(model)
-	newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
 	m = newM.(model)
 	select {
 	case out := <-m.outChan:
-		if out.Type != "batchdecide" || out.Status != access.Approved || out.Kind != access.Session {
-			t.Errorf("expected session batchdecide, got %+v", out)
+		if out.Type != "batchdecide" || out.Status != access.Approved || out.Kind != access.Once {
+			t.Errorf("expected Once batchdecide with key '1', got %+v", out)
 		}
 	default:
 		t.Fatal("expected batchdecide on outChan")
 	}
-	newM, _ = m.Update(socketMsg(Msg{Type: "batchsettled", ID: 4, Status: access.Approved, Kind: access.Session}))
+	newM, _ = m.Update(socketMsg(Msg{Type: "batchsettled", ID: 4, Status: access.Approved, Kind: access.Once}))
 	m = newM.(model)
 
 	// 4. request 申請と決定 (1, 2, 3, d, q)
@@ -1010,6 +1010,65 @@ func TestTUIModelMouseDecisions(t *testing.T) {
 		}
 	default:
 		t.Fatal("expected clipdecide on outChan after mouse click")
+	}
+
+	// 3. batchrequest 要求に対するマウスクリック ([y] 今回承認 / [a] セッション承認 / [n] 拒否)
+	newM, _ = m.Update(socketMsg(Msg{
+		Type:           "batchrequest",
+		ID:             12,
+		BatchEcosystem: "pypi",
+		BatchItems:     []BatchItem{{Ecosystem: "pypi", Name: "jupyterlab", Version: "4.6.4"}},
+	}))
+	m = newM.(model)
+
+	// [y] 今回承認 (X < 18)
+	newM, _ = m.Update(tea.MouseMsg{X: 10, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = newM.(model)
+	select {
+	case out := <-m.outChan:
+		if out.Type != "batchdecide" || out.Status != access.Approved || out.Kind != access.Once {
+			t.Errorf("expected batchdecide Once on mouse click, got %+v", out)
+		}
+	default:
+		t.Fatal("expected batchdecide on outChan after mouse click")
+	}
+
+	// [a] セッション承認 (18 <= X < 40)
+	newM, _ = m.Update(socketMsg(Msg{
+		Type:           "batchrequest",
+		ID:             13,
+		BatchEcosystem: "pypi",
+		BatchItems:     []BatchItem{{Ecosystem: "pypi", Name: "jupyterlab", Version: "4.6.4"}},
+	}))
+	m = newM.(model)
+	newM, _ = m.Update(tea.MouseMsg{X: 25, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = newM.(model)
+	select {
+	case out := <-m.outChan:
+		if out.Type != "batchdecide" || out.Status != access.Approved || out.Kind != access.Session {
+			t.Errorf("expected batchdecide Session on mouse click, got %+v", out)
+		}
+	default:
+		t.Fatal("expected batchdecide Session on outChan after mouse click")
+	}
+
+	// [n] 拒否 (X >= 40)
+	newM, _ = m.Update(socketMsg(Msg{
+		Type:           "batchrequest",
+		ID:             14,
+		BatchEcosystem: "pypi",
+		BatchItems:     []BatchItem{{Ecosystem: "pypi", Name: "jupyterlab", Version: "4.6.4"}},
+	}))
+	m = newM.(model)
+	newM, _ = m.Update(tea.MouseMsg{X: 45, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = newM.(model)
+	select {
+	case out := <-m.outChan:
+		if out.Type != "batchdecide" || out.Status != access.Denied {
+			t.Errorf("expected batchdecide Denied on mouse click, got %+v", out)
+		}
+	default:
+		t.Fatal("expected batchdecide Denied on outChan after mouse click")
 	}
 }
 

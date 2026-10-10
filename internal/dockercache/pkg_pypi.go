@@ -8,6 +8,34 @@ import (
 	"strings"
 )
 
+func parsePyPIPackageFilename(fn string) (pkgName, version string) {
+	stem := strings.TrimSuffix(fn, ".metadata")
+	if strings.HasSuffix(stem, ".whl") {
+		stem = strings.TrimSuffix(stem, ".whl")
+		parts := strings.Split(stem, "-")
+		pkgName = parts[0]
+		if len(parts) >= 2 {
+			version = parts[1]
+		}
+		return pkgName, version
+	}
+
+	for _, ext := range []string{".tar.gz", ".tar.bz2", ".tar.xz", ".zip", ".tgz"} {
+		if strings.HasSuffix(stem, ext) {
+			stem = strings.TrimSuffix(stem, ext)
+			break
+		}
+	}
+
+	if lastDash := strings.LastIndex(stem, "-"); lastDash != -1 {
+		pkgName = stem[:lastDash]
+		version = stem[lastDash+1:]
+		return pkgName, version
+	}
+
+	return stem, ""
+}
+
 func parsePyPIPath(p string) (action, relPath, pkgName, filename string, ok bool) {
 	p = strings.TrimPrefix(p, "/pypi/")
 	p = strings.TrimPrefix(p, "/pypi")
@@ -24,11 +52,7 @@ func parsePyPIPath(p string) (action, relPath, pkgName, filename string, ok bool
 		rel := strings.TrimPrefix(p, "packages/")
 		parts := strings.Split(rel, "/")
 		fn := parts[len(parts)-1]
-		// パッケージ名の抽出 (filename から)
-		pkg := fn
-		if idx := strings.Index(fn, "-"); idx != -1 {
-			pkg = fn[:idx]
-		}
+		pkg, _ := parsePyPIPackageFilename(fn)
 		return "packages", rel, pkg, fn, true
 	}
 
@@ -126,9 +150,18 @@ func (s *Server) handlePyPIPackages(w http.ResponseWriter, r *http.Request, relP
 		}
 	}
 
-	// 2. キャッシュミス: 承認
-	if s.batch != nil {
-		if err := s.batch.RequestApproval("pypi", pkgName, filename); err != nil {
+	// PEP 658 の .metadata (METADATA ファイル) は依存関係解決用のテキストメタデータであり、
+	// 実行可能コードを含まないため Simple API と同様に承認不要で中継・キャッシュする。
+	isMetadata := strings.HasSuffix(filename, ".metadata")
+
+	// 2. キャッシュミス: 承認 (メタデータ以外)
+	if !isMetadata && s.batch != nil {
+		_, version := parsePyPIPackageFilename(filename)
+		displayVer := version
+		if displayVer == "" {
+			displayVer = filename
+		}
+		if err := s.batch.RequestApproval("pypi", pkgName, displayVer); err != nil {
 			http.Error(w, fmt.Sprintf("Forbidden: %v", err), http.StatusForbidden)
 			return
 		}
@@ -178,6 +211,10 @@ func setPyPIContentType(w http.ResponseWriter, filename string) {
 		w.Header().Set("Content-Type", "application/x-wheel+zip")
 	case strings.HasSuffix(filename, ".tar.gz"):
 		w.Header().Set("Content-Type", "application/gzip")
+	case strings.HasSuffix(filename, ".zip"):
+		w.Header().Set("Content-Type", "application/zip")
+	case strings.HasSuffix(filename, ".metadata"):
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	default:
 		w.Header().Set("Content-Type", "application/octet-stream")
 	}

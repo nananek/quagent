@@ -621,11 +621,11 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "batchrequest":
 			switch key {
-			case "y", "Y":
+			case "y", "Y", "1":
 				m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Approved, Kind: access.Once})
-			case "a", "A":
+			case "a", "A", "2":
 				m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Approved, Kind: access.Session})
-			case "n", "N":
+			case "n", "N", "d", "D":
 				m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Denied})
 			}
 
@@ -934,6 +934,15 @@ func (m model) handlePendingClick(x, y int) (tea.Model, tea.Cmd) {
 			m.decide(Msg{Type: "dockerdecide", ID: r.ID, Status: access.Approved})
 		} else {
 			m.decide(Msg{Type: "dockerdecide", ID: r.ID, Status: access.Denied})
+		}
+	case "batchrequest":
+		// [y] 今回承認    [a] セッション承認    [n] 拒否
+		if x < 18 {
+			m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Approved, Kind: access.Once})
+		} else if x < 40 {
+			m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Approved, Kind: access.Session})
+		} else {
+			m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Denied})
 		}
 
 	case "relaxrequest":
