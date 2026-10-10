@@ -302,6 +302,7 @@ func run(o runOpts) error {
 			logf("注意: %s は終端せず素通しするので、ヘッダは絞れない", strings.Join(passthrough, ", "))
 		}
 	}
+	cfg.Providers = cfg.EffectiveProviders()
 	providers, err := authproxy.Register(svc.Mux, cfg.Providers, logger, func(s string) {
 		select {
 		case llmDenied <- s:

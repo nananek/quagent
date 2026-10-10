@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
 	"net/url"
 	"testing"
 
@@ -151,5 +152,66 @@ func TestRegisterDynamicBadUpstream(t *testing.T) {
 		func() (string, error) { return "tok", nil }, nil, log.New(io.Discard, "", 0), nil, nil)
 	if err == nil {
 		t.Fatal("expected error for empty host upstream")
+	}
+}
+
+func TestZenAliasesAndDeduplication(t *testing.T) {
+	t.Setenv("TEST_AUTHPROXY_KEY", "secret-key")
+	mux := http.NewServeMux()
+	var denied []string
+	ids, err := Register(mux, map[string]config.Provider{
+		"opencode": {
+			Upstream:  "https://opencode.ai/zen/v1",
+			SecretEnv: "TEST_AUTHPROXY_KEY",
+		},
+		"opencode-go": {
+			Upstream:  "https://opencode.ai/zen/go/v1",
+			SecretEnv: "TEST_AUTHPROXY_KEY",
+		},
+	}, log.New(io.Discard, "", 0), func(s string) {
+		denied = append(denied, s)
+	})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("expected 2 ids, got %v", ids)
+	}
+
+	// 不正な操作 (DELETE) を送ると、/zen/ は opencode、/zen/go/ は opencode-go のゲートで 403 になる
+	recZen := httptest.NewRecorder()
+	mux.ServeHTTP(recZen, httptest.NewRequest(http.MethodDelete, "/zen/files/all", nil))
+	if recZen.Code != http.StatusForbidden {
+		t.Errorf("/zen alias expected 403, got %d", recZen.Code)
+	}
+
+	recGo := httptest.NewRecorder()
+	mux.ServeHTTP(recGo, httptest.NewRequest(http.MethodDelete, "/zen/go/files/all", nil))
+	if recGo.Code != http.StatusForbidden {
+		t.Errorf("/zen/go alias expected 403, got %d", recGo.Code)
+	}
+
+	if len(denied) != 2 || denied[0] != "opencode DELETE \"/files/all\"" || denied[1] != "opencode-go DELETE \"/files/all\"" {
+		t.Errorf("unexpected denied log: %v", denied)
+	}
+
+	// handler の v1 重複除去を検証
+	upURL, _ := url.Parse("https://opencode.ai/zen/go/v1")
+	h := handler("opencode-go", upURL, "Authorization", func() (string, error) { return "Bearer tok", nil },
+		log.New(io.Discard, "", 0), nil)
+
+	// /v1/chat/completions を送っても /zen/go/v1/chat/completions (重複なし) になることを確認
+	rp, ok := h.(*httputil.ReverseProxy)
+	if !ok {
+		t.Fatal("handler is not *httputil.ReverseProxy")
+	}
+	req := httptest.NewRequest(http.MethodPost, "/llm/opencode-go/v1/chat/completions", nil)
+	prReq := &httputil.ProxyRequest{
+		In:  req,
+		Out: req.Clone(req.Context()),
+	}
+	rp.Rewrite(prReq)
+	if prReq.Out.URL.Path != "/zen/go/v1/chat/completions" {
+		t.Errorf("deduplicated path = %q, want '/zen/go/v1/chat/completions'", prReq.Out.URL.Path)
 	}
 }

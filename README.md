@@ -101,6 +101,7 @@ API キー等の認証情報は VM 内には配置しません。ホスト側の
   "opencode": { "model": "opencode-go/deepseek-v4.1-flash" }
 }
 ```
+※ OpenCode の API キーは Zen（Free モデルを含む全モデル）と Go（サブスクリプション）で共通です。`opencode-go` または `opencode` のどちらか一方を設定すると、もう片方のエンドポイントも同じ認証情報で自動的にプロキシへ登録されます。これにより、VM 内の OpenCode から Go モデルと Zen の Free モデル（`opencode/big-pickle` 等）をシームレスに切り替えて利用できます。
 
 #### Claude Code の設定例
 ```json
