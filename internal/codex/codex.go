@@ -102,21 +102,25 @@ type AuthInfo struct {
 	ClientID     string
 }
 
+type codexTokens struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	IDToken      string `json:"id_token"`
+	AccountID    string `json:"account_id"`
+	ClientID     string `json:"client_id"`
+}
+
+type codexAuthFile struct {
+	AuthMode     string      `json:"auth_mode"`
+	Tokens       codexTokens `json:"tokens"`
+	AccessToken  string      `json:"access_token"`
+	RefreshToken string      `json:"refresh_token"`
+	AccountID    string      `json:"account_id"`
+}
+
 // extractAuth は取り出し方の出力からトークン情報を抜く。
 func extractAuth(out string) (AuthInfo, error) {
-	var t struct {
-		AuthMode string `json:"auth_mode"`
-		Tokens   struct {
-			AccessToken  string `json:"access_token"`
-			RefreshToken string `json:"refresh_token"`
-			IDToken      string `json:"id_token"`
-			AccountID    string `json:"account_id"`
-			ClientID     string `json:"client_id"`
-		} `json:"tokens"`
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		AccountID    string `json:"account_id"`
-	}
+	var t codexAuthFile
 	if err := json.Unmarshal([]byte(out), &t); err == nil {
 		acc := t.Tokens.AccessToken
 		if acc == "" {

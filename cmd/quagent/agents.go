@@ -475,7 +475,7 @@ func setupCodexAPIKey(g vmGuest, cfg *config.Config, token string) error {
 	}
 
 	auth := map[string]any{
-		"auth_mode":       "apikey",
+		"auth_mode":      "apikey",
 		"openai_api_key": token,
 	}
 	if err := writeJSON(g, "~/.codex/auth.json", auth); err != nil {
