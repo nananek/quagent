@@ -533,3 +533,93 @@ func TestIsDescendantOfAgent(t *testing.T) {
 		t.Error("expected false for unknown pid")
 	}
 }
+
+func TestIsAllowedCaller_MultiProcessAgent(t *testing.T) {
+	tmp := t.TempDir()
+
+	// OpenCode のマルチプロセス構成:
+	// PID 100: 対話型シェル (sessionLeader: bash -i)
+	//   └─ PID 200: /entrypoint.sh (comm: "bash")
+	//       └─ PID 300: opencode CLI (comm: "opencode")
+	//           └─ PID 310: opencode serve (comm: "opencode")
+	makeProc := func(pid int, comm string, ppid int) {
+		pDir := filepath.Join(tmp, fmt.Sprint(pid))
+		_ = os.MkdirAll(pDir, 0o755)
+		_ = os.WriteFile(filepath.Join(pDir, "stat"), []byte(fmt.Sprintf("%d (%s) S %d 100 0\n", pid, comm, ppid)), 0o644)
+		_ = os.WriteFile(filepath.Join(pDir, "comm"), []byte(comm+"\n"), 0o644)
+	}
+
+	makeProc(100, "bash", 1)
+	makeProc(200, "bash", 100)
+	makeProc(300, "opencode", 200)
+	makeProc(310, "opencode", 300)
+
+	leader := 100
+
+	// 1. opencode 親プロセスは許可されること
+	if !IsAllowedCaller(tmp, 300, leader) {
+		t.Error("expected opencode CLI (PID 300) to be allowed")
+	}
+
+	// 2. opencode 子プロセス (serve) も許可されること
+	if !IsAllowedCaller(tmp, 310, leader) {
+		t.Error("expected opencode serve (PID 310) to be allowed")
+	}
+}
+
+func TestIsAllowedCaller_AgentUnderSubprocessDenied(t *testing.T) {
+	tmp := t.TempDir()
+
+	// エージェント配下のテストツール等がエージェントを実行または偽装した場合:
+	// PID 100: sessionLeader (bash)
+	//   └─ PID 200: agy (comm: "agy")
+	//       └─ PID 300: pytest (comm: "pytest")
+	//           └─ PID 310: opencode (comm: "opencode")
+	makeProc := func(pid int, comm string, ppid int) {
+		pDir := filepath.Join(tmp, fmt.Sprint(pid))
+		_ = os.MkdirAll(pDir, 0o755)
+		_ = os.WriteFile(filepath.Join(pDir, "stat"), []byte(fmt.Sprintf("%d (%s) S %d 100 0\n", pid, comm, ppid)), 0o644)
+		_ = os.WriteFile(filepath.Join(pDir, "comm"), []byte(comm+"\n"), 0o644)
+	}
+
+	makeProc(100, "bash", 1)
+	makeProc(200, "agy", 100)
+	makeProc(300, "pytest", 200)
+	makeProc(310, "opencode", 300)
+
+	leader := 100
+
+	// テストツール配下の opencode は拒否されること
+	if IsAllowedCaller(tmp, 310, leader) {
+		t.Error("expected opencode under pytest to be denied")
+	}
+}
+
+func TestIsAllowedCaller_AgentUnderSubshellDenied(t *testing.T) {
+	tmp := t.TempDir()
+
+	// エージェント配下のサブシェルがエージェントを実行した場合:
+	// PID 100: sessionLeader (bash)
+	//   └─ PID 200: agy (comm: "agy")
+	//       └─ PID 300: bash (comm: "bash")
+	//           └─ PID 310: opencode (comm: "opencode")
+	makeProc := func(pid int, comm string, ppid int) {
+		pDir := filepath.Join(tmp, fmt.Sprint(pid))
+		_ = os.MkdirAll(pDir, 0o755)
+		_ = os.WriteFile(filepath.Join(pDir, "stat"), []byte(fmt.Sprintf("%d (%s) S %d 100 0\n", pid, comm, ppid)), 0o644)
+		_ = os.WriteFile(filepath.Join(pDir, "comm"), []byte(comm+"\n"), 0o644)
+	}
+
+	makeProc(100, "bash", 1)
+	makeProc(200, "agy", 100)
+	makeProc(300, "bash", 200)
+	makeProc(310, "opencode", 300)
+
+	leader := 100
+
+	// サブシェル配下の opencode は拒否されること
+	if IsAllowedCaller(tmp, 310, leader) {
+		t.Error("expected opencode under subshell to be denied")
+	}
+}
+

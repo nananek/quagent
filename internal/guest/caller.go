@@ -218,6 +218,8 @@ func IsDescendantOfAgent(dir string, targetPID int) bool {
 
 // IsAllowedCaller は callerPID がエージェント本体 (またはセッションリーダー) かを判定する。
 // エージェントが実行したサブプロセス (テスト、ビルドツール、シェル等) は拒否する。
+// OpenCode のようにエージェント本体が内部で子プロセス (opencode serve 等) を起動する
+// マルチプロセス構成の場合は、エージェント本体の子プロセスとしての接続を許可する。
 func IsAllowedCaller(dir string, callerPID int, sessionLeaderPID int) bool {
 	if sessionLeaderPID <= 0 || callerPID <= 0 {
 		return false
@@ -227,10 +229,21 @@ func IsAllowedCaller(dir string, callerPID int, sessionLeaderPID int) bool {
 		return true
 	}
 
-	// callerPID から親を辿りながら、sessionLeaderPID までの経路を検査する
+	callerComm, err := ProcessComm(dir, callerPID)
+	if err != nil {
+		return false
+	}
+
+	callerIsAgent := isAgentProcess(callerComm)
+	callerIsShell := callerComm == "bash" || callerComm == "sh"
+	if !callerIsAgent && !callerIsShell {
+		// エージェント本体でもシェルでもない (テストツール、curl 等)
+		return false
+	}
+
 	curr := callerPID
-	isChildOfAgent := false
 	reachesLeader := false
+	seenNonAgent := !callerIsAgent // シェルの場合は最初から非エージェント扱い
 
 	// 無限ループ・循環参照の防止 (最大 64 階層)
 	const maxDepth = 64
@@ -239,38 +252,39 @@ func IsAllowedCaller(dir string, callerPID int, sessionLeaderPID int) bool {
 		if err != nil {
 			return false
 		}
-		// 親プロセスの comm を調べる (エージェント本体の子孫プロセスかを判定)
-		if ppid != sessionLeaderPID && ppid > 1 {
-			pcomm, err := ProcessComm(dir, ppid)
-			if err == nil && isAgentProcess(pcomm) {
-				isChildOfAgent = true
-			}
-		}
 		if ppid == sessionLeaderPID {
 			reachesLeader = true
 			break
 		}
+		if ppid <= 1 {
+			break
+		}
+
+		pcomm, err := ProcessComm(dir, ppid)
+		if err != nil {
+			return false
+		}
+
+		pIsAgent := isAgentProcess(pcomm)
+		pIsShell := pcomm == "bash" || pcomm == "sh"
+
+		if !pIsAgent && !pIsShell {
+			// 親にシェルでもエージェントでもないプロセス (pytest, make, python 等) が介在している
+			return false
+		}
+
+		if seenNonAgent && pIsAgent {
+			// 既にシェル等の非エージェント層を経由した後に上位にエージェントが存在する
+			// (エージェントが起動したサブシェルやテスト配下からの呼び出し)
+			return false
+		}
+
+		if !pIsAgent {
+			seenNonAgent = true
+		}
+
 		curr = ppid
 	}
 
-	if !reachesLeader {
-		// セッションリーダーの子孫ではない (セッション外の無関係なプロセス)
-		return false
-	}
-
-	if isChildOfAgent {
-		// エージェント本体が実行した子孫プロセス (テスト、ビルド、シェル等) なので拒否
-		return false
-	}
-
-	// エージェント本体自身、または entrypoint 起動シェルなら許可
-	callerComm, err := ProcessComm(dir, callerPID)
-	if err != nil {
-		return false
-	}
-	if isAgentProcess(callerComm) || callerComm == "bash" || callerComm == "sh" {
-		return true
-	}
-
-	return false
+	return reachesLeader
 }
