@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mdlayher/vsock"
+	"github.com/nananek/quagent/internal/access"
 	"github.com/nananek/quagent/internal/console"
 )
 
@@ -30,6 +31,11 @@ type Server struct {
 	// nil なら常に許可。
 	AskApproval func(info console.DockerImageInfo) error
 
+	// AskBatch はパッケージ一括ダウンロード時に人間の承認を求めるコールバック。
+	AskBatch func(info console.BatchDownloadInfo) (access.Kind, error)
+
+	batch         *BatchManager
+	client        *http.Client
 	httpSrv       *http.Server
 	mu            sync.Mutex
 	approvedRepos map[string]bool // key: "registry/repository"
@@ -43,12 +49,25 @@ func NewServer(storage *Storage, dockerHub, ghcr Upstream) *Server {
 	if ghcr == nil {
 		ghcr = NewGHCRUpstream(nil)
 	}
-	return &Server{
+	s := &Server{
 		storage:       storage,
 		dockerHub:     dockerHub,
 		ghcr:          ghcr,
+		client:        &http.Client{Timeout: 30 * time.Minute},
 		approvedRepos: make(map[string]bool),
 	}
+	s.batch = NewBatchManager(func(info console.BatchDownloadInfo) (access.Kind, error) {
+		if s.AskBatch != nil {
+			return s.AskBatch(info)
+		}
+		return access.Once, nil
+	})
+	return s
+}
+
+// SetAskBatch はバッチ承認コールバックを設定する。
+func (s *Server) SetAskBatch(fn func(info console.BatchDownloadInfo) (access.Kind, error)) {
+	s.AskBatch = fn
 }
 
 // parsePath は /v2/<repo...>/<action>/<ref> を解析し、レジストリ・リポジトリ・参照・アクションを返す。
@@ -132,28 +151,47 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. /v2/ 互換性チェック
-	if r.URL.Path == "/v2" || r.URL.Path == "/v2/" {
+	p := r.URL.Path
+	switch {
+	case strings.HasPrefix(p, "/go"):
+		s.handleGo(w, r)
+		return
+	case strings.HasPrefix(p, "/cargo"):
+		s.handleCargo(w, r)
+		return
+	case strings.HasPrefix(p, "/npm"):
+		s.handleNPM(w, r)
+		return
+	case strings.HasPrefix(p, "/pypi"):
+		s.handlePyPI(w, r)
+		return
+	case strings.HasPrefix(p, "/v2"):
+		// Docker レジストリ処理
+		if p == "/v2" || p == "/v2/" {
+			w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintln(w, "{}")
+			return
+		}
+
+		registry, repository, action, ref, ok := parsePath(p)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+
 		w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintln(w, "{}")
+
+		switch action {
+		case "manifests":
+			s.handleManifest(w, r, registry, repository, ref)
+		case "blobs":
+			s.handleBlob(w, r, registry, repository, ref)
+		default:
+			http.NotFound(w, r)
+		}
 		return
-	}
-
-	registry, repository, action, ref, ok := parsePath(r.URL.Path)
-	if !ok {
-		http.NotFound(w, r)
-		return
-	}
-
-	w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
-
-	switch action {
-	case "manifests":
-		s.handleManifest(w, r, registry, repository, ref)
-	case "blobs":
-		s.handleBlob(w, r, registry, repository, ref)
 	default:
 		http.NotFound(w, r)
 	}

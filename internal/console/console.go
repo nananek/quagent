@@ -54,6 +54,23 @@ type Msg struct {
 	DockerRegistry   string `json:"docker_registry,omitempty"`
 	DockerRepository string `json:"docker_repository,omitempty"`
 	DockerReference  string `json:"docker_reference,omitempty"`
+
+	// パッケージ一括取得承認 (batchrequest / batchsettled) の内容。
+	BatchEcosystem string      `json:"batch_ecosystem,omitempty"`
+	BatchItems     []BatchItem `json:"batch_items,omitempty"`
+}
+
+// BatchItem はバッチ承認でダウンロードされる 1 つの項目。
+type BatchItem struct {
+	Ecosystem string `json:"ecosystem"` // "go", "cargo", "npm", "pypi", "docker"
+	Name      string `json:"name"`      // パッケージ名 / クレート名
+	Version   string `json:"version"`   // バージョン / タグ
+}
+
+// BatchDownloadInfo はバッチ承認リクエスト情報。
+type BatchDownloadInfo struct {
+	Ecosystem string
+	Items     []BatchItem
 }
 
 const (
@@ -94,6 +111,21 @@ type Server struct {
 	dockerMu      sync.Mutex
 	dockerNextID  int
 	dockerPending []*dockerRequest
+
+	// パッケージ一括取得承認 (バッチ承認)。
+	batchMu      sync.Mutex
+	batchNextID  int
+	batchPending []*batchRequest
+}
+
+type batchRequest struct {
+	id       int
+	info     BatchDownloadInfo
+	created  time.Time
+	done     chan struct{}
+	status   access.Status
+	kind     access.Kind
+	approved bool
 }
 
 // PRInfo は承認コンソールに諮る PR 作成の内容。
@@ -224,6 +256,8 @@ func (s *Server) serve(c net.Conn) {
 			s.settlePR(msg.ID, msg.Status)
 		case "dockerdecide":
 			s.settleDocker(msg.ID, msg.Status)
+		case "batchdecide":
+			s.settleBatch(msg.ID, msg.Status, msg.Kind)
 		case "quit":
 			s.TriggerQuit()
 		}
@@ -262,6 +296,11 @@ func (s *Server) register(cl *client) {
 		_ = s.send(cl, dockerRequestMsg(r))
 	}
 	s.dockerMu.Unlock()
+	s.batchMu.Lock()
+	for _, r := range s.batchPending {
+		_ = s.send(cl, batchRequestMsg(r))
+	}
+	s.batchMu.Unlock()
 	s.clients[cl] = true
 }
 
@@ -401,6 +440,71 @@ func dockerRequestMsg(r *dockerRequest) Msg {
 		DockerRepository: r.info.Repository,
 		DockerReference:  r.info.Reference,
 		Deadline:         r.created.Add(access.DecisionTimeout).Format("15:04:05"),
+	}
+}
+
+// AskBatchDownload はパッケージ一括取得を承認コンソールに諮り、承認されるまで待つ。
+// 承認された場合は access.Once または access.Session を返す。
+func (s *Server) AskBatchDownload(info BatchDownloadInfo) (access.Kind, error) {
+	req := &batchRequest{info: info, created: time.Now(), done: make(chan struct{})}
+	s.batchMu.Lock()
+	s.batchNextID++
+	req.id = s.batchNextID
+	s.batchPending = append(s.batchPending, req)
+	s.batchMu.Unlock()
+	s.broadcast(batchRequestMsg(req))
+
+	t := time.NewTimer(access.DecisionTimeout)
+	defer t.Stop()
+	select {
+	case <-req.done:
+	case <-t.C:
+		s.settleBatch(req.id, access.TimedOut, access.Once)
+		<-req.done
+	case <-s.Quit:
+		s.settleBatch(req.id, access.Denied, access.Once)
+		return access.Once, fmt.Errorf("終了したのでパッケージを取得しなかった")
+	}
+	if req.approved {
+		return req.kind, nil
+	}
+	if req.status == access.TimedOut {
+		return access.Once, fmt.Errorf("%s 以内に承認されなかったのでパッケージを取得しなかった", access.DecisionTimeout)
+	}
+	return access.Once, fmt.Errorf("パッケージの取得は承認されなかった")
+}
+
+// settleBatch は承認待ちのバッチ取得を決着させ、UI に知らせる。
+func (s *Server) settleBatch(id int, status access.Status, kind access.Kind) {
+	s.batchMu.Lock()
+	idx := -1
+	for i, r := range s.batchPending {
+		if r.id == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		s.batchMu.Unlock()
+		return
+	}
+	req := s.batchPending[idx]
+	s.batchPending = append(s.batchPending[:idx], s.batchPending[idx+1:]...)
+	req.status = status
+	req.kind = kind
+	req.approved = status == access.Approved
+	s.batchMu.Unlock()
+	close(req.done)
+	s.broadcast(Msg{Type: "batchsettled", ID: id, Status: status, Kind: kind})
+}
+
+func batchRequestMsg(r *batchRequest) Msg {
+	return Msg{
+		Type:           "batchrequest",
+		ID:             r.id,
+		BatchEcosystem: r.info.Ecosystem,
+		BatchItems:     r.info.Items,
+		Deadline:       r.created.Add(access.DecisionTimeout).Format("15:04:05"),
 	}
 }
 

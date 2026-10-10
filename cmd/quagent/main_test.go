@@ -93,6 +93,12 @@ func TestDispatchCache(t *testing.T) {
 	if err := dispatch([]string{"cache", "clean"}); err != nil {
 		t.Fatalf("dispatch(cache clean) error: %v", err)
 	}
+	if err := dispatch([]string{"cache", "clean", "go"}); err != nil {
+		t.Fatalf("dispatch(cache clean go) error: %v", err)
+	}
+	if err := dispatch([]string{"cache", "clean", "invalid"}); err == nil {
+		t.Error("expected error for invalid ecosystem clean")
+	}
 	if err := dispatch([]string{"cache", "unknown"}); err == nil {
 		t.Error("expected error for cache unknown")
 	}

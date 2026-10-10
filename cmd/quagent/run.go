@@ -138,6 +138,41 @@ exec /bin/sh "$@"`
 		indentBlock(shWrapper, "      "))
 }
 
+// pkgCacheWriteFiles は言語パッケージ (Go, Cargo, npm, PyPI) の透過キャッシュ設定を guest に置く write_files の断片。
+func pkgCacheWriteFiles(guestUser string) (string, string) {
+	files := fmt.Sprintf(`  - path: /etc/profile.d/quagent-pkgcache.sh
+    permissions: '0644'
+    content: |
+      export GOPROXY="http://127.0.0.1:5000/go,direct"
+      export PIP_INDEX_URL="http://127.0.0.1:5000/pypi/simple/"
+      export PIP_TRUSTED_HOST="127.0.0.1"
+      export NPM_CONFIG_REGISTRY="http://127.0.0.1:5000/npm/"
+  - path: /home/%s/.cargo/config.toml
+    permissions: '0644'
+    content: |
+      [registries.crates-io]
+      protocol = "sparse"
+      index = "sparse+http://127.0.0.1:5000/cargo/index/"
+
+      [source.crates-io]
+      registry = "sparse+http://127.0.0.1:5000/cargo/index/"
+  - path: /home/%s/.npmrc
+    permissions: '0644'
+    content: |
+      registry=http://127.0.0.1:5000/npm/
+  - path: /home/%s/.config/pip/pip.conf
+    permissions: '0644'
+    content: |
+      [global]
+      index-url = http://127.0.0.1:5000/pypi/simple/
+      trusted-host = 127.0.0.1`, guestUser, guestUser, guestUser)
+
+	cmd := fmt.Sprintf("  - [sh, -c, \"mkdir -p /home/%s/.cargo /home/%s/.config/pip && chown -R %s:%s /home/%s/.cargo /home/%s/.npmrc /home/%s/.config 2>/dev/null || true\"]\n",
+		guestUser, guestUser, guestUser, guestUser, guestUser, guestUser, guestUser)
+
+	return files, cmd
+}
+
 // normalizePassthrough は TLS 終端しない行き先のパターンを検証・正規化する
 // ("example.com" か "*.example.com")。空なら nil を返す。
 func normalizePassthrough(in []string) ([]string, error) {
@@ -514,6 +549,18 @@ func run(o runOpts) error {
 	} else {
 		logf("sandbox: 無効")
 	}
+
+	pkgCacheCmd := ""
+	if dockerCachePort != 0 {
+		pkgCacheFile, cmd := pkgCacheWriteFiles(vm.GuestUser)
+		pkgCacheCmd = cmd
+		if sandboxFile != "" {
+			sandboxFile += "\n" + pkgCacheFile
+		} else {
+			sandboxFile = pkgCacheFile
+		}
+	}
+
 	userData := fmt.Sprintf(`#cloud-config
 write_files:
   # エージェントの起動はここにまとめる (↑ で呼び戻せる)
@@ -532,9 +579,9 @@ bootcmd:
 runcmd:
   # 再起動のとき作業ユーザーが差し替えられるよう、/entrypoint.sh の実体は作業ユーザーのホームに置く
   - [sh, -c, "install -o %s -g %s -m 755 /entrypoint.sh %s && ln -sf %s /entrypoint.sh"]
-%s%s%s  - [sh, -c, "mkdir -p /run/quagent-seed && mount -o ro /dev/disk/by-label/cidata /run/quagent-seed && install -m 755 /run/quagent-seed/quagent-guest /usr/local/bin/quagent-guest && umount /run/quagent-seed"]
+%s%s%s%s  - [sh, -c, "mkdir -p /run/quagent-seed && mount -o ro /dev/disk/by-label/cidata /run/quagent-seed && install -m 755 /run/quagent-seed/quagent-guest /usr/local/bin/quagent-guest && umount /run/quagent-seed"]
   - [systemd-run, --unit=quagent-guest, --uid=%s, -p, Restart=always, /usr/local/bin/quagent-guest, %s, "%d", "%d"]
-`, indentBlock(entrypoint, "      "), extraFiles, sandboxFile, hostsvc.GuestHost, maskCmd(sshUnits()), vm.GuestUser, vm.GuestUser, entrypointPath, entrypointPath, trustCmd, tmpCmd, dockerSetupCmd, vm.GuestUser, guestCommand, svc.Port, dockerCachePort)
+`, indentBlock(entrypoint, "      "), extraFiles, sandboxFile, hostsvc.GuestHost, maskCmd(sshUnits()), vm.GuestUser, vm.GuestUser, entrypointPath, entrypointPath, trustCmd, tmpCmd, dockerSetupCmd, pkgCacheCmd, vm.GuestUser, guestCommand, svc.Port, dockerCachePort)
 
 	// 時刻の表示 (承認の期限やコミットの日時) を host とそろえる
 	if tz := hostTimezone(); tz != "" {
@@ -628,6 +675,7 @@ runcmd:
 	defer con.Close()
 	if cacheSrv != nil {
 		cacheSrv.AskApproval = con.AskDockerDownload
+		cacheSrv.SetAskBatch(con.AskBatchDownload)
 	}
 	g.consoleSock = filepath.Join(work, "console.sock")
 

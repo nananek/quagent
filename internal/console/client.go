@@ -359,7 +359,7 @@ func (m model) handleSocketMsg(msg Msg) model {
 	case "log":
 		return m.appendLog(msg.Text)
 
-	case "request", "relaxrequest", "clip", "prrequest", "dockerrequest":
+	case "request", "relaxrequest", "clip", "prrequest", "dockerrequest", "batchrequest":
 		for _, q := range m.pending {
 			if q.Type == msg.Type && q.ID == msg.ID {
 				return m
@@ -376,7 +376,7 @@ func (m model) handleSocketMsg(msg Msg) model {
 		}
 		return m
 
-	case "settled", "clipsettled", "prsettled", "relaxsettled", "dockersettled":
+	case "settled", "clipsettled", "prsettled", "relaxsettled", "dockersettled", "batchsettled":
 		want := "request"
 		switch msg.Type {
 		case "clipsettled":
@@ -387,6 +387,8 @@ func (m model) handleSocketMsg(msg Msg) model {
 			want = "relaxrequest"
 		case "dockersettled":
 			want = "dockerrequest"
+		case "batchsettled":
+			want = "batchrequest"
 		}
 
 		for i, q := range m.pending {
@@ -425,6 +427,20 @@ func (m model) handleSocketMsg(msg Msg) model {
 				switch msg.Status {
 				case access.Approved:
 					entry.Result = "承認して取得した"
+				case access.TimedOut:
+					entry.Result = "時間切れ (取得しなかった)"
+				default:
+					entry.Result = "拒否 (取得しなかった)"
+				}
+			case "batchrequest":
+				entry.Target = fmt.Sprintf("[%s] %d 個のパッケージ", q.BatchEcosystem, len(q.BatchItems))
+				switch msg.Status {
+				case access.Approved:
+					if msg.Kind == access.Session {
+						entry.Result = "セッション中常に承認"
+					} else {
+						entry.Result = "承認して取得した"
+					}
 				case access.TimedOut:
 					entry.Result = "時間切れ (取得しなかった)"
 				default:
@@ -602,6 +618,15 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.decide(Msg{Type: "dockerdecide", ID: r.ID, Status: access.Approved})
 			case "n", "N":
 				m.decide(Msg{Type: "dockerdecide", ID: r.ID, Status: access.Denied})
+			}
+		case "batchrequest":
+			switch key {
+			case "y", "Y":
+				m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Approved, Kind: access.Once})
+			case "a", "A":
+				m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Approved, Kind: access.Session})
+			case "n", "N":
+				m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Denied})
 			}
 
 		case "relaxrequest":
@@ -1172,6 +1197,29 @@ func (m model) renderActionButtons(r Msg, isHoverRow bool) string {
 		}
 		return strY + "    " + strN
 
+	case "batchrequest":
+		// [y] 今回承認    [a] セッション承認    [n] 拒否
+		btnY := "[y] 今回承認"
+		btnA := "[a] セッション承認"
+		btnN := "[n] 拒否"
+		var strY, strA, strN string
+		if isHoverRow && m.mouseX < 18 {
+			strY = styleBtnHoverSuccess.Render(btnY)
+		} else {
+			strY = styleKey.Render(btnY)
+		}
+		if isHoverRow && m.mouseX >= 18 && m.mouseX < 40 {
+			strA = styleBtnHoverSuccess.Render(btnA)
+		} else {
+			strA = styleKey.Render(btnA)
+		}
+		if isHoverRow && m.mouseX >= 40 {
+			strN = styleBtnHoverDanger.Render(btnN)
+		} else {
+			strN = styleKey.Render(btnN)
+		}
+		return strY + "    " + strA + "    " + strN
+
 	case "relaxrequest":
 		// [1] 今回のみ (5分)    [2] セッション許可    [d] 拒否    [q] 質問を返す
 		btn1 := "[1] 今回のみ (5分)"
@@ -1269,6 +1317,8 @@ func (m model) renderPendingTab(availHeight int) string {
 		cardHeader = fmt.Sprintf(styleBadge.Foreground(colSuccess).Render("━━ PR 作成承認 #%d ━━ 期限: %s"), r.ID, Sanitize(r.Deadline))
 	case "dockerrequest":
 		cardHeader = fmt.Sprintf(styleBadge.Foreground(colCyan).Render("━━ Docker イメージ取得承認 #%d ━━ 期限: %s"), r.ID, Sanitize(r.Deadline))
+	case "batchrequest":
+		cardHeader = fmt.Sprintf(styleBadge.Foreground(colCyan).Render("━━ パッケージ一括取得承認 (%s) #%d ━━ 期限: %s"), r.BatchEcosystem, r.ID, Sanitize(r.Deadline))
 	case "relaxrequest":
 		cardHeader = fmt.Sprintf(styleBadge.Foreground(colMagenta).Render("━━ HTTP緩和申請 #%d ━━ 期限: %s"), r.ID, Sanitize(r.Deadline))
 	default:
@@ -1289,6 +1339,21 @@ func (m model) renderPendingTab(availHeight int) string {
 		sb.WriteString(fmt.Sprintf("%s %s\n", styleLabel.Render("レジストリ:"), Sanitize(r.DockerRegistry)))
 		sb.WriteString(fmt.Sprintf("%s %s\n", styleLabel.Render("イメージ名:"), Sanitize(r.DockerRepository)))
 		sb.WriteString(fmt.Sprintf("%s %s\n", styleLabel.Render("タグ/参照:"), Sanitize(r.DockerReference)))
+
+	case "batchrequest":
+		sb.WriteString(fmt.Sprintf("%s %s (%d 個)\n", styleLabel.Render("エコシステム:"), Sanitize(r.BatchEcosystem), len(r.BatchItems)))
+		sb.WriteString(fmt.Sprintf("%s\n", styleLabel.Render("対象パッケージ:")))
+		for i, item := range r.BatchItems {
+			if i >= 10 {
+				sb.WriteString(fmt.Sprintf("    ... 他 %d 個\n", len(r.BatchItems)-10))
+				break
+			}
+			if item.Version != "" {
+				sb.WriteString(fmt.Sprintf("    - %s (%s)\n", Sanitize(item.Name), Sanitize(item.Version)))
+			} else {
+				sb.WriteString(fmt.Sprintf("    - %s\n", Sanitize(item.Name)))
+			}
+		}
 
 	case "relaxrequest":
 		sb.WriteString(fmt.Sprintf("%s %s\n", styleLabel.Render("対象ホスト:"), Sanitize(r.RelaxHost)))

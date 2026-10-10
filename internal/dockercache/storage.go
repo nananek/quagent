@@ -274,3 +274,101 @@ func (s *Storage) evictIfNeededLocked() {
 		}
 	}
 }
+
+// pkgFilePath は指定されたエコシステムと相対パスに対するファイルパスを返す (ディレクトリトラバーサル防止)。
+func (s *Storage) pkgFilePath(ecosystem, relPath string) (string, error) {
+	if strings.Contains(ecosystem, "..") || strings.Contains(relPath, "..") {
+		return "", errors.New("不正なパス文字が含まれています")
+	}
+	cleanRel := filepath.Clean(relPath)
+	if strings.HasPrefix(cleanRel, "/") {
+		cleanRel = strings.TrimPrefix(cleanRel, "/")
+	}
+	if strings.HasPrefix(cleanRel, "..") {
+		return "", errors.New("不正なパスです")
+	}
+	return filepath.Join(s.rootDir, "packages", ecosystem, cleanRel), nil
+}
+
+// HasPkgFile はパッケージキャッシュファイルが存在するかを返す。
+func (s *Storage) HasPkgFile(ecosystem, relPath string) (bool, int64) {
+	p, err := s.pkgFilePath(ecosystem, relPath)
+	if err != nil {
+		return false, 0
+	}
+	fi, err := os.Stat(p)
+	if err != nil {
+		return false, 0
+	}
+	return true, fi.Size()
+}
+
+// OpenPkgFile はパッケージキャッシュファイルを読み取り用に開く (アクセス時刻更新)。
+func (s *Storage) OpenPkgFile(ecosystem, relPath string) (*os.File, int64, error) {
+	p, err := s.pkgFilePath(ecosystem, relPath)
+	if err != nil {
+		return nil, 0, err
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, 0, err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, 0, err
+	}
+	now := time.Now()
+	_ = os.Chtimes(p, now, now)
+	return f, fi.Size(), nil
+}
+
+// GetPkgFile はキャッシュされたパッケージファイルの全バイトを読み出す。
+func (s *Storage) GetPkgFile(ecosystem, relPath string) ([]byte, error) {
+	f, _, err := s.OpenPkgFile(ecosystem, relPath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
+}
+
+// SavePkgFile はパッケージファイルをアトミックに保存する。
+func (s *Storage) SavePkgFile(ecosystem, relPath string, r io.Reader) (int64, error) {
+	targetPath, err := s.pkgFilePath(ecosystem, relPath)
+	if err != nil {
+		return 0, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+		return 0, fmt.Errorf("ディレクトリ作成失敗: %w", err)
+	}
+
+	tmpFile, err := os.CreateTemp(filepath.Join(s.rootDir, "tmp"), "pkg-*")
+	if err != nil {
+		return 0, fmt.Errorf("一時ファイル作成失敗: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		tmpFile.Close()
+		_ = os.Remove(tmpPath)
+	}()
+
+	n, err := io.Copy(tmpFile, r)
+	if err != nil {
+		return 0, fmt.Errorf("書き込み失敗: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return 0, fmt.Errorf("close 失敗: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, targetPath); err != nil {
+		return 0, fmt.Errorf("移動失敗: %w", err)
+	}
+
+	s.evictIfNeededLocked()
+	return n, nil
+}

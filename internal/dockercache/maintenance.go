@@ -19,11 +19,18 @@ type CachedImage struct {
 	CachedAt   time.Time `json:"cached_at"`
 }
 
-// CacheStats は Docker キャッシュの全体統計。
+// EcosystemStats は各言語エコシステムのキャッシュ統計。
+type EcosystemStats struct {
+	TotalFiles int   `json:"total_files"`
+	TotalBytes int64 `json:"total_bytes"`
+}
+
+// CacheStats は Docker およびパッケージキャッシュの全体統計。
 type CacheStats struct {
-	TotalBlobs     int           `json:"total_blobs"`
-	TotalBlobBytes int64         `json:"total_blob_bytes"`
-	Images         []CachedImage `json:"images"`
+	TotalBlobs     int                       `json:"total_blobs"`
+	TotalBlobBytes int64                     `json:"total_blob_bytes"`
+	Images         []CachedImage             `json:"images"`
+	Packages       map[string]EcosystemStats `json:"packages"`
 }
 
 // FormatSize はバイト数を人間が読みやすい形式 (MiB/GiB) に変換する。
@@ -47,7 +54,9 @@ func FormatSize(b int64) string {
 
 // InspectCache はキャッシュディレクトリの統計とイメージ一覧を取得する。
 func InspectCache(rootDir string) (*CacheStats, error) {
-	stats := &CacheStats{}
+	stats := &CacheStats{
+		Packages: make(map[string]EcosystemStats),
+	}
 
 	// 1. blobs の集計
 	blobsDir := filepath.Join(rootDir, "blobs", "sha256")
@@ -106,12 +115,36 @@ func InspectCache(rootDir string) (*CacheStats, error) {
 		})
 	}
 
+	// 3. packages の集計 (go, cargo, npm, pypi)
+	packagesDir := filepath.Join(rootDir, "packages")
+	if _, err := os.Stat(packagesDir); err == nil {
+		for _, eco := range []string{"go", "cargo", "npm", "pypi"} {
+			ecoDir := filepath.Join(packagesDir, eco)
+			if _, err := os.Stat(ecoDir); err == nil {
+				var es EcosystemStats
+				_ = filepath.WalkDir(ecoDir, func(path string, d fs.DirEntry, err error) error {
+					if err != nil || d.IsDir() {
+						return nil
+					}
+					if fi, err := d.Info(); err == nil {
+						es.TotalFiles++
+						es.TotalBytes += fi.Size()
+					}
+					return nil
+				})
+				if es.TotalFiles > 0 {
+					stats.Packages[eco] = es
+				}
+			}
+		}
+	}
+
 	return stats, nil
 }
 
-// CleanCache はキャッシュされたすべての blob およびマニフェストを削除する。
+// CleanCache はキャッシュされたすべてのファイル (Docker および言語パッケージ) を削除する。
 func CleanCache(rootDir string) error {
-	for _, sub := range []string{"blobs", "manifests", "tmp"} {
+	for _, sub := range []string{"blobs", "manifests", "packages", "tmp"} {
 		dir := filepath.Join(rootDir, sub)
 		if err := os.RemoveAll(dir); err != nil && !os.IsNotExist(err) {
 			return err
@@ -123,4 +156,24 @@ func CleanCache(rootDir string) error {
 	// blobs/sha256 サブディレクトリを再作成
 	_ = os.MkdirAll(filepath.Join(rootDir, "blobs", "sha256"), 0755)
 	return nil
+}
+
+// CleanEcosystemCache は指定されたエコシステム (docker, go, cargo, npm, pypi) のキャッシュのみを削除する。
+func CleanEcosystemCache(rootDir, ecosystem string) error {
+	switch ecosystem {
+	case "docker":
+		for _, sub := range []string{"blobs", "manifests"} {
+			dir := filepath.Join(rootDir, sub)
+			_ = os.RemoveAll(dir)
+			_ = os.MkdirAll(dir, 0755)
+		}
+		_ = os.MkdirAll(filepath.Join(rootDir, "blobs", "sha256"), 0755)
+		return nil
+	case "go", "cargo", "npm", "pypi":
+		dir := filepath.Join(rootDir, "packages", ecosystem)
+		_ = os.RemoveAll(dir)
+		return nil
+	default:
+		return fmt.Errorf("未知のエコシステム: %s (docker, go, cargo, npm, pypi のいずれかを指定してください)", ecosystem)
+	}
 }
