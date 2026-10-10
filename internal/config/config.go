@@ -30,6 +30,8 @@ type Config struct {
 	Claude Claude `json:"claude"`
 	// Agy は VM 内の agy (Antigravity CLI) の設定。
 	Agy Agy `json:"agy"`
+	// Codex は VM 内の codex (OpenAI Codex CLI) の設定。
+	Codex Codex `json:"codex"`
 	// PR は PR 作成の設定。
 	PR PR `json:"pr"`
 	// Clipboard は VM が OSC 52 で書き込もうとした中身 (承認したもの) の入れ方。
@@ -225,6 +227,31 @@ type Agy struct {
 	Seed string `json:"-"`
 	// Egress はサブスクリプション用に一時的に開ける egress の宛先
 	// (ユーザー情報確認とプロフィール画像)。初回の推論が通ったら閉じる。
+	Egress []string `json:"-"`
+}
+
+// Codex は VM 内の codex (OpenAI Codex CLI) の設定。
+type Codex struct {
+	// Model は既定のモデル (codex の model 設定。空なら codex の既定)。
+	Model string `json:"model,omitempty"`
+	// Subscription が true なら、host の codex のサブスクリプション (OAuth ログイン)
+	// を認証プロキシ経由で使う。providers の openai は要らない。
+	// false なら OpenAI API キーで使う (providers に openai が要る)。
+	Subscription bool `json:"subscription,omitempty"`
+	// RefreshTokenEnv / RefreshTokenFile / RefreshTokenCommand はサブスクリプション用の
+	// 長期 refresh_token の取り出し方 (どれか 1 つ。providers の secret_env 等と同じ)。
+	// codex がトークンを secret-service (キーリング) に書く環境や、pass 等で別管理して
+	// いる場合に指定する。出力はトークンファイルと同じ JSON でも素の refresh_token
+	// でもよい。3 つとも空ならトークンファイル (~/.codex/auth.json) を読む。
+	RefreshTokenEnv     string   `json:"refresh_token_env,omitempty"`
+	RefreshTokenFile    string   `json:"refresh_token_file,omitempty"`
+	RefreshTokenCommand []string `json:"refresh_token_command,omitempty"`
+	// Seed はサブスクリプション用に host が run 開始時に作った短命トークン。
+	// guest のトークンファイルと窓口の追加の合言葉に使う。設定ファイルには書かない。
+	Seed string `json:"-"`
+	// AccountID は ChatGPT アカウント ID (あればリクエストヘッダーに付与する)。設定ファイルには書かない。
+	AccountID string `json:"-"`
+	// Egress はサブスクリプション用に一時的に開ける egress の宛先 (起動時の通信用)。初回の推論が通ったら閉じる。
 	Egress []string `json:"-"`
 }
 

@@ -184,10 +184,10 @@ func ProcessExe(dir string, pid int) (string, error) {
 // CheckAgentChildCommand はプロセスがエージェントの子孫かを調べる隠しサブコマンド名。
 const CheckAgentChildCommand = "__check_agent_child"
 
-// IsAgentProcess はプロセス名がエージェント本体 (opencode, claude, agy) かを返す。
+// IsAgentProcess はプロセス名がエージェント本体 (opencode, claude, agy, codex) かを返す。
 func IsAgentProcess(comm string) bool {
 	switch comm {
-	case "opencode", "claude", "agy":
+	case "opencode", "claude", "agy", "codex":
 		return true
 	}
 	return false

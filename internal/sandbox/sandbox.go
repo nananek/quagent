@@ -37,6 +37,7 @@ var SensitiveAgentConfigPaths = []string{
 	".claude",
 	".claude.json",
 	".gemini",
+	".codex",
 	".config/quagent",
 }
 

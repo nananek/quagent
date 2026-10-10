@@ -50,7 +50,7 @@ sshd は完全に停止・無効化されます。systemd-ssh-generator が生�
 
 ## VM 内部仕様: 使い捨てスナップショットと非特権 agent ユーザー
 
-- **ベースイメージ:** 各 OS のレシピからビルドされます。いずれのイメージも rootless Docker、opencode、Claude Code、agy を同梱しており、root 権限で動く Docker デーモンは動作させません。
+- **ベースイメージ:** 各 OS のレシピからビルドされます。いずれのイメージも rootless Docker、opencode、Claude Code、agy、Codex を同梱しており、root 権限で動く Docker デーモンは動作させません。
 - **作業ユーザー `agent`:** sudo 権限を持たない一般ユーザーです。作業ディレクトリは `/work` であり、ここに対象リポジトリを履歴ごとクローンし、ホストと同じブランチをチェックアウトします。同期されるのは現在チェックアウト中のブランチと origin のリモート追跡ブランチのみであり、他のローカルブランチやタグは持ち込みません。ブランチの先頭コミットは既定では upstream（fetch 済みのリモート先端）です。ローカルの未 push コミットを渡す場合は `--local-head`（TUI オプション）を指定します。未コミットの変更はいずれの場合も同期されません。
 - **使い捨て環境:** VM は毎回ベースイメージの overlay スナップショットから起動され、終了時に破棄されます。対話セッション終了時に TUI でエージェントを選び直して再起動する場合は、VM を破棄せず、エージェントの設定のみを差し替えます。終了を選んだときはホスト側のログを残さない選択も可能です。残存した作業ディレクトリは次回起動時に自動クリーンアップされます。
 - **仮想化支援 (KVM):** VM には CPU の仮想化支援機能（svm / vmx）を公開しないため、VM 内部では KVM を使用できません。VM 内部でさらに VM を実行する場合（quagent 本体の開発など）は `--nested-virt`（TUI オプション）を指定します。
@@ -85,7 +85,7 @@ sshd は完全に停止・無効化されます。systemd-ssh-generator が生�
 ホスト窓口 (`quagent.host:7070`) への中継デーモンは、TCP 接続の受付時に `/proc/net/tcp` と `/proc/<pid>/fd` から接続元 PID を特定し、プロセスツリーを検査します。窓口への接続を許可するのはエージェント本体プロセスのみです。テストコードやビルドスクリプトなどの子孫プロセスからの接続は即座に遮断されます。万一設定ファイルの認証トークンが漏洩した場合でも、サブプロセスから直接 MCP ツールや LLM API を不正利用される心配はありません。
 
 ### 4. エージェント設定ファイルの不可視化 (`mask_agent_config: true`、既定: 有効)
-子孫プロセス（テストコード、ビルドツール、シェル等）に対し、ファイルシステム名前空間（`__subbox`）を用いてホームディレクトリ配下の機密設定パスを不可視化します。対象パス（`~/.config/opencode`、`~/.claude`、`~/.claude.json`、`~/.gemini`、`~/.config/quagent`）には空の tmpfs または `/dev/null` を被せます。エージェント本体は正常に読み取れますが、サブプロセスからはファイル自体が存在しないように見えます。なお、コミット署名用の使い捨て鍵（`~/.ssh`）は署名処理に必要なため不可視化の対象外です。
+子孫プロセス（テストコード、ビルドツール、シェル等）に対し、ファイルシステム名前空間（`__subbox`）を用いてホームディレクトリ配下の機密設定パスを不可視化します。対象パス（`~/.config/opencode`、`~/.claude`、`~/.claude.json`、`~/.gemini`、`~/.codex`、`~/.config/quagent`）には空の tmpfs または `/dev/null` を被せます。エージェント本体は正常に読み取れますが、サブプロセスからはファイル自体が存在しないように見えます。なお、コミット署名用の使い捨て鍵（`~/.ssh`）は署名処理に必要なため不可視化の対象外です。
 
 ### 5. rootless Docker へのサンドボックス制約継承 (`docker_inherit: true`、既定: 有効)
 rootless Docker コンテナに対しても、`sandbox.Policy` に基づく seccomp フィルタ（AF_VSOCK 遮断、危険システムコール拒否、64bit ABI 限定）を反映した Docker 既定プロファイルを透過適用します。コンテナのボリュームマウントを経由した機密ディレクトリの持ち出しも遮断します。
@@ -135,6 +135,7 @@ API キー等の認証情報は VM 内には配置しません。VM 内のエー
 - **opencode:** `http://quagent.host:7070/llm/<provider>` 経由で上流へ中継します。プロキシが `secret_command` 等で取得したキーを付与します。
 - **Claude Code:** `ANTHROPIC_BASE_URL` をプロキシに向け、API キーの代わりに認証トークンを `apiKeyHelper` 経由で渡します。サブスクリプション（Pro/Max）利用時は、ホスト側で `claude setup-token` により生成した長期トークンをホスト側のみに保持し、VM 内には一時トークンのみを渡します。なお、`setup-token` は推論専用のため、VM 内の `/usage` は使用できません（ホスト側の Claude Code で確認します）。
 - **agy (Antigravity CLI):** API キー利用時は `GOOGLE_GEMINI_BASE_URL` をプロキシに向け、認証トークンを `GEMINI_API_KEY` として渡します。
+- **codex (Codex CLI):** API キー利用時は `OPENAI_BASE_URL` をプロキシに向け、認証トークンを `OPENAI_API_KEY` として渡します。サブスクリプション（ChatGPT Plus / Pro 等）利用時は、ホスト側の OAuth ログイン情報から短命トークンを生成してプロキシが付与します。
 
 ### agy サブスクリプション利用時の内部制御
 
@@ -146,6 +147,17 @@ API キー等の認証情報は VM 内には配置しません。VM 内のエー
   長期の `refresh_token` は、既定でホストのトークンファイル (`~/.gemini/antigravity-cli/antigravity-oauth-token`) から読み込みます。secret-service（キーリング）や `pass` で別管理している場合は、`agy` の `refresh_token_env`、`refresh_token_file`、`refresh_token_command` で指定します（JSON または素の文字列に対応。secret-service の場合は `["secret-tool", "lookup", ...]` を指定）。
 - **起動前の認証事前検証:**
   サブスクで agy を起動する前（および再起動で agy を選び直した際）は、ホスト側で `agy models` を短時間実行して認証が通るか確かめます（推論枠は消費せず、プロセスは即座に終了します）。確認に失敗した場合、初回起動時は VM を作成せずに終了し、再起動時は VM を残したまま選び直し画面へ戻ります。
+
+### codex サブスクリプション利用時の内部制御
+
+ホスト側でログイン済みのサブスクリプションを利用する場合、ホスト側が OAuth ログイン情報から短命トークンを再生成してリクエストに付与します。
+
+- **通信の特例 (一時的な Egress 開放と TLS 素通し):**
+  起動直後の通信のため、宛先（`chatgpt.com`, `auth.openai.com`）宛てのみ、`--agent codex` 指定時に一時的に egress を開放します。初回推論が通過した時点で即座に遮断します。この通信は `header_policy` 有効時も TLS 終端せず素通しします。
+- **リフレッシュトークンの取得元:**
+  既定でホストのトークンファイル (`~/.codex/auth.json`) から読み込みます。secret-service（キーリング）や `pass` で別管理している場合は、`codex` の `refresh_token_env`、`refresh_token_file`、`refresh_token_command` で指定します。
+- **起動前の認証事前検証:**
+  サブスクで codex を起動する前（および再起動で codex を選び直した際）は、ホスト側で `codex --version` を短時間実行して確認します。確認に失敗した場合、初回起動時は VM を作成せずに終了し、再起動時は VM を残したまま選び直し画面へ戻ります。
 
 ### 転送対象エンドポイントの制限
 

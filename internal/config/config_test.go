@@ -40,14 +40,18 @@ func TestLoad(t *testing.T) {
 			}
 		},
 		"opencode": {
-			"model": "anthropic/claude-3-5-sonnet"
+			"model": "anthropic/claude-sonnet-5.5"
 		},
 		"claude": {
-			"model": "claude-3-5-sonnet",
+			"model": "claude-sonnet-5.5",
 			"subscription": "pro"
 		},
 		"agy": {
-			"model": "gemini-2.0-flash",
+			"model": "gemini-3.8-flash-high",
+			"subscription": true
+		},
+		"codex": {
+			"model": "gpt-5.2-codex-medium",
 			"subscription": true
 		},
 		"clipboard": {
@@ -73,6 +77,9 @@ func TestLoad(t *testing.T) {
 	}
 	if !cfg.Agy.Subscription {
 		t.Errorf("expected agy subscription true")
+	}
+	if !cfg.Codex.Subscription || cfg.Codex.Model != "gpt-5.2-codex-medium" {
+		t.Errorf("expected codex subscription true and model gpt-5.2-codex-medium, got %+v", cfg.Codex)
 	}
 	if cfg.QemuSandbox == nil || cfg.QemuSandbox.Enabled == nil || *cfg.QemuSandbox.Enabled != false {
 		t.Errorf("expected qemu_sandbox.enabled false, got %+v", cfg.QemuSandbox)

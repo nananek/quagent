@@ -475,7 +475,7 @@ func TestDefaultCallerPID(t *testing.T) {
 }
 
 func TestIsAgentProcess(t *testing.T) {
-	for _, name := range []string{"opencode", "claude", "agy"} {
+	for _, name := range []string{"opencode", "claude", "agy", "codex"} {
 		if !IsAgentProcess(name) {
 			t.Errorf("expected %s to be agent process", name)
 		}
