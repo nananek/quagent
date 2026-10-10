@@ -25,6 +25,11 @@ const guestRulesContent = `# quagent VM 実行環境の制約と運用ルール
 - **rootless Docker の原則利用**: 動作検証やビルド・テスト環境の構築には、原則として rootless Docker を使用してください。
 - **マシン固有事情を作らない**: ゲスト OS に ad-hoc にパッケージを追加したり、手動でマシン固有の設定を行ったりして「この VM 上でしか動かない」状態を一切作らないでください。
 - **再現性の担保**: CI や別の使い捨て VM、他の開発者の環境でも全く同じ手順で再現・実行できる検証手順 (Dockerfile、docker compose、スクリプトなど) を常に用いてください。
+
+## 4. Docker イメージのキャッシュと利用方法
+- **Docker Hub (docker.io)**: `daemon.json` の `registry-mirrors` により自動的にホスト側のローカルキャッシュ（`127.0.0.1:5000`）へ問い合わせます。通常通り `docker pull <image>` や `docker run` 等を実行してください（初回のみホスト側で取得承認を求められます）。
+- **GitHub Container Registry (ghcr.io)**: `docker pull 127.0.0.1:5000/ghcr.io/<owner>/<repo>:<tag>` のプレフィックス形式で指定することで、ホスト側のキャッシュプロキシ経由で取得できます。
+
 `
 
 // linkRulesScript は VM 内の ~/.quagent/rules.md を各エージェント

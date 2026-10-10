@@ -13,14 +13,17 @@ import (
 
 	"github.com/nananek/quagent/internal/access"
 	"github.com/nananek/quagent/internal/console"
+	"github.com/nananek/quagent/internal/dockercache"
 	"github.com/nananek/quagent/internal/guest"
 	"github.com/nananek/quagent/internal/hostsandbox"
 	"github.com/nananek/quagent/internal/hostsvc"
 	"github.com/nananek/quagent/internal/image"
 	"github.com/nananek/quagent/internal/netns"
+	"github.com/nananek/quagent/internal/paths"
 	"github.com/nananek/quagent/internal/sandbox"
 	"github.com/nananek/quagent/internal/tui"
 )
+
 
 const usage = `usage:
   quagent                                      TUI (VM の起動設定とベースイメージの管理)
@@ -29,6 +32,7 @@ const usage = `usage:
   quagent image ls                             焼いたベースイメージの一覧
   quagent image rm IMAGE                       ベースイメージを消す
   quagent always ls | rm DOMAIN...              「以後確認しない」ドメインの一覧・取り消し
+  quagent cache ls | clean                     Docker イメージキャッシュの一覧・全削除
   quagent run [--repo DIR] [--image RECIPE] [--cpus N] [--mem MiB] [--agent opencode|claude|agy|codex] [--allow "d1 d2"] [--mount-tmp] [--nested-virt] [--local-head] [--pr-approval[=false]]
                                                VM を起動し、tmux でエージェントと承認コンソールを開く
 `
@@ -64,14 +68,23 @@ func dispatch(args []string) error {
 		}
 		return netns.RunChild(args[1])
 	case guestCommand:
-		if len(args) != 2 {
+		if len(args) < 2 {
 			return fmt.Errorf("%s: host の窓口のポートが必要", guestCommand)
 		}
 		port, err := strconv.ParseUint(args[1], 10, 32)
 		if err != nil {
 			return fmt.Errorf("%s: ポートが不正: %q", guestCommand, args[1])
 		}
-		return guest.Serve(hostsvc.GuestPort, uint32(port))
+		var dockerPort uint32
+		if len(args) >= 3 {
+			if dp, err := strconv.ParseUint(args[2], 10, 32); err == nil {
+				dockerPort = uint32(dp)
+			}
+		}
+		return guest.Serve(hostsvc.GuestPort, uint32(port), dockerPort)
+	case "cache":
+		return cmdCache(args[1:])
+
 	case execCommand:
 		return cmdExec(args[1:])
 	case sandbox.LauncherCommand:
@@ -243,6 +256,48 @@ func cmdAlways(args []string) error {
 	}
 	return fmt.Errorf("always: ls か rm DOMAIN... を指定する")
 }
+
+func cmdCache(args []string) error {
+	cacheDir := paths.DockerCacheDir()
+	if len(args) == 0 || args[0] == "ls" {
+		stats, err := dockercache.InspectCache(cacheDir)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Docker キャッシュ (%s):\n", cacheDir)
+		fmt.Printf("  レイヤー数: %d\n", stats.TotalBlobs)
+		fmt.Printf("  合計サイズ: %s\n", dockercache.FormatSize(stats.TotalBlobBytes))
+		if len(stats.Images) > 0 {
+			fmt.Println("  キャッシュされたイメージ:")
+			for _, img := range stats.Images {
+				fmt.Printf("    - %s/%s:%s (取得日時: %s)\n",
+					img.Registry, img.Repository, img.Reference,
+					img.CachedAt.Format("2006-01-02 15:04:05"))
+			}
+		} else {
+			fmt.Println("  キャッシュされたイメージ: なし")
+		}
+		return nil
+	}
+	if args[0] == "clean" || args[0] == "clear" || args[0] == "rm" {
+		stats, _ := dockercache.InspectCache(cacheDir)
+		freedSize := ""
+		if stats != nil {
+			freedSize = dockercache.FormatSize(stats.TotalBlobBytes)
+		}
+		if err := dockercache.CleanCache(cacheDir); err != nil {
+			return fmt.Errorf("キャッシュ削除失敗: %w", err)
+		}
+		if freedSize != "" {
+			fmt.Printf("Docker キャッシュを全削除しました (%s 解放)\n", freedSize)
+		} else {
+			fmt.Println("Docker キャッシュを全削除しました")
+		}
+		return nil
+	}
+	return fmt.Errorf("cache: ls または clean を指定してください")
+}
+
 
 // consoleCommand は承認コンソール UI を動かす隠しサブコマンド名。
 const consoleCommand = "__console"

@@ -85,6 +85,20 @@ func TestDispatchAlwaysRm(t *testing.T) {
 	}
 }
 
+func TestDispatchCache(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	if err := dispatch([]string{"cache", "ls"}); err != nil {
+		t.Fatalf("dispatch(cache ls) error: %v", err)
+	}
+	if err := dispatch([]string{"cache", "clean"}); err != nil {
+		t.Fatalf("dispatch(cache clean) error: %v", err)
+	}
+	if err := dispatch([]string{"cache", "unknown"}); err == nil {
+		t.Error("expected error for cache unknown")
+	}
+}
+
+
 func TestCmdRunArgErrors(t *testing.T) {
 	// 不正なエージェント名
 	if err := cmdRun([]string{"--agent", "unknown_agent"}); err == nil {

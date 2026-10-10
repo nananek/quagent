@@ -51,6 +51,9 @@ type Config struct {
 	QemuSandbox *QemuSandboxPolicy `json:"qemu_sandbox,omitempty"`
 	// Resources はホスト側の計算資源 (ストレージ、CPU、メモリ、I/O) の保護設定。
 	Resources *ResourcePolicy `json:"resources,omitempty"`
+	// DockerCache は rootless Docker 向けのイメージ Pull-through キャッシュ設定。
+	// 未指定なら既定で有効。
+	DockerCache *DockerCachePolicy `json:"docker_cache,omitempty"`
 	// SkillsDir はユーザー共通スキルの置き場 (ホスト側)。未指定なら paths.SkillsDir()。
 	SkillsDir string `json:"skills_dir,omitempty"`
 }
@@ -135,6 +138,46 @@ func DefaultResourcePolicy() ResourcePolicy {
 		MaxLogSizeMiB:     50,
 	}
 }
+
+// DockerCachePolicy は rootless Docker 向けのイメージ Pull-through キャッシュ設定。
+type DockerCachePolicy struct {
+	// Enabled を false にすると Docker キャッシュを無効化する (既定: true)。
+	Enabled *bool `json:"enabled,omitempty"`
+	// MaxSizeGiB はキャッシュの最大サイズ (GiB, 既定: 10)。超過時は古い blob から LRU で削除する。
+	MaxSizeGiB int `json:"max_size_gib,omitempty"`
+	// Dir はキャッシュの保存先ディレクトリ。未指定なら paths.DockerCacheDir()。
+	Dir string `json:"dir,omitempty"`
+}
+
+// IsEnabled は Docker キャッシュが有効かどうかを返す (既定: true)。
+func (p *DockerCachePolicy) IsEnabled() bool {
+	if p == nil || p.Enabled == nil {
+		return true
+	}
+	return *p.Enabled
+}
+
+// MaxSizeGiBResolved はキャッシュの最大サイズ (GiB) を返す (既定: 10)。
+func (p *DockerCachePolicy) MaxSizeGiBResolved() int {
+	if p == nil || p.MaxSizeGiB <= 0 {
+		return 10
+	}
+	return p.MaxSizeGiB
+}
+
+// DirResolved はキャッシュディレクトリのホスト側パスを返す。
+func (p *DockerCachePolicy) DirResolved() string {
+	if p != nil && p.Dir != "" {
+		if strings.HasPrefix(p.Dir, "~/") {
+			if home, err := os.UserHomeDir(); err == nil {
+				return filepath.Join(home, p.Dir[2:])
+			}
+		}
+		return p.Dir
+	}
+	return paths.DockerCacheDir()
+}
+
 
 // ResourcePolicyOrDefault は設定が存在すれば既定値を補完して返し、
 // 未設定ならデフォルトを返す。
