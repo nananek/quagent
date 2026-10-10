@@ -216,6 +216,13 @@ func IsDescendantOfAgent(dir string, targetPID int) bool {
 	return false
 }
 
+// isShellProcess はプロセス名がシェル本体またはスクリプト実行シェルかを判定する。
+// Linux カーネルは shebang スクリプトの実行時、/proc/<pid>/comm をスクリプトファイル名に設定するため、
+// /entrypoint.sh や *.sh のスクリプト名もシェルプロセスとして扱う。
+func isShellProcess(comm string) bool {
+	return comm == "bash" || comm == "sh" || comm == "entrypoint.sh" || strings.HasSuffix(comm, ".sh")
+}
+
 // IsAllowedCaller は callerPID がエージェント本体 (またはセッションリーダー) かを判定する。
 // エージェントが実行したサブプロセス (テスト、ビルドツール、シェル等) は拒否する。
 // OpenCode のようにエージェント本体が内部で子プロセス (opencode serve 等) を起動する
@@ -235,7 +242,7 @@ func IsAllowedCaller(dir string, callerPID int, sessionLeaderPID int) bool {
 	}
 
 	callerIsAgent := isAgentProcess(callerComm)
-	callerIsShell := callerComm == "bash" || callerComm == "sh"
+	callerIsShell := isShellProcess(callerComm)
 	if !callerIsAgent && !callerIsShell {
 		// エージェント本体でもシェルでもない (テストツール、curl 等)
 		return false
@@ -266,7 +273,7 @@ func IsAllowedCaller(dir string, callerPID int, sessionLeaderPID int) bool {
 		}
 
 		pIsAgent := isAgentProcess(pcomm)
-		pIsShell := pcomm == "bash" || pcomm == "sh"
+		pIsShell := isShellProcess(pcomm)
 
 		if !pIsAgent && !pIsShell {
 			// 親にシェルでもエージェントでもないプロセス (pytest, make, python 等) が介在している

@@ -538,8 +538,9 @@ func TestIsAllowedCaller_MultiProcessAgent(t *testing.T) {
 	tmp := t.TempDir()
 
 	// OpenCode のマルチプロセス構成:
+	// Linux カーネルは shebang スクリプト実行時の comm をスクリプト名 ("entrypoint.sh") に設定する
 	// PID 100: 対話型シェル (sessionLeader: bash -i)
-	//   └─ PID 200: /entrypoint.sh (comm: "bash")
+	//   └─ PID 200: /entrypoint.sh (comm: "entrypoint.sh")
 	//       └─ PID 300: opencode CLI (comm: "opencode")
 	//           └─ PID 310: opencode serve (comm: "opencode")
 	makeProc := func(pid int, comm string, ppid int) {
@@ -550,7 +551,7 @@ func TestIsAllowedCaller_MultiProcessAgent(t *testing.T) {
 	}
 
 	makeProc(100, "bash", 1)
-	makeProc(200, "bash", 100)
+	makeProc(200, "entrypoint.sh", 100)
 	makeProc(300, "opencode", 200)
 	makeProc(310, "opencode", 300)
 
@@ -564,6 +565,37 @@ func TestIsAllowedCaller_MultiProcessAgent(t *testing.T) {
 	// 2. opencode 子プロセス (serve) も許可されること
 	if !IsAllowedCaller(tmp, 310, leader) {
 		t.Error("expected opencode serve (PID 310) to be allowed")
+	}
+}
+
+func TestIsAllowedCaller_AgyUnderEntrypointAllowed(t *testing.T) {
+	tmp := t.TempDir()
+
+	// agy / claude / codex の単一プロセス構成:
+	// PID 100: sessionLeader (bash)
+	//   └─ PID 200: entrypoint.sh (comm: "entrypoint.sh")
+	//       └─ PID 300: agy (comm: "agy")
+	makeProc := func(pid int, comm string, ppid int) {
+		pDir := filepath.Join(tmp, fmt.Sprint(pid))
+		_ = os.MkdirAll(pDir, 0o755)
+		_ = os.WriteFile(filepath.Join(pDir, "stat"), []byte(fmt.Sprintf("%d (%s) S %d 100 0\n", pid, comm, ppid)), 0o644)
+		_ = os.WriteFile(filepath.Join(pDir, "comm"), []byte(comm+"\n"), 0o644)
+	}
+
+	makeProc(100, "bash", 1)
+	makeProc(200, "entrypoint.sh", 100)
+	makeProc(300, "agy", 200)
+
+	leader := 100
+
+	// agy が許可されること
+	if !IsAllowedCaller(tmp, 300, leader) {
+		t.Error("expected agy under entrypoint.sh to be allowed")
+	}
+
+	// entrypoint.sh 自身も許可されること
+	if !IsAllowedCaller(tmp, 200, leader) {
+		t.Error("expected entrypoint.sh itself to be allowed")
 	}
 }
 
@@ -620,5 +652,33 @@ func TestIsAllowedCaller_AgentUnderSubshellDenied(t *testing.T) {
 	// サブシェル配下の opencode は拒否されること
 	if IsAllowedCaller(tmp, 310, leader) {
 		t.Error("expected opencode under subshell to be denied")
+	}
+}
+
+func TestIsAllowedCaller_AgentUnderScriptDenied(t *testing.T) {
+	tmp := t.TempDir()
+
+	// エージェント配下のシェルスクリプトがエージェントを実行した場合:
+	// PID 100: sessionLeader (bash)
+	//   └─ PID 200: agy (comm: "agy")
+	//       └─ PID 300: test.sh (comm: "test.sh")
+	//           └─ PID 310: opencode (comm: "opencode")
+	makeProc := func(pid int, comm string, ppid int) {
+		pDir := filepath.Join(tmp, fmt.Sprint(pid))
+		_ = os.MkdirAll(pDir, 0o755)
+		_ = os.WriteFile(filepath.Join(pDir, "stat"), []byte(fmt.Sprintf("%d (%s) S %d 100 0\n", pid, comm, ppid)), 0o644)
+		_ = os.WriteFile(filepath.Join(pDir, "comm"), []byte(comm+"\n"), 0o644)
+	}
+
+	makeProc(100, "bash", 1)
+	makeProc(200, "agy", 100)
+	makeProc(300, "test.sh", 200)
+	makeProc(310, "opencode", 300)
+
+	leader := 100
+
+	// スクリプト配下の opencode は拒否されること
+	if IsAllowedCaller(tmp, 310, leader) {
+		t.Error("expected opencode under test.sh to be denied")
 	}
 }
