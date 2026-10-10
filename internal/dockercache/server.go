@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/mdlayher/vsock"
-	"github.com/nananek/quagent/internal/access"
 	"github.com/nananek/quagent/internal/console"
 )
 
@@ -32,7 +31,7 @@ type Server struct {
 	AskApproval func(info console.DockerImageInfo) error
 
 	// AskBatch はパッケージ一括ダウンロード時に人間の承認を求めるコールバック。
-	AskBatch func(info console.BatchDownloadInfo) (access.Kind, error)
+	AskBatch func(info console.BatchDownloadInfo) error
 
 	batch         *BatchManager
 	client        *http.Client
@@ -56,17 +55,17 @@ func NewServer(storage *Storage, dockerHub, ghcr Upstream) *Server {
 		client:        &http.Client{Timeout: 30 * time.Minute},
 		approvedRepos: make(map[string]bool),
 	}
-	s.batch = NewBatchManager(func(info console.BatchDownloadInfo) (access.Kind, error) {
+	s.batch = NewBatchManager(func(info console.BatchDownloadInfo) error {
 		if s.AskBatch != nil {
 			return s.AskBatch(info)
 		}
-		return access.Once, nil
+		return nil
 	})
 	return s
 }
 
 // SetAskBatch はバッチ承認コールバックを設定する。
-func (s *Server) SetAskBatch(fn func(info console.BatchDownloadInfo) (access.Kind, error)) {
+func (s *Server) SetAskBatch(fn func(info console.BatchDownloadInfo) error) {
 	s.AskBatch = fn
 }
 

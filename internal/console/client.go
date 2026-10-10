@@ -622,9 +622,7 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "batchrequest":
 			switch key {
 			case "y", "Y", "1":
-				m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Approved, Kind: access.Once})
-			case "a", "A", "2":
-				m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Approved, Kind: access.Session})
+				m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Approved})
 			case "n", "N", "d", "D":
 				m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Denied})
 			}
@@ -936,11 +934,9 @@ func (m model) handlePendingClick(x, y int) (tea.Model, tea.Cmd) {
 			m.decide(Msg{Type: "dockerdecide", ID: r.ID, Status: access.Denied})
 		}
 	case "batchrequest":
-		// [y] 今回承認    [a] セッション承認    [n] 拒否
-		if x < 18 {
-			m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Approved, Kind: access.Once})
-		} else if x < 40 {
-			m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Approved, Kind: access.Session})
+		// [y] 承認して取得    [n] 拒否
+		if x < 24 {
+			m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Approved})
 		} else {
 			m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Denied})
 		}
@@ -1207,27 +1203,21 @@ func (m model) renderActionButtons(r Msg, isHoverRow bool) string {
 		return strY + "    " + strN
 
 	case "batchrequest":
-		// [y] 今回承認    [a] セッション承認    [n] 拒否
-		btnY := "[y] 今回承認"
-		btnA := "[a] セッション承認"
+		// [y] 承認して取得    [n] 拒否
+		btnY := "[y] 承認して取得"
 		btnN := "[n] 拒否"
-		var strY, strA, strN string
-		if isHoverRow && m.mouseX < 18 {
+		var strY, strN string
+		if isHoverRow && m.mouseX < 24 {
 			strY = styleBtnHoverSuccess.Render(btnY)
 		} else {
 			strY = styleKey.Render(btnY)
 		}
-		if isHoverRow && m.mouseX >= 18 && m.mouseX < 40 {
-			strA = styleBtnHoverSuccess.Render(btnA)
-		} else {
-			strA = styleKey.Render(btnA)
-		}
-		if isHoverRow && m.mouseX >= 40 {
+		if isHoverRow && m.mouseX >= 24 {
 			strN = styleBtnHoverDanger.Render(btnN)
 		} else {
 			strN = styleKey.Render(btnN)
 		}
-		return strY + "    " + strA + "    " + strN
+		return strY + "    " + strN
 
 	case "relaxrequest":
 		// [1] 今回のみ (5分)    [2] セッション許可    [d] 拒否    [q] 質問を返す

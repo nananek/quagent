@@ -2,10 +2,12 @@ package dockercache
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 func parsePyPIPackageFilename(fn string) (pkgName, version string) {
@@ -161,9 +163,19 @@ func (s *Server) handlePyPIPackages(w http.ResponseWriter, r *http.Request, relP
 		if displayVer == "" {
 			displayVer = filename
 		}
-		if err := s.batch.RequestApproval("pypi", pkgName, displayVer); err != nil {
-			http.Error(w, fmt.Sprintf("Forbidden: %v", err), http.StatusForbidden)
-			return
+
+		if !s.batch.IsApproved("pypi", pkgName) {
+			resolver := NewPyPIResolver(s.client)
+			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+			defer cancel()
+			items, err := resolver.ResolveDependencies(ctx, pkgName, displayVer, 200)
+			if err != nil || len(items) == 0 {
+				items = []BatchItem{{Ecosystem: "pypi", Name: pkgName, Version: displayVer}}
+			}
+			if err := s.batch.RequestApprovalItems("pypi", items); err != nil {
+				http.Error(w, fmt.Sprintf("Forbidden: %v", err), http.StatusForbidden)
+				return
+			}
 		}
 	}
 

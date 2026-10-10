@@ -124,7 +124,6 @@ type batchRequest struct {
 	created  time.Time
 	done     chan struct{}
 	status   access.Status
-	kind     access.Kind
 	approved bool
 }
 
@@ -257,7 +256,7 @@ func (s *Server) serve(c net.Conn) {
 		case "dockerdecide":
 			s.settleDocker(msg.ID, msg.Status)
 		case "batchdecide":
-			s.settleBatch(msg.ID, msg.Status, msg.Kind)
+			s.settleBatch(msg.ID, msg.Status)
 		case "quit":
 			s.TriggerQuit()
 		}
@@ -444,8 +443,7 @@ func dockerRequestMsg(r *dockerRequest) Msg {
 }
 
 // AskBatchDownload はパッケージ一括取得を承認コンソールに諮り、承認されるまで待つ。
-// 承認された場合は access.Once または access.Session を返す。
-func (s *Server) AskBatchDownload(info BatchDownloadInfo) (access.Kind, error) {
+func (s *Server) AskBatchDownload(info BatchDownloadInfo) error {
 	req := &batchRequest{info: info, created: time.Now(), done: make(chan struct{})}
 	s.batchMu.Lock()
 	s.batchNextID++
@@ -459,23 +457,23 @@ func (s *Server) AskBatchDownload(info BatchDownloadInfo) (access.Kind, error) {
 	select {
 	case <-req.done:
 	case <-t.C:
-		s.settleBatch(req.id, access.TimedOut, access.Once)
+		s.settleBatch(req.id, access.TimedOut)
 		<-req.done
 	case <-s.Quit:
-		s.settleBatch(req.id, access.Denied, access.Once)
-		return access.Once, fmt.Errorf("終了したのでパッケージを取得しなかった")
+		s.settleBatch(req.id, access.Denied)
+		return fmt.Errorf("終了したのでパッケージを取得しなかった")
 	}
 	if req.approved {
-		return req.kind, nil
+		return nil
 	}
 	if req.status == access.TimedOut {
-		return access.Once, fmt.Errorf("%s 以内に承認されなかったのでパッケージを取得しなかった", access.DecisionTimeout)
+		return fmt.Errorf("%s 以内に承認されなかったのでパッケージを取得しなかった", access.DecisionTimeout)
 	}
-	return access.Once, fmt.Errorf("パッケージの取得は承認されなかった")
+	return fmt.Errorf("パッケージの取得は承認されなかった")
 }
 
 // settleBatch は承認待ちのバッチ取得を決着させ、UI に知らせる。
-func (s *Server) settleBatch(id int, status access.Status, kind access.Kind) {
+func (s *Server) settleBatch(id int, status access.Status) {
 	s.batchMu.Lock()
 	idx := -1
 	for i, r := range s.batchPending {
@@ -491,11 +489,10 @@ func (s *Server) settleBatch(id int, status access.Status, kind access.Kind) {
 	req := s.batchPending[idx]
 	s.batchPending = append(s.batchPending[:idx], s.batchPending[idx+1:]...)
 	req.status = status
-	req.kind = kind
 	req.approved = status == access.Approved
 	s.batchMu.Unlock()
 	close(req.done)
-	s.broadcast(Msg{Type: "batchsettled", ID: id, Status: status, Kind: kind})
+	s.broadcast(Msg{Type: "batchsettled", ID: id, Status: status})
 }
 
 func batchRequestMsg(r *batchRequest) Msg {
