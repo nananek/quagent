@@ -1,7 +1,6 @@
 package console
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"net"
