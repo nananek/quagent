@@ -851,3 +851,87 @@ func TestTUIModelMouseScrollAndModals(t *testing.T) {
 		t.Error("expected quiting=false after clicking cancel on quit modal")
 	}
 }
+
+func TestTUIModelMouseHoverMarking(t *testing.T) {
+	m := newModel("test.sock")
+	newM, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	m = newM.(model)
+
+	// 1. ヘッダー タブ2 (ログ) にマウスホバー (X: 40, Y: 0)
+	newM, _ = m.Update(tea.MouseMsg{X: 40, Y: 0, Action: tea.MouseActionMotion})
+	m = newM.(model)
+	if m.mouseX != 40 || m.mouseY != 0 || !m.mouseIn {
+		t.Errorf("expected mouse coords (40, 0, true), got (%d, %d, %v)", m.mouseX, m.mouseY, m.mouseIn)
+	}
+	view := m.View()
+	// 非アクティブタブ2のホバーハイライト (styleInactiveTabHover の背景色が適用されていること)
+	hoverTab2 := styleInactiveTabHover.Render("2: ログ")
+	if !strings.Contains(view, hoverTab2) {
+		t.Errorf("expected tab 2 to have hover background marking, view does not contain expected snippet")
+	}
+
+	// 2. 申請カードのアクションボタン ([1] 今回のみ) にマウスホバー (X: 10, Y: 5)
+	newM, _ = m.Update(socketMsg(Msg{Type: "request", ID: 10, Domains: []string{"example.com"}}))
+	m = newM.(model)
+	newM, _ = m.Update(tea.MouseMsg{X: 10, Y: 5, Action: tea.MouseActionMotion})
+	m = newM.(model)
+	view = m.View()
+	hoverBtn1 := styleBtnHoverSuccess.Render("[1] 今回のみ (5分)")
+	if !strings.Contains(view, hoverBtn1) {
+		t.Errorf("expected action button [1] to have hover success background marking")
+	}
+
+	// 3. フッターの [Q] 終了ボタンにマウスホバー (X: 95, Y: 23)
+	newM, _ = m.Update(tea.MouseMsg{X: 95, Y: 23, Action: tea.MouseActionMotion})
+	m = newM.(model)
+	view = m.View()
+	hoverQuit := styleBtnHoverDanger.Render("[Q] 終了")
+	if !strings.Contains(view, hoverQuit) {
+		t.Errorf("expected footer [Q] button to have hover danger background marking")
+	}
+}
+
+func TestTUIModelViewExactDimensions(t *testing.T) {
+	sizes := []struct {
+		w, h int
+	}{
+		{40, 8},
+		{60, 10},
+		{80, 15},
+		{100, 24},
+		{160, 40},
+	}
+
+	for _, s := range sizes {
+		m := newModel("test.sock")
+		newM, cmd := m.Update(tea.WindowSizeMsg{Width: s.w, Height: s.h})
+		m = newM.(model)
+		if cmd == nil {
+			t.Errorf("expected WindowSizeMsg to return tea.ClearScreen cmd")
+		}
+
+		// 申請なし状態の View 行数検証
+		v := m.View()
+		lines := strings.Split(v, "\n")
+		if len(lines) != s.h {
+			t.Errorf("size (%d, %d): expected %d lines, got %d", s.w, s.h, s.h, len(lines))
+		}
+
+		// 申請あり状態の View 行数検証
+		newM, _ = m.Update(socketMsg(Msg{Type: "request", ID: 1, Domains: []string{"test.com"}}))
+		m = newM.(model)
+		v = m.View()
+		lines = strings.Split(v, "\n")
+		if len(lines) != s.h {
+			t.Errorf("size (%d, %d) with request: expected %d lines, got %d", s.w, s.h, s.h, len(lines))
+		}
+
+		// モーダル表示時の View 行数検証
+		m.quiting = true
+		v = m.View()
+		lines = strings.Split(v, "\n")
+		if len(lines) != s.h {
+			t.Errorf("size (%d, %d) with quit modal: expected %d lines, got %d", s.w, s.h, s.h, len(lines))
+		}
+	}
+}

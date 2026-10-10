@@ -118,6 +118,47 @@ var (
 	styleLabel = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("7"))
+
+	// ホバースタイル (マウスフォーカス時に背景色をマーキング)
+	styleHoverBg = lipgloss.Color("238")
+
+	styleActiveTabHover = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("0")).
+				Background(colCyan).
+				Underline(true).
+				Padding(0, 1)
+
+	styleInactiveTabHover = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(colText).
+				Background(styleHoverBg).
+				Padding(0, 1)
+
+	styleBtnHoverSuccess = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("0")).
+				Background(colSuccess)
+
+	styleBtnHoverDanger = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(colText).
+				Background(colDanger)
+
+	styleBtnHoverMagenta = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(colText).
+				Background(colMagenta)
+
+	styleBtnHoverDim = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(colText).
+				Background(styleHoverBg)
+
+	styleBtnHoverCyan = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("0")).
+				Background(colCyan)
 )
 
 // model は Bubbletea TUI の状態。
@@ -160,6 +201,11 @@ type model struct {
 	height int
 	ready  bool
 
+	// マウス状態
+	mouseX  int
+	mouseY  int
+	mouseIn bool
+
 	// 送受信チャネル
 	outChan   chan Msg
 	eventChan chan tea.Msg
@@ -181,6 +227,9 @@ func newModel(sock string) model {
 		outChan:       make(chan Msg, 64),
 		eventChan:     make(chan tea.Msg, 128),
 		connected:     false,
+		mouseX:        -1,
+		mouseY:        -1,
+		mouseIn:       false,
 	}
 }
 
@@ -273,6 +322,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.logAutoScroll {
 			m.logViewport.GotoBottom()
 		}
+		return m, tea.ClearScreen
 
 	case socketConnectedMsg:
 		m.connected = true
@@ -294,6 +344,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return nextM, cmd
 
 	case tea.MouseMsg:
+		m.mouseX = msg.X
+		m.mouseY = msg.Y
+		m.mouseIn = true
 		nextM, cmd := m.handleMouseMsg(msg)
 		return nextM, cmd
 	}
@@ -726,7 +779,7 @@ func (m model) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) handleHeaderClick(x int) (tea.Model, tea.Cmd) {
+func (m model) getHeaderTabBounds() (t1Start, t1End, t2Start, t2End, t3Start, t3End int) {
 	titleWidth := lipgloss.Width(styleTitle.Render("quagent 承認コンソール"))
 
 	pendingBadge := ""
@@ -747,12 +800,17 @@ func (m model) handleHeaderClick(x int) (tea.Model, tea.Cmd) {
 	}
 	tab3W := lipgloss.Width(styleInactiveTab.Render("3: 履歴" + histBadge))
 
-	t1Start := titleWidth + 3
-	t1End := t1Start + tab1W
-	t2Start := t1End + 1
-	t2End := t2Start + tab2W
-	t3Start := t2End + 1
-	t3End := t3Start + tab3W
+	t1Start = titleWidth + 3
+	t1End = t1Start + tab1W
+	t2Start = t1End + 1
+	t2End = t2Start + tab2W
+	t3Start = t2End + 1
+	t3End = t3Start + tab3W
+	return
+}
+
+func (m model) handleHeaderClick(x int) (tea.Model, tea.Cmd) {
+	t1Start, t1End, t2Start, t2End, t3Start, t3End := m.getHeaderTabBounds()
 
 	if x >= t1Start && x <= t1End {
 		m.activeTab = tabPending
@@ -873,7 +931,7 @@ func (m model) handleHistoryClick(y int) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
-	if !m.ready {
+	if !m.ready || m.width <= 0 || m.height <= 0 {
 		return "初期化中..."
 	}
 
@@ -899,44 +957,63 @@ func (m model) View() string {
 	}
 
 	content = strings.TrimRight(content, "\n")
-	contentLines := 0
+	var contentLines []string
 	if content != "" {
-		contentLines = strings.Count(content, "\n") + 1
+		contentLines = strings.Split(content, "\n")
 	}
 
-	var sb strings.Builder
-	sb.WriteString(header)
-
-	rem := availHeight - contentLines
-	if rem >= 2 && m.activeTab != tabLogs {
-		sb.WriteString("\n\n")
-		sb.WriteString(content)
-		sb.WriteString("\n\n")
-	} else if rem >= 1 && m.activeTab != tabLogs {
-		sb.WriteString("\n")
-		sb.WriteString(content)
-		sb.WriteString("\n\n")
-	} else {
-		sb.WriteString("\n")
-		sb.WriteString(content)
-		sb.WriteString("\n")
-	}
-
-	sb.WriteString(footer)
-
-	if m.height > 0 {
-		lines := strings.Split(sb.String(), "\n")
-		if len(lines) > m.height {
-			lines = lines[:m.height]
-			return strings.Join(lines, "\n")
+	padTop := 0
+	rem := availHeight - len(contentLines)
+	if rem > 0 && m.activeTab != tabLogs {
+		if rem >= 2 {
+			padTop = 1
 		}
 	}
 
-	return sb.String()
+	// 画面全体の行数を厳密に m.height 行に整える
+	lines := make([]string, 0, m.height)
+
+	// 1. ヘッダー (Y = 0)
+	lines = append(lines, fitLine(header, m.width))
+
+	// 2. コンテンツ領域 (合計 availHeight 行)
+	for i := 0; i < padTop; i++ {
+		lines = append(lines, "\x1b[K")
+	}
+	for _, cl := range contentLines {
+		if len(lines) < m.height-1 {
+			lines = append(lines, fitLine(cl, m.width))
+		}
+	}
+	for len(lines) < m.height-1 {
+		lines = append(lines, "\x1b[K")
+	}
+
+	// 3. フッター (最下行 Y = m.height - 1)
+	if m.height >= 2 {
+		lines = append(lines, fitLine(footer, m.width))
+	}
+
+	if len(lines) > m.height {
+		lines = lines[:m.height]
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func fitLine(s string, maxWidth int) string {
+	w := lipgloss.Width(s)
+	if maxWidth > 0 && w > maxWidth {
+		s = truncateRunes(s, maxWidth)
+	}
+	return s + "\x1b[K"
 }
 
 func (m model) renderHeader() string {
 	title := styleTitle.Render("quagent 承認コンソール")
+
+	t1Start, t1End, t2Start, t2End, t3Start, t3End := m.getHeaderTabBounds()
+	isHeaderHover := m.mouseIn && m.mouseY == 0
 
 	// タブ表示
 	pendingBadge := ""
@@ -945,10 +1022,19 @@ func (m model) renderHeader() string {
 	}
 	tab1Text := "1: 承認待ち" + pendingBadge
 	var tab1 string
+	t1Hover := isHeaderHover && m.mouseX >= t1Start && m.mouseX <= t1End
 	if m.activeTab == tabPending {
-		tab1 = styleActiveTab.Render(tab1Text)
+		if t1Hover {
+			tab1 = styleActiveTabHover.Render(tab1Text)
+		} else {
+			tab1 = styleActiveTab.Render(tab1Text)
+		}
 	} else {
-		tab1 = styleInactiveTab.Render(tab1Text)
+		if t1Hover {
+			tab1 = styleInactiveTabHover.Render(tab1Text)
+		} else {
+			tab1 = styleInactiveTab.Render(tab1Text)
+		}
 	}
 
 	logsBadge := ""
@@ -957,10 +1043,19 @@ func (m model) renderHeader() string {
 	}
 	tab2Text := "2: ログ" + logsBadge
 	var tab2 string
+	t2Hover := isHeaderHover && m.mouseX >= t2Start && m.mouseX <= t2End
 	if m.activeTab == tabLogs {
-		tab2 = styleActiveTab.Render(tab2Text)
+		if t2Hover {
+			tab2 = styleActiveTabHover.Render(tab2Text)
+		} else {
+			tab2 = styleActiveTab.Render(tab2Text)
+		}
 	} else {
-		tab2 = styleInactiveTab.Render(tab2Text)
+		if t2Hover {
+			tab2 = styleInactiveTabHover.Render(tab2Text)
+		} else {
+			tab2 = styleInactiveTab.Render(tab2Text)
+		}
 	}
 
 	histBadge := ""
@@ -969,10 +1064,19 @@ func (m model) renderHeader() string {
 	}
 	tab3Text := "3: 履歴" + histBadge
 	var tab3 string
+	t3Hover := isHeaderHover && m.mouseX >= t3Start && m.mouseX <= t3End
 	if m.activeTab == tabHistory {
-		tab3 = styleActiveTab.Render(tab3Text)
+		if t3Hover {
+			tab3 = styleActiveTabHover.Render(tab3Text)
+		} else {
+			tab3 = styleActiveTab.Render(tab3Text)
+		}
 	} else {
-		tab3 = styleInactiveTab.Render(tab3Text)
+		if t3Hover {
+			tab3 = styleInactiveTabHover.Render(tab3Text)
+		} else {
+			tab3 = styleInactiveTab.Render(tab3Text)
+		}
 	}
 
 	tabs := lipgloss.JoinHorizontal(lipgloss.Top, tab1, " ", tab2, " ", tab3)
@@ -986,9 +1090,111 @@ func (m model) renderHeader() string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, title, "   ", tabs, strings.Repeat(" ", space), connStatus)
 }
 
+func (m model) renderActionButtons(r Msg, isHoverRow bool) string {
+	switch r.Type {
+	case "clip":
+		// [y] コピー許可    [n] 拒否
+		btnY := "[y] コピー許可"
+		btnN := "[n] 拒否"
+		var strY, strN string
+		if isHoverRow && m.mouseX < 22 {
+			strY = styleBtnHoverSuccess.Render(btnY)
+		} else {
+			strY = styleKey.Render(btnY)
+		}
+		if isHoverRow && m.mouseX >= 22 {
+			strN = styleBtnHoverDanger.Render(btnN)
+		} else {
+			strN = styleKey.Render(btnN)
+		}
+		return strY + "    " + strN
+
+	case "prrequest":
+		// [y] 承認して push    [n] 拒否
+		btnY := "[y] 承認して push"
+		btnN := "[n] 拒否"
+		var strY, strN string
+		if isHoverRow && m.mouseX < 24 {
+			strY = styleBtnHoverSuccess.Render(btnY)
+		} else {
+			strY = styleKey.Render(btnY)
+		}
+		if isHoverRow && m.mouseX >= 24 {
+			strN = styleBtnHoverDanger.Render(btnN)
+		} else {
+			strN = styleKey.Render(btnN)
+		}
+		return strY + "    " + strN
+
+	case "relaxrequest":
+		// [1] 今回のみ (5分)    [2] セッション許可    [d] 拒否    [q] 質問を返す
+		btn1 := "[1] 今回のみ (5分)"
+		btn2 := "[2] セッション許可"
+		btnD := "[d] 拒否"
+		btnQ := "[q] 質問を返す"
+		var s1, s2, sd, sq string
+		if isHoverRow && m.mouseX < 22 {
+			s1 = styleBtnHoverSuccess.Render(btn1)
+		} else {
+			s1 = styleKey.Render(btn1)
+		}
+		if isHoverRow && m.mouseX >= 22 && m.mouseX < 44 {
+			s2 = styleBtnHoverSuccess.Render(btn2)
+		} else {
+			s2 = styleKey.Render(btn2)
+		}
+		if isHoverRow && m.mouseX >= 44 && m.mouseX < 56 {
+			sd = styleBtnHoverDanger.Render(btnD)
+		} else {
+			sd = styleKey.Render(btnD)
+		}
+		if isHoverRow && m.mouseX >= 56 {
+			sq = styleBtnHoverMagenta.Render(btnQ)
+		} else {
+			sq = styleKey.Render(btnQ)
+		}
+		return s1 + "    " + s2 + "    " + sd + "    " + sq
+
+	default: // request
+		// [1] 今回のみ (5分)    [2] セッション許可    [3] 恒久許可    [d] 拒否    [q] 質問を返す
+		btn1 := "[1] 今回のみ (5分)"
+		btn2 := "[2] セッション許可"
+		btn3 := "[3] 恒久許可"
+		btnD := "[d] 拒否"
+		btnQ := "[q] 質問を返す"
+		var s1, s2, s3, sd, sq string
+		if isHoverRow && m.mouseX < 22 {
+			s1 = styleBtnHoverSuccess.Render(btn1)
+		} else {
+			s1 = styleKey.Render(btn1)
+		}
+		if isHoverRow && m.mouseX >= 22 && m.mouseX < 44 {
+			s2 = styleBtnHoverSuccess.Render(btn2)
+		} else {
+			s2 = styleKey.Render(btn2)
+		}
+		if isHoverRow && m.mouseX >= 44 && m.mouseX < 58 {
+			s3 = styleBtnHoverSuccess.Render(btn3)
+		} else {
+			s3 = styleKey.Render(btn3)
+		}
+		if isHoverRow && m.mouseX >= 58 && m.mouseX < 70 {
+			sd = styleBtnHoverDanger.Render(btnD)
+		} else {
+			sd = styleKey.Render(btnD)
+		}
+		if isHoverRow && m.mouseX >= 70 {
+			sq = styleBtnHoverMagenta.Render(btnQ)
+		} else {
+			sq = styleKey.Render(btnQ)
+		}
+		return s1 + "    " + s2 + "    " + s3 + "    " + sd + "    " + sq
+	}
+}
+
 func (m model) renderPendingTab(availHeight int) string {
+	cardWidth := max(24, m.width-4)
 	if len(m.pending) == 0 {
-		cardWidth := max(30, m.width-4)
 		padV := 0
 		if availHeight >= 5 {
 			padV = 1
@@ -997,7 +1203,7 @@ func (m model) renderPendingTab(availHeight int) string {
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colDim).
 			Padding(padV, 2).
-			Width(cardWidth).
+			Width(max(10, cardWidth-6)).
 			Render("✓ 承認待ちの申請はありません (エージェントが作業中)")
 		return box
 	}
@@ -1048,24 +1254,17 @@ func (m model) renderPendingTab(availHeight int) string {
 		sb.WriteString(fmt.Sprintf("%s %s\n", styleLabel.Render("申請理由:"), Sanitize(r.Reason)))
 	}
 
-	actions := ""
-	switch r.Type {
-	case "clip":
-		actions = "[y] コピー許可    [n] 拒否"
-	case "prrequest":
-		actions = "[y] 承認して push    [n] 拒否"
-	case "relaxrequest":
-		actions = "[1] 今回のみ (5分)    [2] セッション許可    [d] 拒否    [q] 質問を返す"
-	default:
-		actions = "[1] 今回のみ (5分)    [2] セッション許可    [3] 恒久許可    [d] 拒否    [q] 質問を返す"
-	}
+	// アクション行のホバー判定 (カード内下部にあるとき)
+	isHoverRow := m.mouseIn && (m.mouseY >= 4 && m.mouseY < m.height-1)
+	actions := m.renderActionButtons(r, isHoverRow)
+
 	if availHeight >= 8 {
-		sb.WriteString("\n" + styleKey.Render(actions))
+		sb.WriteString("\n" + actions)
 	} else {
-		sb.WriteString(styleKey.Render(actions))
+		sb.WriteString(actions)
 	}
 
-	return styleCard.Width(max(30, m.width-4)).Render(sb.String())
+	return styleCard.Width(max(10, cardWidth-4)).Render(sb.String())
 }
 
 func (m model) renderLogsTab() string {
@@ -1078,8 +1277,8 @@ func (m model) renderLogsTab() string {
 }
 
 func (m model) renderHistoryTab(availHeight int) string {
+	cardWidth := max(24, m.width-4)
 	if len(m.history) == 0 {
-		cardWidth := max(30, m.width-4)
 		padV := 0
 		if availHeight >= 5 {
 			padV = 1
@@ -1088,7 +1287,7 @@ func (m model) renderHistoryTab(availHeight int) string {
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colDim).
 			Padding(padV, 2).
-			Width(cardWidth).
+			Width(max(10, cardWidth-6)).
 			Render("まだ決着した申請はありません")
 	}
 
@@ -1122,6 +1321,12 @@ func (m model) renderHistoryTab(availHeight int) string {
 			truncateRunes(h.Target, 30),
 			lipgloss.NewStyle().Bold(true).Foreground(statusColor).Render(h.Result),
 		)
+
+		isRowHover := m.mouseIn && (m.mouseY == i+2 || m.mouseY == i+3)
+		if isRowHover {
+			line = lipgloss.NewStyle().Background(styleHoverBg).Render(line)
+		}
+
 		sb.WriteString(line + "\n")
 	}
 
@@ -1137,18 +1342,35 @@ func (m model) renderAskingCard(availHeight int) string {
 	if availHeight >= 7 {
 		padV = 1
 	}
-	return styleModal.Padding(padV, 2).Width(max(30, m.width-6)).Render(sb.String())
+	modalWidth := max(24, m.width-6)
+	return styleModal.Padding(padV, 2).Width(max(10, modalWidth-6)).Render(sb.String())
 }
 
 func (m model) renderQuitModal(availHeight int) string {
 	var sb strings.Builder
 	sb.WriteString(styleTitle.Render("VM を破棄して終了しますか?") + "\n\n")
-	sb.WriteString(styleKey.Render("[y] 終了する") + "    " + styleDim("[n / Esc] キャンセル"))
+
+	isQuitHover := m.mouseIn && m.mouseY >= 2 && m.mouseY <= m.height-3
+	var btnY, btnN string
+	if isQuitHover && m.mouseX < m.width/2 {
+		btnY = styleBtnHoverDanger.Render("[y] 終了する")
+	} else {
+		btnY = styleKey.Render("[y] 終了する")
+	}
+
+	if isQuitHover && m.mouseX >= m.width/2 {
+		btnN = styleBtnHoverDim.Render("[n / Esc] キャンセル")
+	} else {
+		btnN = styleDim("[n / Esc] キャンセル")
+	}
+
+	sb.WriteString(btnY + "    " + btnN)
 	padV := 0
 	if availHeight >= 6 {
 		padV = 1
 	}
-	return styleModal.Padding(padV, 2).Width(max(30, m.width-6)).Render(sb.String())
+	modalWidth := max(24, m.width-6)
+	return styleModal.Padding(padV, 2).Width(max(10, modalWidth-6)).Render(sb.String())
 }
 
 func (m model) renderHelpModal(availHeight int) string {
@@ -1166,23 +1388,53 @@ func (m model) renderHelpModal(availHeight int) string {
 	if availHeight >= 12 {
 		padV = 1
 	}
-	return styleModal.Padding(padV, 2).Width(max(40, m.width-6)).Render(sb.String())
+	modalWidth := max(24, m.width-6)
+	return styleModal.Padding(padV, 2).Width(max(10, modalWidth-6)).Render(sb.String())
 }
 
 func (m model) renderFooter() string {
-	var hints []string
-	hints = append(hints, "[Tab] タブ切替")
+	isFooterHover := m.mouseIn && m.mouseY == m.height-1
 
-	if m.activeTab == tabPending && len(m.pending) > 0 {
-		hints = append(hints, "[1/2/3/d/q/y/n] 判定")
-	} else if m.activeTab == tabLogs {
-		hints = append(hints, "[↑/↓/G] ログ閲覧")
-	} else if m.activeTab == tabHistory {
-		hints = append(hints, "[↑/↓] 履歴閲覧")
+	// 左側: [Tab] タブ切替 + コンテキストヒント
+	var leftParts []string
+	tabText := "[Tab] タブ切替"
+	if isFooterHover && m.mouseX <= 16 {
+		leftParts = append(leftParts, styleBtnHoverDim.Render(tabText))
+	} else {
+		leftParts = append(leftParts, styleFooter.Render(tabText))
 	}
 
-	hints = append(hints, "[?] ヘルプ", "[Q] 終了")
-	return styleFooter.Render(strings.Join(hints, "  "))
+	if m.activeTab == tabPending && len(m.pending) > 0 {
+		leftParts = append(leftParts, styleFooter.Render("[1/2/3/d/q/y/n] 判定"))
+	} else if m.activeTab == tabLogs {
+		leftParts = append(leftParts, styleFooter.Render("[↑/↓/G] ログ閲覧"))
+	} else if m.activeTab == tabHistory {
+		leftParts = append(leftParts, styleFooter.Render("[↑/↓] 履歴閲覧"))
+	}
+
+	leftStr := strings.Join(leftParts, "  ")
+
+	// 右側: [?] ヘルプ    [Q] 終了
+	helpText := "[?] ヘルプ"
+	quitText := "[Q] 終了"
+
+	var helpStr, quitStr string
+	if isFooterHover && m.mouseX >= m.width-24 && m.mouseX < m.width-10 {
+		helpStr = styleBtnHoverCyan.Render(helpText)
+	} else {
+		helpStr = styleFooter.Render(helpText)
+	}
+
+	if isFooterHover && m.mouseX >= m.width-10 {
+		quitStr = styleBtnHoverDanger.Render(quitText)
+	} else {
+		quitStr = styleFooter.Render(quitText)
+	}
+
+	rightStr := helpStr + "  " + quitStr
+
+	space := max(1, m.width-lipgloss.Width(leftStr)-lipgloss.Width(rightStr))
+	return leftStr + strings.Repeat(" ", space) + rightStr
 }
 
 func styleDim(s string) string {
