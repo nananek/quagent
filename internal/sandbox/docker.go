@@ -79,13 +79,16 @@ func (p *Policy) DockerSeccompJSON() ([]byte, error) {
 
 // DockerDaemonConfig は Docker デーモンの設定構造体。
 type DockerDaemonConfig struct {
-	SeccompProfile string `json:"seccomp-profile,omitempty"`
+	SeccompProfile  string   `json:"seccomp-profile,omitempty"`
+	RegistryMirrors []string `json:"registry-mirrors,omitempty"`
 }
 
-// GenerateDockerDaemonJSON は 指定された seccomp プロファイルパスを設定した daemon.json を生成する。
-func GenerateDockerDaemonJSON(seccompProfilePath string) ([]byte, error) {
+// GenerateDockerDaemonJSON は 指定された seccomp プロファイルパスおよびレジストリミラーを設定した daemon.json を生成する。
+func GenerateDockerDaemonJSON(seccompProfilePath string, registryMirrors ...string) ([]byte, error) {
 	cfg := DockerDaemonConfig{
-		SeccompProfile: seccompProfilePath,
+		SeccompProfile:  seccompProfilePath,
+		RegistryMirrors: registryMirrors,
 	}
 	return json.MarshalIndent(cfg, "", "  ")
 }
+

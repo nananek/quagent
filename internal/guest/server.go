@@ -24,12 +24,17 @@ import (
 // Serve が設定ファイルから読み、handle が起動のたびに起動役へ包む。テストでは nil。
 var SandboxPolicy *sandbox.Policy
 
+// GuestDockerPort は guest 内で Docker レジストリキャッシュの中継を待ち受けるポート。
+const GuestDockerPort = 5000
+
 // Serve は VM 内で vsock を待ち受け、host からのコマンドを実行する (`quagent __guest`)。
 // 実行するのはこのプロセスのユーザー (作業用の一般ユーザー) の権限。あわせて
 // 127.0.0.1:relayPort への接続を host の窓口 (vsock の hostPort) へ中継する。
+// hostDockerPort が 0 でなければ、127.0.0.1:GuestDockerPort への接続を host の
+// Docker キャッシュ窓口 (vsock の hostDockerPort) へ中継する。
 // SandboxPolicy が有効なら、host から来たコマンドを起動役 (`__sandbox`) 経由で起動し、
 // 本人には外せない seccomp / Landlock をかける。
-func Serve(relayPort int, hostPort uint32) error {
+func Serve(relayPort int, hostPort uint32, hostDockerPort uint32) error {
 	policy, err := sandbox.Load(sandbox.ConfigPath)
 	if err != nil {
 		return fmt.Errorf("sandbox の方針を読めない: %w", err)
@@ -58,8 +63,18 @@ func Serve(relayPort int, hostPort uint32) error {
 		log.Printf("127.0.0.1:%d -> host の窓口 (vsock :%d) を中継", relayPort, hostPort)
 		go relay(rl, func() (net.Conn, error) { return vsock.Dial(vsock.Host, hostPort, nil) })
 	}
+	if hostDockerPort != 0 {
+		dl, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", GuestDockerPort))
+		if err == nil {
+			log.Printf("127.0.0.1:%d -> host の Docker キャッシュ (vsock :%d) を中継", GuestDockerPort, hostDockerPort)
+			go relaySimple(dl, func() (net.Conn, error) { return vsock.Dial(vsock.Host, hostDockerPort, nil) })
+		} else {
+			log.Printf("Docker キャッシュ中継の待ち受けに失敗: %v", err)
+		}
+	}
 	return serve(&hostOnly{l})
 }
+
 
 // hostOnly は host (CID 2) 以外からの接続を切る。ほかの VM や、VM の中から自分自身への
 // vsock の接続はここで落とす。
@@ -132,6 +147,39 @@ func closeWrite(c net.Conn) {
 		_ = cw.CloseWrite()
 	}
 }
+
+// relaySimple は l への接続を dial 先へそのまま中継する (同時 64 本まで、PID 検証なし)。
+// rootless dockerd 等、エージェントツリー外のプロセスからの通信を中継するために使用する。
+func relaySimple(l net.Listener, dial func() (net.Conn, error)) {
+	sem := make(chan struct{}, 64)
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			return
+		}
+		select {
+		case sem <- struct{}{}:
+		default:
+			c.Close()
+			continue
+		}
+		go func() {
+			defer func() { <-sem }()
+			defer c.Close()
+			up, err := dial()
+			if err != nil {
+				return
+			}
+			defer up.Close()
+			done := make(chan struct{}, 2)
+			go func() { _, _ = io.Copy(up, c); closeWrite(up); done <- struct{}{} }()
+			go func() { _, _ = io.Copy(c, up); closeWrite(c); done <- struct{}{} }()
+			<-done
+			<-done
+		}()
+	}
+}
+
 
 // maxGuestConns は VM 内の受け口で同時に受け付けるコマンド接続の上限。
 const maxGuestConns = 64

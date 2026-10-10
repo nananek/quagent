@@ -49,7 +49,13 @@ type Msg struct {
 	RelaxHeaders []string `json:"relax_headers,omitempty"`
 	RelaxMethods []string `json:"relax_methods,omitempty"`
 	AllowBody    bool     `json:"allow_body,omitempty"`
+
+	// Docker イメージの取得承認 (dockerrequest / dockersettled) の内容。
+	DockerRegistry   string `json:"docker_registry,omitempty"`
+	DockerRepository string `json:"docker_repository,omitempty"`
+	DockerReference  string `json:"docker_reference,omitempty"`
 }
+
 
 const (
 	writeTimeout = 2 * time.Second // UI が受け取らなくても本体が止まらないように
@@ -84,6 +90,11 @@ type Server struct {
 	prMu      sync.Mutex
 	prNextID  int
 	prPending []*prRequest
+
+	// Docker イメージの取得承認。
+	dockerMu      sync.Mutex
+	dockerNextID  int
+	dockerPending []*dockerRequest
 }
 
 // PRInfo は承認コンソールに諮る PR 作成の内容。
@@ -102,6 +113,23 @@ type prRequest struct {
 	status   access.Status
 	approved bool
 }
+
+// DockerImageInfo は承認コンソールに諮る Docker イメージ取得の内容。
+type DockerImageInfo struct {
+	Registry   string // "docker.io" または "ghcr.io"
+	Repository string // "library/golang", "astral-sh/uv" など
+	Reference  string // "1.24", "latest", または digest
+}
+
+type dockerRequest struct {
+	id       int
+	info     DockerImageInfo
+	created  time.Time
+	done     chan struct{}
+	status   access.Status
+	approved bool
+}
+
 
 // NewServer は sock で待ち受ける Server を作る。
 func NewServer(m *access.Manager, sock string) (*Server, error) {
@@ -196,6 +224,8 @@ func (s *Server) serve(c net.Conn) {
 			s.clipDecide(msg.ID, msg.Status == access.Approved)
 		case "prdecide":
 			s.settlePR(msg.ID, msg.Status)
+		case "dockerdecide":
+			s.settleDocker(msg.ID, msg.Status)
 		case "quit":
 			s.TriggerQuit()
 		}
@@ -229,8 +259,14 @@ func (s *Server) register(cl *client) {
 		_ = s.send(cl, prRequestMsg(r))
 	}
 	s.prMu.Unlock()
+	s.dockerMu.Lock()
+	for _, r := range s.dockerPending {
+		_ = s.send(cl, dockerRequestMsg(r))
+	}
+	s.dockerMu.Unlock()
 	s.clients[cl] = true
 }
+
 
 func requestMsg(r *access.Request) Msg {
 	return Msg{Type: "request", ID: r.ID, Domains: r.Domains, Reason: r.Reason,
@@ -306,6 +342,71 @@ func prRequestMsg(r *prRequest) Msg {
 		Title: r.info.Title, Body: r.info.Body,
 		Deadline: r.created.Add(access.DecisionTimeout).Format("15:04:05")}
 }
+
+// AskDockerDownload は Docker イメージのキャッシュ取得を承認コンソールに諮り、承認されるまで待つ。
+func (s *Server) AskDockerDownload(info DockerImageInfo) error {
+	req := &dockerRequest{info: info, created: time.Now(), done: make(chan struct{})}
+	s.dockerMu.Lock()
+	s.dockerNextID++
+	req.id = s.dockerNextID
+	s.dockerPending = append(s.dockerPending, req)
+	s.dockerMu.Unlock()
+	s.broadcast(dockerRequestMsg(req))
+
+	t := time.NewTimer(access.DecisionTimeout)
+	defer t.Stop()
+	select {
+	case <-req.done:
+	case <-t.C:
+		s.settleDocker(req.id, access.TimedOut)
+		<-req.done
+	case <-s.Quit:
+		s.settleDocker(req.id, access.Denied)
+		return fmt.Errorf("終了したので Docker イメージを取得しなかった")
+	}
+	if req.approved {
+		return nil
+	}
+	if req.status == access.TimedOut {
+		return fmt.Errorf("%s 以内に承認されなかったので Docker イメージを取得しなかった", access.DecisionTimeout)
+	}
+	return fmt.Errorf("Docker イメージの取得は承認されなかった")
+}
+
+// settleDocker は承認待ちの Docker イメージ取得を決着させ、UI に知らせる。
+func (s *Server) settleDocker(id int, status access.Status) {
+	s.dockerMu.Lock()
+	idx := -1
+	for i, r := range s.dockerPending {
+		if r.id == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		s.dockerMu.Unlock()
+		return
+	}
+	req := s.dockerPending[idx]
+	s.dockerPending = append(s.dockerPending[:idx], s.dockerPending[idx+1:]...)
+	req.status = status
+	req.approved = status == access.Approved
+	s.dockerMu.Unlock()
+	close(req.done)
+	s.broadcast(Msg{Type: "dockersettled", ID: id, Status: status})
+}
+
+func dockerRequestMsg(r *dockerRequest) Msg {
+	return Msg{
+		Type:             "dockerrequest",
+		ID:               r.id,
+		DockerRegistry:   r.info.Registry,
+		DockerRepository: r.info.Repository,
+		DockerReference:  r.info.Reference,
+		Deadline:         r.created.Add(access.DecisionTimeout).Format("15:04:05"),
+	}
+}
+
 
 // watch は新しい申請を UI に送り、決着した申請 (時間切れを含む) を知らせる。
 func (s *Server) watch() {

@@ -18,9 +18,11 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/nananek/quagent/internal/access"
+	"github.com/nananek/quagent/internal/dockercache"
 	"github.com/nananek/quagent/internal/image"
 	"github.com/nananek/quagent/internal/paths"
 )
+
 
 // Launch は TUI で決めた起動設定。
 type Launch struct {
@@ -108,6 +110,7 @@ func Run(agents []string) (Launch, error) {
 			huh.NewSelect[string]().Title("quagent").Options(
 				huh.NewOption("VM を起動", "start"),
 				huh.NewOption("ベースイメージの管理", "images"),
+				huh.NewOption("Docker キャッシュの全クリア", "cache"),
 				huh.NewOption("「以後確認しない」ドメインの管理", "always"),
 				huh.NewOption("終了", "quit"),
 			).Value(&choice),
@@ -132,6 +135,10 @@ func Run(agents []string) (Launch, error) {
 			if err := imagesMenu(); err != nil && !errors.Is(err, errBack) {
 				return Launch{}, err
 			}
+		case "cache":
+			if err := cleanCacheMenu(); err != nil && !errors.Is(err, errBack) {
+				return Launch{}, err
+			}
 		case "always":
 			if err := alwaysMenu(); err != nil && !errors.Is(err, errBack) {
 				return Launch{}, err
@@ -139,6 +146,34 @@ func Run(agents []string) (Launch, error) {
 		}
 	}
 }
+
+func cleanCacheMenu() error {
+	stats, err := dockercache.InspectCache(paths.DockerCacheDir())
+	if err != nil {
+		return err
+	}
+	desc := fmt.Sprintf("現在のキャッシュ: レイヤー %d 個 (%s)", stats.TotalBlobs, dockercache.FormatSize(stats.TotalBlobBytes))
+	if stats.TotalBlobs == 0 {
+		return newForm(huh.NewGroup(huh.NewNote().Title("Docker キャッシュ").Description("キャッシュは空です。"))).Run()
+	}
+
+	var confirm bool
+	err = newForm(huh.NewGroup(
+		huh.NewConfirm().
+			Title("Docker キャッシュを全削除しますか?").
+			Description(desc).
+			Value(&confirm),
+	)).Run()
+	if err != nil || !confirm {
+		return nil
+	}
+
+	if err := dockercache.CleanCache(paths.DockerCacheDir()); err != nil {
+		return fmt.Errorf("キャッシュ削除失敗: %w", err)
+	}
+	return newForm(huh.NewGroup(huh.NewNote().Title("完了").Description("Docker キャッシュを全削除しました。"))).Run()
+}
+
 
 // AfterChoice はエージェントのセッションが終わったあとに選んだ次の操作。
 type AfterChoice struct {

@@ -359,7 +359,7 @@ func (m model) handleSocketMsg(msg Msg) model {
 	case "log":
 		return m.appendLog(msg.Text)
 
-	case "request", "relaxrequest", "clip", "prrequest":
+	case "request", "relaxrequest", "clip", "prrequest", "dockerrequest":
 		for _, q := range m.pending {
 			if q.Type == msg.Type && q.ID == msg.ID {
 				return m
@@ -376,7 +376,7 @@ func (m model) handleSocketMsg(msg Msg) model {
 		}
 		return m
 
-	case "settled", "clipsettled", "prsettled", "relaxsettled":
+	case "settled", "clipsettled", "prsettled", "relaxsettled", "dockersettled":
 		want := "request"
 		switch msg.Type {
 		case "clipsettled":
@@ -385,6 +385,8 @@ func (m model) handleSocketMsg(msg Msg) model {
 			want = "prrequest"
 		case "relaxsettled":
 			want = "relaxrequest"
+		case "dockersettled":
+			want = "dockerrequest"
 		}
 
 		for i, q := range m.pending {
@@ -418,6 +420,16 @@ func (m model) handleSocketMsg(msg Msg) model {
 				default:
 					entry.Result = "拒否 (push しなかった)"
 				}
+			case "dockerrequest":
+				entry.Target = fmt.Sprintf("%s/%s:%s", q.DockerRegistry, q.DockerRepository, q.DockerReference)
+				switch msg.Status {
+				case access.Approved:
+					entry.Result = "承認して取得した"
+				case access.TimedOut:
+					entry.Result = "時間切れ (取得しなかった)"
+				default:
+					entry.Result = "拒否 (取得しなかった)"
+				}
 			case "relaxrequest":
 				entry.Target = fmt.Sprintf("%s (%s)", q.RelaxHost, strings.Join(q.RelaxMethods, ","))
 				entry.Reason = q.Reason
@@ -428,6 +440,7 @@ func (m model) handleSocketMsg(msg Msg) model {
 				entry.Result = res
 			default:
 				entry.Target = strings.Join(q.Domains, ", ")
+
 				entry.Reason = q.Reason
 				res := statusText[msg.Status]
 				if k, ok := kindText[msg.Kind]; ok && msg.Status == access.Approved {
@@ -583,6 +596,14 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			case "n", "N":
 				m.decide(Msg{Type: "prdecide", ID: r.ID, Status: access.Denied})
 			}
+		case "dockerrequest":
+			switch key {
+			case "y", "Y":
+				m.decide(Msg{Type: "dockerdecide", ID: r.ID, Status: access.Approved})
+			case "n", "N":
+				m.decide(Msg{Type: "dockerdecide", ID: r.ID, Status: access.Denied})
+			}
+
 		case "relaxrequest":
 			switch key {
 			case "1":
@@ -882,6 +903,14 @@ func (m model) handlePendingClick(x, y int) (tea.Model, tea.Cmd) {
 		} else {
 			m.decide(Msg{Type: "prdecide", ID: r.ID, Status: access.Denied})
 		}
+	case "dockerrequest":
+		// [y] 承認して取得    [n] 拒否
+		if x < 24 {
+			m.decide(Msg{Type: "dockerdecide", ID: r.ID, Status: access.Approved})
+		} else {
+			m.decide(Msg{Type: "dockerdecide", ID: r.ID, Status: access.Denied})
+		}
+
 	case "relaxrequest":
 		// [1] 今回のみ (5分)    [2] セッション許可    [d] 拒否    [q] 質問を返す
 		switch {
@@ -1126,6 +1155,24 @@ func (m model) renderActionButtons(r Msg, isHoverRow bool) string {
 		}
 		return strY + "    " + strN
 
+	case "dockerrequest":
+		// [y] 承認して取得    [n] 拒否
+		btnY := "[y] 承認して取得"
+		btnN := "[n] 拒否"
+		var strY, strN string
+		if isHoverRow && m.mouseX < 24 {
+			strY = styleBtnHoverSuccess.Render(btnY)
+		} else {
+			strY = styleKey.Render(btnY)
+		}
+		if isHoverRow && m.mouseX >= 24 {
+			strN = styleBtnHoverDanger.Render(btnN)
+		} else {
+			strN = styleKey.Render(btnN)
+		}
+		return strY + "    " + strN
+
+
 	case "relaxrequest":
 		// [1] 今回のみ (5分)    [2] セッション許可    [d] 拒否    [q] 質問を返す
 		btn1 := "[1] 今回のみ (5分)"
@@ -1221,6 +1268,8 @@ func (m model) renderPendingTab(availHeight int) string {
 		cardHeader = fmt.Sprintf(styleBadge.Foreground(colWarning).Render("━━ クリップボード書込 #%d (%d バイト) ━━ 期限: %s"), r.ID, r.Size, Sanitize(r.Deadline))
 	case "prrequest":
 		cardHeader = fmt.Sprintf(styleBadge.Foreground(colSuccess).Render("━━ PR 作成承認 #%d ━━ 期限: %s"), r.ID, Sanitize(r.Deadline))
+	case "dockerrequest":
+		cardHeader = fmt.Sprintf(styleBadge.Foreground(colCyan).Render("━━ Docker イメージ取得承認 #%d ━━ 期限: %s"), r.ID, Sanitize(r.Deadline))
 	case "relaxrequest":
 		cardHeader = fmt.Sprintf(styleBadge.Foreground(colMagenta).Render("━━ HTTP緩和申請 #%d ━━ 期限: %s"), r.ID, Sanitize(r.Deadline))
 	default:
@@ -1237,6 +1286,11 @@ func (m model) renderPendingTab(availHeight int) string {
 		if b := strings.TrimSpace(r.Body); b != "" && availHeight >= 8 {
 			sb.WriteString(fmt.Sprintf("%s\n%s\n", styleLabel.Render("本文:"), Sanitize(truncateRunes(b, 500))))
 		}
+	case "dockerrequest":
+		sb.WriteString(fmt.Sprintf("%s %s\n", styleLabel.Render("レジストリ:"), Sanitize(r.DockerRegistry)))
+		sb.WriteString(fmt.Sprintf("%s %s\n", styleLabel.Render("イメージ名:"), Sanitize(r.DockerRepository)))
+		sb.WriteString(fmt.Sprintf("%s %s\n", styleLabel.Render("タグ/参照:"), Sanitize(r.DockerReference)))
+
 	case "relaxrequest":
 		sb.WriteString(fmt.Sprintf("%s %s\n", styleLabel.Render("対象ホスト:"), Sanitize(r.RelaxHost)))
 		if len(r.RelaxHeaders) > 0 {

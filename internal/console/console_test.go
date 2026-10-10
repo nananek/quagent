@@ -111,6 +111,60 @@ func TestAskPR(t *testing.T) {
 	}
 }
 
+func TestAskDockerDownload(t *testing.T) {
+	s, c, enc, dec := startPair(t)
+	defer s.Close()
+	defer c.Close()
+
+	var lastID int
+	ask := func(info DockerImageInfo) (chan error, Msg) {
+		errCh := make(chan error, 1)
+		go func() { errCh <- s.AskDockerDownload(info) }()
+		for {
+			_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+			var msg Msg
+			if err := dec.Decode(&msg); err != nil {
+				t.Fatal(err)
+			}
+			if msg.Type == "dockerrequest" && msg.ID > lastID {
+				lastID = msg.ID
+				return errCh, msg
+			}
+		}
+	}
+	wait := func(errCh chan error) error {
+		select {
+		case err := <-errCh:
+			return err
+		case <-time.After(3 * time.Second):
+			t.Fatal("AskDockerDownload が返らない")
+			return nil
+		}
+	}
+
+	// 承認されるケース
+	errCh, req := ask(DockerImageInfo{Registry: "docker.io", Repository: "library/golang", Reference: "1.24"})
+	if req.DockerRegistry != "docker.io" || req.DockerRepository != "library/golang" || req.DockerReference != "1.24" {
+		t.Fatalf("承認に渡す内容が違う: %+v", req)
+	}
+	if err := enc.Encode(Msg{Type: "dockerdecide", ID: req.ID, Status: access.Approved}); err != nil {
+		t.Fatal(err)
+	}
+	if err := wait(errCh); err != nil {
+		t.Fatalf("承認したのに %v", err)
+	}
+
+	// 拒否されるケース
+	errCh, req = ask(DockerImageInfo{Registry: "ghcr.io", Repository: "astral-sh/uv", Reference: "latest"})
+	if err := enc.Encode(Msg{Type: "dockerdecide", ID: req.ID, Status: access.Denied}); err != nil {
+		t.Fatal(err)
+	}
+	if err := wait(errCh); err == nil {
+		t.Fatal("拒否したのに nil が返った")
+	}
+}
+
+
 func TestClipboardPreview(t *testing.T) {
 	// 1. 通常テキスト
 	if got := preview([]byte("hello world")); got != "hello world" {
@@ -373,7 +427,25 @@ func TestTUIModelDecisions(t *testing.T) {
 	newM, _ = m.Update(socketMsg(Msg{Type: "prsettled", ID: 2, Status: access.Denied}))
 	m = newM.(model)
 
+	// 3.5 dockerrequest 要求
+	newM, _ = m.Update(socketMsg(Msg{Type: "dockerrequest", ID: 3, DockerRegistry: "docker.io", DockerRepository: "library/golang", DockerReference: "1.24"}))
+	m = newM.(model)
+	newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m = newM.(model)
+	select {
+	case out := <-m.outChan:
+		if out.Type != "dockerdecide" || out.Status != access.Approved {
+			t.Errorf("expected approved dockerdecide, got %+v", out)
+		}
+	default:
+		t.Fatal("expected dockerdecide on outChan")
+	}
+	// dockerrequest の決着
+	newM, _ = m.Update(socketMsg(Msg{Type: "dockersettled", ID: 3, Status: access.Approved}))
+	m = newM.(model)
+
 	// 4. request 申請と決定 (1, 2, 3, d, q)
+
 	newM, _ = m.Update(socketMsg(Msg{Type: "request", ID: 3, Domains: []string{"example.com"}}))
 	m = newM.(model)
 
