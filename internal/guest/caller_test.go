@@ -622,4 +622,3 @@ func TestIsAllowedCaller_AgentUnderSubshellDenied(t *testing.T) {
 		t.Error("expected opencode under subshell to be denied")
 	}
 }
-

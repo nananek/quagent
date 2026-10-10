@@ -208,4 +208,3 @@ func TestOpencodeEntrypoint(t *testing.T) {
 		t.Errorf("entrypoint does not contain '--standalone --auto /work': %q", spec.entrypoint)
 	}
 }
-
