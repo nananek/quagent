@@ -118,28 +118,43 @@ func agentNames() []string {
 
 func guestMCPURL() string { return hostsvc.GuestOrigin() + mcpsrv.Path }
 
-// setupOpencode は opencode が provider を認証プロキシ経由で使い、quagent の MCP を
-// 使うよう設定する。apiKey は窓口の合言葉 (本物の鍵はプロキシが host 側で付け替える)。
-func setupOpencode(g vmGuest, cfg *config.Config, providers []string, token string) error {
-	prov := map[string]any{}
+// buildOpencodeConfig は opencode.json の設定オブジェクトを組み立てる。
+// OpenCode v2 の providers (<id>.settings) と v1 の provider (<id>.options) の
+// 両方を出力し、新旧どちらのバージョンでもプロキシ経由で動くようにする。
+func buildOpencodeConfig(cfg *config.Config, providers []string, token string) map[string]any {
+	provV1 := map[string]any{}
+	provV2 := map[string]any{}
 	for _, id := range providers {
-		prov[id] = map[string]any{"options": map[string]any{
-			"baseURL": authproxy.GuestBaseURL(hostsvc.GuestOrigin(), id),
+		u := authproxy.GuestBaseURL(hostsvc.GuestOrigin(), id)
+		provV1[id] = map[string]any{"options": map[string]any{
+			"baseURL": u,
+			"apiKey":  token,
+		}}
+		provV2[id] = map[string]any{"settings": map[string]any{
+			"baseURL": u,
 			"apiKey":  token,
 		}}
 	}
 	conf := map[string]any{
 		"$schema":    "https://opencode.ai/config.json",
 		"autoupdate": false,
-		"provider":   prov,
+		"provider":   provV1,
+		"providers":  provV2,
 		"mcp": map[string]any{
 			"quagent": map[string]any{"type": "remote", "url": guestMCPURL(), "enabled": true, "oauth": false,
 				"headers": map[string]string{"Authorization": "Bearer " + token}},
 		},
 	}
-	if cfg.Opencode.Model != "" {
+	if cfg != nil && cfg.Opencode.Model != "" {
 		conf["model"] = cfg.Opencode.Model
 	}
+	return conf
+}
+
+// setupOpencode は opencode が provider を認証プロキシ経由で使い、quagent の MCP を
+// 使うよう設定する。apiKey は窓口の合言葉 (本物の鍵はプロキシが host 側で付け替える)。
+func setupOpencode(g vmGuest, cfg *config.Config, providers []string, token string) error {
+	conf := buildOpencodeConfig(cfg, providers, token)
 	return writeJSON(g, "~/.config/opencode/opencode.json", conf)
 }
 

@@ -139,3 +139,62 @@ func TestCappedBuffer(t *testing.T) {
 		t.Errorf("content = %q, want '1234567890'", b.String())
 	}
 }
+
+func TestBuildOpencodeConfig(t *testing.T) {
+	cfg := &config.Config{
+		Opencode: config.Opencode{Model: "opencode-go/deepseek-v4.1-flash"},
+	}
+	token := "test-token"
+	conf := buildOpencodeConfig(cfg, []string{"opencode", "opencode-go"}, token)
+
+	if conf["model"] != "opencode-go/deepseek-v4.1-flash" {
+		t.Errorf("model = %v, want opencode-go/deepseek-v4.1-flash", conf["model"])
+	}
+
+	// v2 providers
+	v2, ok := conf["providers"].(map[string]any)
+	if !ok {
+		t.Fatalf("providers (v2) is missing or not a map: %v", conf["providers"])
+	}
+	for _, id := range []string{"opencode", "opencode-go"} {
+		entry, ok := v2[id].(map[string]any)
+		if !ok {
+			t.Fatalf("providers[%q] missing", id)
+		}
+		settings, ok := entry["settings"].(map[string]any)
+		if !ok {
+			t.Fatalf("providers[%q].settings missing", id)
+		}
+		wantURL := "http://quagent.host:7070/llm/" + id
+		if settings["baseURL"] != wantURL {
+			t.Errorf("providers[%q].settings.baseURL = %v, want %v", id, settings["baseURL"], wantURL)
+		}
+		if settings["apiKey"] != token {
+			t.Errorf("providers[%q].settings.apiKey = %v, want %v", id, settings["apiKey"], token)
+		}
+	}
+
+	// v1 provider
+	v1, ok := conf["provider"].(map[string]any)
+	if !ok {
+		t.Fatalf("provider (v1) is missing or not a map: %v", conf["provider"])
+	}
+	for _, id := range []string{"opencode", "opencode-go"} {
+		entry, ok := v1[id].(map[string]any)
+		if !ok {
+			t.Fatalf("provider[%q] missing", id)
+		}
+		options, ok := entry["options"].(map[string]any)
+		if !ok {
+			t.Fatalf("provider[%q].options missing", id)
+		}
+		wantURL := "http://quagent.host:7070/llm/" + id
+		if options["baseURL"] != wantURL {
+			t.Errorf("provider[%q].options.baseURL = %v, want %v", id, options["baseURL"], wantURL)
+		}
+		if options["apiKey"] != token {
+			t.Errorf("provider[%q].options.apiKey = %v, want %v", id, options["apiKey"], token)
+		}
+	}
+}
+

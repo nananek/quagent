@@ -382,3 +382,83 @@ func TestSkillsDirResolved(t *testing.T) {
 		}
 	}
 }
+
+func TestEffectiveProviders(t *testing.T) {
+	// 1. opencode-go のみ定義されている場合 -> opencode (Zen) が自動補完される
+	cfg := &Config{
+		Providers: map[string]Provider{
+			OpencodeGoProviderID: {
+				Upstream:  "https://opencode.ai/zen/go/v1",
+				SecretEnv: "OPENCODE_API_KEY",
+			},
+		},
+	}
+	eff := cfg.EffectiveProviders()
+	if len(eff) != 2 {
+		t.Fatalf("expected 2 providers, got %d", len(eff))
+	}
+	goProv, ok := eff[OpencodeGoProviderID]
+	if !ok || goProv.Upstream != "https://opencode.ai/zen/go/v1" || goProv.SecretEnv != "OPENCODE_API_KEY" {
+		t.Errorf("unexpected opencode-go: %+v", goProv)
+	}
+	zenProv, ok := eff[OpencodeZenProviderID]
+	if !ok || zenProv.Upstream != "https://opencode.ai/zen/v1" || zenProv.SecretEnv != "OPENCODE_API_KEY" {
+		t.Errorf("unexpected opencode: %+v", zenProv)
+	}
+
+	// 2. opencode のみ定義されている場合 -> opencode-go が自動補完される
+	cfg2 := &Config{
+		Providers: map[string]Provider{
+			OpencodeZenProviderID: {
+				Upstream:  "https://opencode.ai/zen/v1",
+				SecretEnv: "OPENCODE_API_KEY",
+			},
+		},
+	}
+	eff2 := cfg2.EffectiveProviders()
+	if len(eff2) != 2 {
+		t.Fatalf("expected 2 providers, got %d", len(eff2))
+	}
+	if p, ok := eff2[OpencodeGoProviderID]; !ok || p.Upstream != "https://opencode.ai/zen/go/v1" {
+		t.Errorf("unexpected opencode-go: %+v", p)
+	}
+
+	// 3. 両方明示的に定義されている場合 -> 上書きしない
+	cfg3 := &Config{
+		Providers: map[string]Provider{
+			OpencodeGoProviderID: {
+				Upstream:  "https://opencode.ai/zen/go/v1",
+				SecretEnv: "CUSTOM_GO_KEY",
+			},
+			OpencodeZenProviderID: {
+				Upstream:  "https://custom-zen.example/v1",
+				SecretEnv: "CUSTOM_ZEN_KEY",
+			},
+		},
+	}
+	eff3 := cfg3.EffectiveProviders()
+	if len(eff3) != 2 {
+		t.Fatalf("expected 2 providers, got %d", len(eff3))
+	}
+	if eff3[OpencodeGoProviderID].SecretEnv != "CUSTOM_GO_KEY" || eff3[OpencodeZenProviderID].SecretEnv != "CUSTOM_ZEN_KEY" {
+		t.Errorf("explicit providers should be preserved: %+v", eff3)
+	}
+
+	// 4. OpenCode 以外のプロバイダのみの場合 -> 何も足さない
+	cfg4 := &Config{
+		Providers: map[string]Provider{
+			"anthropic": {Upstream: "https://api.anthropic.com", SecretEnv: "ANTHROPIC_API_KEY"},
+		},
+	}
+	eff4 := cfg4.EffectiveProviders()
+	if len(eff4) != 1 || eff4["anthropic"].Upstream != "https://api.anthropic.com" {
+		t.Errorf("unexpected effective providers for anthropic only: %+v", eff4)
+	}
+
+	// 5. nil / 空の場合
+	var cfgNil *Config
+	if effNil := cfgNil.EffectiveProviders(); effNil != nil {
+		t.Errorf("expected nil for nil config, got %+v", effNil)
+	}
+}
+

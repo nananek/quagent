@@ -298,6 +298,51 @@ func Load() (*Config, error) {
 	return &c, nil
 }
 
+// OpencodeZenProviderID は OpenCode Zen (Free モデル等を含む) の provider ID。
+const OpencodeZenProviderID = "opencode"
+
+// OpencodeGoProviderID は OpenCode Go サブスクリプションの provider ID。
+const OpencodeGoProviderID = "opencode-go"
+
+const (
+	OpencodeZenDefaultUpstream = "https://opencode.ai/zen/v1"
+	OpencodeGoDefaultUpstream  = "https://opencode.ai/zen/go/v1"
+)
+
+// EffectiveProviders は実際にプロキシへ登録する LLM provider 一覧を返す。
+// OpenCode の API キーは Zen と Go で共通のため、片方のみ定義されている場合は
+// もう片方のエンドポイントを同じ認証情報で自動補完し、VM 内から Go と Zen (Free モデル等)
+// をシームレスに使い分けられるようにする。
+func (c *Config) EffectiveProviders() map[string]Provider {
+	if c == nil || len(c.Providers) == 0 {
+		return nil
+	}
+	res := make(map[string]Provider, len(c.Providers)+1)
+	for k, v := range c.Providers {
+		res[k] = v
+	}
+	goProv, hasGo := res[OpencodeGoProviderID]
+	zenProv, hasZen := res[OpencodeZenProviderID]
+	if hasGo && !hasZen {
+		sister := goProv
+		if strings.Contains(sister.Upstream, "/zen/go") {
+			sister.Upstream = strings.Replace(sister.Upstream, "/zen/go", "/zen", 1)
+		} else {
+			sister.Upstream = OpencodeZenDefaultUpstream
+		}
+		res[OpencodeZenProviderID] = sister
+	} else if hasZen && !hasGo {
+		sister := zenProv
+		if strings.Contains(sister.Upstream, "/zen") && !strings.Contains(sister.Upstream, "/zen/go") {
+			sister.Upstream = strings.Replace(sister.Upstream, "/zen", "/zen/go", 1)
+		} else {
+			sister.Upstream = OpencodeGoDefaultUpstream
+		}
+		res[OpencodeGoProviderID] = sister
+	}
+	return res
+}
+
 // HeaderName は秘密を載せるヘッダ名を返す。
 func (p Provider) HeaderName() string {
 	if p.Header == "" {

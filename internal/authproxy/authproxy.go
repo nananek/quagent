@@ -132,6 +132,21 @@ func registerAll(mux *http.ServeMux, registers map[string]secretSource, logger *
 		}
 		h := handler(id, up, header, reg.secret, logger, onResponse)
 		mux.Handle(Prefix+id+"/", http.MaxBytesHandler(gate(id, rules, h, logger, denied), 32<<20))
+		if id == "opencode-go" {
+			mux.HandleFunc("/zen/go/", func(w http.ResponseWriter, r *http.Request) {
+				r2 := r.Clone(r.Context())
+				r2.URL.Path = Prefix + id + strings.TrimPrefix(r.URL.Path, "/zen/go")
+				r2.URL.RawPath = ""
+				mux.ServeHTTP(w, r2)
+			})
+		} else if id == "opencode" {
+			mux.HandleFunc("/zen/", func(w http.ResponseWriter, r *http.Request) {
+				r2 := r.Clone(r.Context())
+				r2.URL.Path = Prefix + id + strings.TrimPrefix(r.URL.Path, "/zen")
+				r2.URL.RawPath = ""
+				mux.ServeHTTP(w, r2)
+			})
+		}
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
@@ -160,7 +175,11 @@ func handler(id string, up *url.URL, header string, secret func() (string, error
 			rest := strings.TrimPrefix(r.In.URL.Path, Prefix+id)
 			r.Out.URL.Scheme = up.Scheme
 			r.Out.URL.Host = up.Host
-			r.Out.URL.Path = strings.TrimSuffix(up.Path, "/") + rest
+			outPath := strings.TrimSuffix(up.Path, "/")
+			if strings.HasSuffix(outPath, "/v1") && strings.HasPrefix(rest, "/v1") {
+				rest = strings.TrimPrefix(rest, "/v1")
+			}
+			r.Out.URL.Path = outPath + rest
 			r.Out.URL.RawPath = ""
 			r.Out.Host = up.Host
 			for _, h := range strippedHeaders {

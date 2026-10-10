@@ -132,7 +132,7 @@ API キー等の認証情報は VM 内には配置しません。VM 内のエー
 
 ### プロバイダ別のプロキシ中継仕様
 
-- **opencode:** `http://quagent.host:7070/llm/<provider>` 経由で上流へ中継します。プロキシが `secret_command` 等で取得したキーを付与します。
+- **opencode:** `http://quagent.host:7070/llm/<provider>` 経由で上流へ中継します。プロキシが `secret_command` 等で取得したキーを付与します。OpenCode の API キーは Zen（Free モデルを含む全モデル）と Go（サブスクリプション）で共通であるため、`providers` に `opencode-go` または `opencode` のいずれかを設定すると、ホスト側がもう片方のエンドポイント（Zen: `https://opencode.ai/zen/v1`、Go: `https://opencode.ai/zen/go/v1`）を同一のキーで自動補完し、両方の中継ルート（`/llm/opencode` および `/llm/opencode-go`、ならびに `/zen` および `/zen/go` エイリアス）を登録します。ゲスト側では OpenCode v2 形式（`providers.<id>.settings.baseURL`）および v1 形式（`provider.<id>.options.baseURL`）の設定を生成し、VM 内から Go サブスクモデルと Zen Free モデルをシームレスに切り替えて利用できます。
 - **Claude Code:** `ANTHROPIC_BASE_URL` をプロキシに向け、API キーの代わりに認証トークンを `apiKeyHelper` 経由で渡します。サブスクリプション（Pro/Max）利用時は、ホスト側で `claude setup-token` により生成した長期トークンをホスト側のみに保持し、VM 内には一時トークンのみを渡します。なお、`setup-token` は推論専用のため、VM 内の `/usage` は使用できません（ホスト側の Claude Code で確認します）。
 - **agy (Antigravity CLI):** API キー利用時は `GOOGLE_GEMINI_BASE_URL` をプロキシに向け、認証トークンを `GEMINI_API_KEY` として渡します。
 - **codex (Codex CLI):** API キー利用時は `OPENAI_BASE_URL` をプロキシに向け、認証トークンを `OPENAI_API_KEY` として渡します。サブスクリプション（ChatGPT Plus / Pro 等）利用時は、ホスト側の OAuth ログイン情報から短命トークンを生成してプロキシが付与します。
