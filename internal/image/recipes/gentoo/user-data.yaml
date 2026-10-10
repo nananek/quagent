@@ -315,9 +315,9 @@ write_files:
       # 追記しないよう、入っていれば何もしない)。起動時に上書きできないものは
       # CONFIG 側 (lockdown・モジュール署名) で強制している。
       if ! grep -q 'slab_nomerge' /etc/default/grub; then
-        cat >> /etc/default/grub <<'GRUBEOF'
-      GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX} slab_nomerge init_on_alloc=1 init_on_free=1 page_alloc.shuffle=1 randomize_kstack_offset=on vsyscall=none debugfs=off pti=on oops=panic"
-      GRUBEOF
+        # ヒアドキュメントは終端行のインデントで bash が止まらなくなるので使わず
+        # printf で1行追記する (リテラルブロック内に収めるため行頭に出さないこと)。
+        printf '%s\n' 'GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX} slab_nomerge init_on_alloc=1 init_on_free=1 page_alloc.shuffle=1 randomize_kstack_offset=on vsyscall=none debugfs=off pti=on oops=panic"' >> /etc/default/grub
       fi
       grub-mkconfig -o /boot/grub/grub.cfg
 
