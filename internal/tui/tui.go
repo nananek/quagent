@@ -18,9 +18,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/nananek/quagent/internal/access"
-	"github.com/nananek/quagent/internal/dockercache"
 	"github.com/nananek/quagent/internal/image"
 	"github.com/nananek/quagent/internal/paths"
+	"github.com/nananek/quagent/internal/proxycache"
 )
 
 // Launch は TUI で決めた起動設定。
@@ -109,7 +109,7 @@ func Run(agents []string) (Launch, error) {
 			huh.NewSelect[string]().Title("quagent").Options(
 				huh.NewOption("VM を起動", "start"),
 				huh.NewOption("ベースイメージの管理", "images"),
-				huh.NewOption("Docker キャッシュの全クリア", "cache"),
+				huh.NewOption("キャッシュの全クリア", "cache"),
 				huh.NewOption("「以後確認しない」ドメインの管理", "always"),
 				huh.NewOption("終了", "quit"),
 			).Value(&choice),
@@ -147,7 +147,7 @@ func Run(agents []string) (Launch, error) {
 }
 
 func cleanCacheMenu() error {
-	stats, err := dockercache.InspectCache(paths.DockerCacheDir())
+	stats, err := proxycache.InspectCache(paths.ProxyCacheDir())
 	if err != nil {
 		return err
 	}
@@ -155,7 +155,7 @@ func cleanCacheMenu() error {
 	for _, es := range stats.Packages {
 		totalBytes += es.TotalBytes
 	}
-	desc := fmt.Sprintf("現在のキャッシュ: Docker %d レイヤー, 合計 %s", stats.TotalBlobs, dockercache.FormatSize(totalBytes))
+	desc := fmt.Sprintf("現在のキャッシュ: Docker %d レイヤー, 合計 %s", stats.TotalBlobs, proxycache.FormatSize(totalBytes))
 	if totalBytes == 0 {
 		return newForm(huh.NewGroup(huh.NewNote().Title("キャッシュ").Description("キャッシュは空です。"))).Run()
 	}
@@ -171,7 +171,7 @@ func cleanCacheMenu() error {
 		return nil
 	}
 
-	if err := dockercache.CleanCache(paths.DockerCacheDir()); err != nil {
+	if err := proxycache.CleanCache(paths.ProxyCacheDir()); err != nil {
 		return fmt.Errorf("キャッシュ削除失敗: %w", err)
 	}
 	return newForm(huh.NewGroup(huh.NewNote().Title("完了").Description("キャッシュを全削除しました。"))).Run()

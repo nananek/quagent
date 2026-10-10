@@ -1,4 +1,4 @@
-package dockercache
+package proxycache
 
 import (
 	"encoding/json"
@@ -59,7 +59,7 @@ func InspectCache(rootDir string) (*CacheStats, error) {
 	}
 
 	// 1. blobs の集計
-	blobsDir := filepath.Join(rootDir, "blobs", "sha256")
+	blobsDir := filepath.Join(rootDir, "docker", "blobs", "sha256")
 	if entries, err := os.ReadDir(blobsDir); err == nil {
 		for _, e := range entries {
 			if e.IsDir() {
@@ -73,7 +73,7 @@ func InspectCache(rootDir string) (*CacheStats, error) {
 	}
 
 	// 2. manifests の走査
-	manifestsDir := filepath.Join(rootDir, "manifests")
+	manifestsDir := filepath.Join(rootDir, "docker", "manifests")
 	if _, err := os.Stat(manifestsDir); err == nil {
 		_ = filepath.WalkDir(manifestsDir, func(path string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".meta") {
@@ -115,26 +115,23 @@ func InspectCache(rootDir string) (*CacheStats, error) {
 		})
 	}
 
-	// 3. packages の集計 (go, cargo, npm, pypi)
-	packagesDir := filepath.Join(rootDir, "packages")
-	if _, err := os.Stat(packagesDir); err == nil {
-		for _, eco := range []string{"go", "cargo", "npm", "pypi"} {
-			ecoDir := filepath.Join(packagesDir, eco)
-			if _, err := os.Stat(ecoDir); err == nil {
-				var es EcosystemStats
-				_ = filepath.WalkDir(ecoDir, func(path string, d fs.DirEntry, err error) error {
-					if err != nil || d.IsDir() {
-						return nil
-					}
-					if fi, err := d.Info(); err == nil {
-						es.TotalFiles++
-						es.TotalBytes += fi.Size()
-					}
+	// 3. 各言語パッケージの集計 (go, cargo, npm, pypi)
+	for _, eco := range []string{"go", "cargo", "npm", "pypi"} {
+		ecoDir := filepath.Join(rootDir, eco)
+		if _, err := os.Stat(ecoDir); err == nil {
+			var es EcosystemStats
+			_ = filepath.WalkDir(ecoDir, func(path string, d fs.DirEntry, err error) error {
+				if err != nil || d.IsDir() {
 					return nil
-				})
-				if es.TotalFiles > 0 {
-					stats.Packages[eco] = es
 				}
+				if fi, err := d.Info(); err == nil {
+					es.TotalFiles++
+					es.TotalBytes += fi.Size()
+				}
+				return nil
+			})
+			if es.TotalFiles > 0 {
+				stats.Packages[eco] = es
 			}
 		}
 	}
@@ -144,7 +141,7 @@ func InspectCache(rootDir string) (*CacheStats, error) {
 
 // CleanCache はキャッシュされたすべてのファイル (Docker および言語パッケージ) を削除する。
 func CleanCache(rootDir string) error {
-	for _, sub := range []string{"blobs", "manifests", "packages", "tmp"} {
+	for _, sub := range []string{"docker", "go", "cargo", "npm", "pypi", "tmp"} {
 		dir := filepath.Join(rootDir, sub)
 		if err := os.RemoveAll(dir); err != nil && !os.IsNotExist(err) {
 			return err
@@ -153,8 +150,8 @@ func CleanCache(rootDir string) error {
 			return err
 		}
 	}
-	// blobs/sha256 サブディレクトリを再作成
-	_ = os.MkdirAll(filepath.Join(rootDir, "blobs", "sha256"), 0755)
+	_ = os.MkdirAll(filepath.Join(rootDir, "docker", "blobs", "sha256"), 0755)
+	_ = os.MkdirAll(filepath.Join(rootDir, "docker", "manifests"), 0755)
 	return nil
 }
 
@@ -162,16 +159,15 @@ func CleanCache(rootDir string) error {
 func CleanEcosystemCache(rootDir, ecosystem string) error {
 	switch ecosystem {
 	case "docker":
-		for _, sub := range []string{"blobs", "manifests"} {
-			dir := filepath.Join(rootDir, sub)
-			_ = os.RemoveAll(dir)
-			_ = os.MkdirAll(dir, 0755)
-		}
-		_ = os.MkdirAll(filepath.Join(rootDir, "blobs", "sha256"), 0755)
+		dir := filepath.Join(rootDir, "docker")
+		_ = os.RemoveAll(dir)
+		_ = os.MkdirAll(filepath.Join(dir, "blobs", "sha256"), 0755)
+		_ = os.MkdirAll(filepath.Join(dir, "manifests"), 0755)
 		return nil
 	case "go", "cargo", "npm", "pypi":
-		dir := filepath.Join(rootDir, "packages", ecosystem)
+		dir := filepath.Join(rootDir, ecosystem)
 		_ = os.RemoveAll(dir)
+		_ = os.MkdirAll(dir, 0755)
 		return nil
 	default:
 		return fmt.Errorf("未知のエコシステム: %s (docker, go, cargo, npm, pypi のいずれかを指定してください)", ecosystem)

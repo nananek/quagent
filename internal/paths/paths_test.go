@@ -37,8 +37,8 @@ func TestPathsWithEnv(t *testing.T) {
 	if got := SkillsDir(); got != filepath.Join(tmp, "config", "quagent", "skills") {
 		t.Errorf("SkillsDir() = %q, want %q", got, filepath.Join(tmp, "config", "quagent", "skills"))
 	}
-	if got := DockerCacheDir(); got != filepath.Join(tmp, "cache", "quagent", "docker") {
-		t.Errorf("DockerCacheDir() = %q, want %q", got, filepath.Join(tmp, "cache", "quagent", "docker"))
+	if got := ProxyCacheDir(); got != filepath.Join(tmp, "cache", "quagent", "proxy") {
+		t.Errorf("ProxyCacheDir() = %q, want %q", got, filepath.Join(tmp, "cache", "quagent", "proxy"))
 	}
 }
 
@@ -68,7 +68,7 @@ func TestPathsFallback(t *testing.T) {
 	if got := SkillsDir(); got != filepath.Join(home, ".config", "quagent", "skills") {
 		t.Errorf("SkillsDir() = %q, want %q", got, filepath.Join(home, ".config", "quagent", "skills"))
 	}
-	if got := DockerCacheDir(); got != filepath.Join(home, ".cache", "quagent", "docker") {
-		t.Errorf("DockerCacheDir() = %q, want %q", got, filepath.Join(home, ".cache", "quagent", "docker"))
+	if got := ProxyCacheDir(); got != filepath.Join(home, ".cache", "quagent", "proxy") {
+		t.Errorf("ProxyCacheDir() = %q, want %q", got, filepath.Join(home, ".cache", "quagent", "proxy"))
 	}
 }

@@ -23,7 +23,6 @@ import (
 	"github.com/nananek/quagent/internal/codex"
 	"github.com/nananek/quagent/internal/config"
 	"github.com/nananek/quagent/internal/console"
-	"github.com/nananek/quagent/internal/dockercache"
 	"github.com/nananek/quagent/internal/guest"
 	"github.com/nananek/quagent/internal/hostsvc"
 	"github.com/nananek/quagent/internal/image"
@@ -31,6 +30,7 @@ import (
 	"github.com/nananek/quagent/internal/netns"
 	"github.com/nananek/quagent/internal/paths"
 	"github.com/nananek/quagent/internal/pr"
+	"github.com/nananek/quagent/internal/proxycache"
 	"github.com/nananek/quagent/internal/resourcemon"
 	"github.com/nananek/quagent/internal/sandbox"
 	"github.com/nananek/quagent/internal/tlsmitm"
@@ -470,21 +470,22 @@ func run(o runOpts) error {
 	}
 	defer svc.Stop()
 
-	var cacheSrv *dockercache.Server
-	var dockerCachePort uint32
-	if cfg.DockerCache.IsEnabled() {
-		storage, err := dockercache.NewStorage(cfg.DockerCache.DirResolved(), cfg.DockerCache.MaxSizeGiBResolved())
+	var cacheSrv *proxycache.Server
+	var proxyCachePort uint32
+	cachePolicy := cfg.Cache
+	if cachePolicy.IsEnabled() {
+		storage, err := proxycache.NewStorage(cachePolicy.DirResolved(), cachePolicy.MaxSizeGiBResolved())
 		if err != nil {
-			return fmt.Errorf("Docker キャッシュ初期化失敗: %w", err)
+			return fmt.Errorf("キャッシュプロキシ初期化失敗: %w", err)
 		}
-		cacheSrv = dockercache.NewServer(storage, nil, nil)
+		cacheSrv = proxycache.NewServer(storage, nil, nil)
 		if err := cacheSrv.Start(g.cid); err != nil {
-			return fmt.Errorf("Docker キャッシュ起動失敗: %w", err)
+			return fmt.Errorf("キャッシュプロキシ起動失敗: %w", err)
 		}
 		defer cacheSrv.Stop()
-		dockerCachePort = cacheSrv.Port
-		logf("dockercache: vsock :%d で待受開始 (dir: %s, max: %d GiB)",
-			cacheSrv.Port, cfg.DockerCache.DirResolved(), cfg.DockerCache.MaxSizeGiBResolved())
+		proxyCachePort = cacheSrv.Port
+		logf("proxycache: vsock :%d で待受開始 (dir: %s, max: %d GiB)",
+			cacheSrv.Port, cachePolicy.DirResolved(), cachePolicy.MaxSizeGiBResolved())
 	}
 
 	// VM の受け口 (quagent 自身) を seed に入れ、cloud-init で常駐させる。
@@ -519,7 +520,7 @@ func run(o runOpts) error {
 				return err
 			}
 			var mirrors []string
-			if dockerCachePort != 0 {
+			if proxyCachePort != 0 {
 				mirrors = append(mirrors, "http://127.0.0.1:5000")
 			}
 			daemonJSON, err := sandbox.GenerateDockerDaemonJSON(dockerSeccompGuestPath, mirrors...)
@@ -551,7 +552,7 @@ func run(o runOpts) error {
 	}
 
 	pkgCacheCmd := ""
-	if dockerCachePort != 0 {
+	if proxyCachePort != 0 {
 		pkgCacheFile, cmd := pkgCacheWriteFiles(vm.GuestUser)
 		pkgCacheCmd = cmd
 		if sandboxFile != "" {
@@ -581,7 +582,7 @@ runcmd:
   - [sh, -c, "install -o %s -g %s -m 755 /entrypoint.sh %s && ln -sf %s /entrypoint.sh"]
 %s%s%s%s  - [sh, -c, "mkdir -p /run/quagent-seed && mount -o ro /dev/disk/by-label/cidata /run/quagent-seed && install -m 755 /run/quagent-seed/quagent-guest /usr/local/bin/quagent-guest && umount /run/quagent-seed"]
   - [systemd-run, --unit=quagent-guest, --uid=%s, -p, Restart=always, /usr/local/bin/quagent-guest, %s, "%d", "%d"]
-`, indentBlock(entrypoint, "      "), extraFiles, sandboxFile, hostsvc.GuestHost, maskCmd(sshUnits()), vm.GuestUser, vm.GuestUser, entrypointPath, entrypointPath, trustCmd, tmpCmd, dockerSetupCmd, pkgCacheCmd, vm.GuestUser, guestCommand, svc.Port, dockerCachePort)
+`, indentBlock(entrypoint, "      "), extraFiles, sandboxFile, hostsvc.GuestHost, maskCmd(sshUnits()), vm.GuestUser, vm.GuestUser, entrypointPath, entrypointPath, trustCmd, tmpCmd, dockerSetupCmd, pkgCacheCmd, vm.GuestUser, guestCommand, svc.Port, proxyCachePort)
 
 	// 時刻の表示 (承認の期限やコミットの日時) を host とそろえる
 	if tz := hostTimezone(); tz != "" {

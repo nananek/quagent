@@ -13,13 +13,13 @@ import (
 
 	"github.com/nananek/quagent/internal/access"
 	"github.com/nananek/quagent/internal/console"
-	"github.com/nananek/quagent/internal/dockercache"
 	"github.com/nananek/quagent/internal/guest"
 	"github.com/nananek/quagent/internal/hostsandbox"
 	"github.com/nananek/quagent/internal/hostsvc"
 	"github.com/nananek/quagent/internal/image"
 	"github.com/nananek/quagent/internal/netns"
 	"github.com/nananek/quagent/internal/paths"
+	"github.com/nananek/quagent/internal/proxycache"
 	"github.com/nananek/quagent/internal/sandbox"
 	"github.com/nananek/quagent/internal/tui"
 )
@@ -31,7 +31,7 @@ const usage = `usage:
   quagent image ls                             焼いたベースイメージの一覧
   quagent image rm IMAGE                       ベースイメージを消す
   quagent always ls | rm DOMAIN...              「以後確認しない」ドメインの一覧・取り消し
-  quagent cache ls | clean                     Docker イメージキャッシュの一覧・全削除
+  quagent cache ls | clean [docker|go|cargo|npm|pypi|all]  ローカルキャッシュの一覧・削除
   quagent run [--repo DIR] [--image RECIPE] [--cpus N] [--mem MiB] [--agent opencode|claude|agy|codex] [--allow "d1 d2"] [--mount-tmp] [--nested-virt] [--local-head] [--pr-approval[=false]]
                                                VM を起動し、tmux でエージェントと承認コンソールを開く
 `
@@ -257,9 +257,9 @@ func cmdAlways(args []string) error {
 }
 
 func cmdCache(args []string) error {
-	cacheDir := paths.DockerCacheDir()
+	cacheDir := paths.ProxyCacheDir()
 	if len(args) == 0 || args[0] == "ls" {
-		stats, err := dockercache.InspectCache(cacheDir)
+		stats, err := proxycache.InspectCache(cacheDir)
 		if err != nil {
 			return err
 		}
@@ -269,15 +269,15 @@ func cmdCache(args []string) error {
 		}
 
 		fmt.Printf("キャッシュ状況 (%s):\n", cacheDir)
-		fmt.Printf("  Docker: %d レイヤー (%s)\n", stats.TotalBlobs, dockercache.FormatSize(stats.TotalBlobBytes))
+		fmt.Printf("  docker: %d レイヤー (%s)\n", stats.TotalBlobs, proxycache.FormatSize(stats.TotalBlobBytes))
 		for _, eco := range []string{"go", "cargo", "npm", "pypi"} {
 			if es, ok := stats.Packages[eco]; ok {
-				fmt.Printf("  %s: %d ファイル (%s)\n", eco, es.TotalFiles, dockercache.FormatSize(es.TotalBytes))
+				fmt.Printf("  %s: %d ファイル (%s)\n", eco, es.TotalFiles, proxycache.FormatSize(es.TotalBytes))
 			} else {
 				fmt.Printf("  %s: なし\n", eco)
 			}
 		}
-		fmt.Printf("  合計使用量: %s\n", dockercache.FormatSize(totalBytes))
+		fmt.Printf("  合計使用量: %s\n", proxycache.FormatSize(totalBytes))
 
 		if len(stats.Images) > 0 {
 			fmt.Println("  キャッシュされた Docker イメージ:")
@@ -294,7 +294,7 @@ func cmdCache(args []string) error {
 		if len(args) > 1 {
 			target = args[1]
 		}
-		stats, _ := dockercache.InspectCache(cacheDir)
+		stats, _ := proxycache.InspectCache(cacheDir)
 		freedSize := ""
 		if stats != nil {
 			var total int64
@@ -309,12 +309,12 @@ func cmdCache(args []string) error {
 				total = es.TotalBytes
 			}
 			if total > 0 {
-				freedSize = dockercache.FormatSize(total)
+				freedSize = proxycache.FormatSize(total)
 			}
 		}
 
 		if target == "all" {
-			if err := dockercache.CleanCache(cacheDir); err != nil {
+			if err := proxycache.CleanCache(cacheDir); err != nil {
 				return fmt.Errorf("キャッシュ削除失敗: %w", err)
 			}
 			if freedSize != "" {
@@ -325,7 +325,7 @@ func cmdCache(args []string) error {
 			return nil
 		}
 
-		if err := dockercache.CleanEcosystemCache(cacheDir, target); err != nil {
+		if err := proxycache.CleanEcosystemCache(cacheDir, target); err != nil {
 			return err
 		}
 		if freedSize != "" {
