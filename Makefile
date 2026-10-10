@@ -23,7 +23,7 @@ coverage:
 
 docker-test:
 	docker build -f Dockerfile.test -t quagent-test .
-	docker run --net=host -e GOPROXY="http://127.0.0.1:5000/go,direct" --rm -v $(CURDIR):/work quagent-test
+	docker run $(DOCKER_ARGS) --rm -v $(CURDIR):/work quagent-test
 
 clean:
 	rm -rf bin coverage.out
