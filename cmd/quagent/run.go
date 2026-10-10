@@ -182,7 +182,7 @@ func run(o runOpts) error {
 	// 起動して認証が通るか確かめる (通ればすぐ落とす)。先に起動しておかないと
 	// ゲスト側で失敗することがあるため。失敗したら VM は作らない。
 	if o.Agent == "agy" && cfg.Agy.Subscription {
-		if err := warmupAgyHost(); err != nil {
+		if err := warmupAgyHost(agyRefreshSource(cfg)); err != nil {
 			return fmt.Errorf("agy のサブスクリプションを使えない: %w", err)
 		}
 	}
@@ -312,7 +312,7 @@ func run(o runOpts) error {
 	// agy 起動時の一時 egress の開放と初推論成功時の取り消しは agyEgress で管理する。
 	var agyEgress *agyEgressController
 	if cfg.Agy.Subscription {
-		minter := antigravity.NewMinter()
+		minter := antigravity.NewMinter(agyRefreshSource(cfg))
 		seed, err := minter.Token()
 		if err != nil {
 			return fmt.Errorf("agy のサブスクリプションを使えない: %w", err)
@@ -663,6 +663,9 @@ runcmd:
 		}
 		defer finishTmp(g, tmpDir, work)
 	}
+	if err := copySkills(g, cfg.SkillsDirResolved()); err != nil {
+		return err
+	}
 	if err := ag.setup(g, cfg, providers, svc.Token); err != nil {
 		return err
 	}
@@ -693,7 +696,7 @@ runcmd:
 			return nil
 		default:
 		}
-		next, discard := askRestart(o, cur, cfg.Agy.Subscription)
+		next, discard := askRestart(o, cur, cfg.Agy.Subscription, agyRefreshSource(cfg))
 		if next == "" {
 			discardLogs = discard
 			return nil
@@ -720,9 +723,9 @@ runcmd:
 // warmupAgyHost はホスト側で agy を短時間起動してサブスク認証が通るか確かめる
 // (通ればプロセスはすぐ終わる)。先に起動しておかないとゲスト側で失敗する
 // ことがあるため、VM 起動前と agy への切り替え前に呼ぶ。
-func warmupAgyHost() error {
+func warmupAgyHost(src antigravity.RefreshSource) error {
 	logf("ホスト側で agy の起動確認中 (サブスク認証を通し、すぐ終了する)...")
-	if err := antigravity.Warmup(context.Background()); err != nil {
+	if err := antigravity.Warmup(context.Background(), src); err != nil {
 		return err
 	}
 	logf("ホスト側の agy 起動確認 OK")
@@ -732,14 +735,14 @@ func warmupAgyHost() error {
 // askRestart は再起動フローの聞き取り。agy (サブスク) が選ばれたらホスト側で
 // 起動確認してから返す。確認に失敗したら VM は残したまま選び直しに戻る
 // (next が空なら終了で、discardLogs がログを残さないか)。
-func askRestart(o runOpts, cur string, agySubscription bool) (next string, discardLogs bool) {
+func askRestart(o runOpts, cur string, agySubscription bool, src antigravity.RefreshSource) (next string, discardLogs bool) {
 	for {
 		n, discard := o.AfterSession(cur, restartChoices())
 		if n == "" {
 			return "", discard
 		}
 		if n == "agy" && agySubscription {
-			if err := agyWarmup(); err != nil {
+			if err := agyWarmup(src); err != nil {
 				logf("agy の起動確認に失敗したので選び直しに戻る (%s の VM は残っている): %v", cur, err)
 				continue
 			}
@@ -749,7 +752,7 @@ func askRestart(o runOpts, cur string, agySubscription bool) (next string, disca
 }
 
 // agyWarmup はテストで差し替えられるよう変数にしておく (既定は warmupAgyHost)。
-var agyWarmup = func() error { return warmupAgyHost() }
+var agyWarmup = func(src antigravity.RefreshSource) error { return warmupAgyHost(src) }
 
 // agyEgressController は agy のサブスクリプションで一時的に開ける egress
 // (ユーザー情報確認とプロフィール画像) を管理する。

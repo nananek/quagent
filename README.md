@@ -126,6 +126,16 @@ API キー等の認証情報は VM 内には配置しません。ホスト側の
   }
   ```
   ※ ホスト側の OAuth ログイン情報から一時トークンを生成してプロキシが付与します（長期トークンは VM に渡りません）。
+  ※ 長期の `refresh_token` は既定でホストのトークンファイル (`~/.gemini/antigravity-cli/antigravity-oauth-token`) から読みます。agy がトークンを secret-service (キーリング) に書く環境や、`pass` 等で別管理している場合は、以下で取り出し方を指定します (出力はトークンファイルと同じ JSON でも素の `refresh_token` でも可):
+  ```json
+  {
+    "agy": {
+      "subscription": true,
+      "refresh_token_command": ["pass", "show", "secret-service/Default/password_for_antigravity_on_gemini__gl2m"]
+    }
+  }
+  ```
+  `refresh_token_env` (環境変数名)、`refresh_token_file` (ファイルパス) も使えます。secret-service を直接読む場合は `["secret-tool", "lookup", ...]` を `refresh_token_command` に指定します。
 
 - **機密情報の取得方法:** `secret_command`（コマンド実行）、`secret_env`（環境変数）、`secret_file`（ファイルパス）から選択できます。
 
@@ -214,6 +224,17 @@ VM 内のエージェントが端末経由でクリップボードへ書き込�
 
 - **安全なコミット再署名:** VM 内では一時的な使い捨て鍵でコミットが作成され、ホスト側がこれを取り込んで正規の鍵で再署名した上で push します（GitHub トークンや秘密鍵は VM に渡りません）。
 - **PR 作成の承認:** 既定で承認制（`--pr-approval`）となっており、push 前に承認コンソール上でブランチ名・マージ先・タイトル・本文の確認を求めます。
+
+---
+
+### 8. 共通スキル (プロジェクト非依存・エージェント非依存)
+
+プロジェクトや使用エージェントを問わず共通して利用したいスキル（調査手順やコーディング規約等）は、ホスト側のスキルディレクトリに配置することで、VM 起動時に自動的にすべての対応エージェントへ反映されます。
+
+- **配置場所 (ホスト側):** `~/.config/quagent/skills/<スキル名>/SKILL.md` (既定)
+- **ディレクトリ変更 (任意):** `config.json` の `"skills_dir": "/path/to/skills"` で任意の場所を指定可能
+- **対応エージェント:** `opencode` (`~/.config/opencode/skills/`)、`claude` (`~/.claude/skills/`)、`agy` (`~/.gemini/config/skills/`) のすべてに自動でシンボリックリンクが展開されます。セッション中のエージェント再起動・切り替え時にもそのまま利用可能です。
+- **転送と安全設計:** 合計 16 MiB を上限として通常ファイルとディレクトリのみを vsock 経由で安全にコピーします（VM 側からホストのファイルは変更されません）。
 
 ---
 

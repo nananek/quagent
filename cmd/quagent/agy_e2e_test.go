@@ -23,7 +23,7 @@ func TestAgySubscriptionE2E(t *testing.T) {
 	if _, err := exec.LookPath("agy"); err != nil {
 		t.Skip("agy が無い")
 	}
-	minter := antigravity.NewMinter()
+	minter := antigravity.NewMinter(antigravity.RefreshSource{})
 	seed, err := minter.Token()
 	if err != nil {
 		t.Fatalf("mint できない: %v", err)
