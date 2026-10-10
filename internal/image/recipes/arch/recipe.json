@@ -1,6 +1,6 @@
 {
-  "description": "Arch Linux",
-  "details": "rootless docker (docker 公式の rootless インストーラー)・opencode (pacman)・Claude Code (公式インストーラー)・agy (公式インストーラー)",
+  "description": "Arch Linux (hardened)",
+  "details": "linux-hardened カーネルと起動パラメータ硬化・rootless docker (docker 公式の rootless インストーラー)・opencode (pacman)・Claude Code (公式インストーラー)・agy (公式インストーラー)",
   "cloud_image_url": "https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2",
   "checksum_url": "https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2.SHA256",
   "signature_url": "https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2.sig",

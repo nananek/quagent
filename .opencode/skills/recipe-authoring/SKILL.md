@@ -77,3 +77,10 @@ Gentoo レシピは、公式クラウドイメージ（`di-amd64-cloudinit`）�
 - ビルド実行中のみ一時的に `kernel.yama.ptrace_scope` を 1 に設定します。Git 2.52 以降の Rust コンポーネント（cargo）が `PTRACE_TRACEME` を使用するため、セキュリティ強化設定の `ptrace_scope=2` がこれを拒否してビルドが失敗するのを防止するためです。`sysctl.d` の設定自体は変更しないため、ビルド完了後のイメージ起動時には値が 2 に戻ります。
 - クラウドイメージには Portage ツリーが含まれていません（`make.profile` が `/var/db/repos/gentoo` を参照しているのみ）。`emerge-webrsync` でツリーを取得してからプロファイルの切り替えを行います。
 - rootless Docker の依存コンポーネント（slirp4netns、fuse-overlayfs）は `~amd64` キーワード指定が必要なため、キーワード自動解除（`--autounmask-continue`）を付与してインストールします。
+
+## Arch Linux のセキュリティ強化カーネル (linux-hardened)
+
+Arch Linux レシピは、公式パッケージの `linux-hardened` を導入し、GRUB 起動パラメータ（`slab_nomerge init_on_alloc=1 init_on_free=1 ...`）によりセキュリティを強化します。
+- `linux-hardened` は攻撃面低減のために非特権 user namespace が既定で無効化（`kernel.unprivileged_userns_clone = 0`）されているため、rootless Docker のために `/etc/sysctl.d/99-quagent-hardened.conf` で `1` に設定します。
+- 焼き込み用 VM は標準カーネルで起動しているため、ビルド途中に稼働中カーネルのモジュールが削除されないよう、`linux-hardened` を追加インストールして Docker などのセットアップを完了させた後、ビルドの最終段階で旧 `linux` パッケージを削除し `grub-mkconfig` を実行してブート設定を更新します。
+

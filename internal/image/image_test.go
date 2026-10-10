@@ -170,6 +170,25 @@ func TestGentooHardeningSettings(t *testing.T) {
 	}
 }
 
+// arch の硬化は、linux-hardened の導入、非特権 user namespace 許可、GRUB 起動パラメータ硬化が揃っていること。
+func TestArchHardeningSettings(t *testing.T) {
+	r, err := FindRecipe("arch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"linux-hardened",
+		"kernel.unprivileged_userns_clone=1",
+		"slab_nomerge",
+		"pacman -Rdd --noconfirm --nosave linux",
+		"grub-mkconfig",
+	} {
+		if !strings.Contains(r.userData, want) {
+			t.Errorf("arch の user-data に %q が無い", want)
+		}
+	}
+}
+
 // 差分更新なのに前回のイメージが無ければ、何も焼かずにエラーにする。
 func TestBuildIncrementalNeedsPrevious(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())

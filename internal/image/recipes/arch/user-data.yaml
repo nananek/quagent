@@ -1,11 +1,25 @@
 #cloud-config
-# quagent ベースイメージ (Arch Linux)。{{.User}} と {{.Marker}} は quagent が埋める。
+# quagent ベースイメージ (Arch Linux, hardened)。{{.User}} と {{.Marker}} は quagent が埋める。
 # 成功したら {{.Marker}} をシリアルコンソールに出し、最後に電源を切ること。
 users:
   - name: {{.User}}
     shell: /bin/bash
     lock_passwd: true
 write_files:
+  # linux-hardened で rootless docker / slirp4netns / fuse-overlayfs を動かすために
+  # 非特権 user namespace を許可する
+  - path: /etc/sysctl.d/99-quagent-hardened.conf
+    permissions: '0644'
+    content: |
+      kernel.unprivileged_userns_clone=1
+  # slirp4netns (rootless docker のネットワーク) が使う。ip_tables は
+  # rootless docker が iptables を使うため。
+  - path: /etc/modules-load.d/quagent.conf
+    permissions: '0644'
+    content: |
+      tun
+      overlay
+      ip_tables
   - path: /usr/local/sbin/quagent-build.sh
     permissions: '0755'
     content: |
@@ -16,13 +30,13 @@ write_files:
 
       pacman-key --init
       pacman-key --populate archlinux
-      # 焼き込み中は再起動しないので、カーネルは更新しない (動いているカーネルの
-      # モジュールが消えると docker が使えない)。新しいカーネルは --refresh で
-      # クラウドイメージごと取り直したときに入る。
+      # 焼き込み中は再起動しないので、動いているカーネル (linux) はまだ消さない
+      # (モジュールが消えると docker が使えない)。
+      # linux-hardened を追加でインストールし、セットアップ完了後に旧 linux を外す。
       pacman -Syu --noconfirm --needed --ignore linux \
         base-devel ca-certificates curl git jq unzip sqlite tmux \
         shadow slirp4netns fuse-overlayfs iptables-nft \
-        docker-compose opencode
+        docker-compose opencode linux-hardened
 
       # rootless docker 用の subuid/subgid
       grep -q "^$U:" /etc/subuid || usermod --add-subuids 100000-165535 "$U"
@@ -63,6 +77,23 @@ write_files:
 
       # 作業ディレクトリ
       install -d -o "$U" -g "$U" /work
+
+      # 起動オプションの硬化 (既存の値を消さずに追記する)
+      if [ -f /etc/default/grub ] && ! grep -q 'slab_nomerge' /etc/default/grub; then
+        cat >> /etc/default/grub <<'GRUBEOF'
+GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX} slab_nomerge init_on_alloc=1 init_on_free=1 page_alloc.shuffle=1 randomize_kstack_offset=on vsyscall=none debugfs=off pti=on oops=panic"
+GRUBEOF
+      fi
+
+      # 旧カーネルを削除し、GRUB 設定を更新して linux-hardened で起動するようにする
+      pacman -Rdd --noconfirm --nosave linux
+      if command -v grub-mkconfig >/dev/null 2>&1; then
+        grub-mkconfig -o /boot/grub/grub.cfg
+      fi
+
+      # パッケージキャッシュを掃除し、未使用領域を解放してイメージを小さくする
+      pacman -Scc --noconfirm || true
+      fstrim -av || true
 
       # 実行時の VM は外向き通信がほぼ無く NTP で時刻が合わない。時刻合わせを待つ
       # サービスが起動を止めてしまう (sshd や cloud-init の最終段階が始まらない) ので
