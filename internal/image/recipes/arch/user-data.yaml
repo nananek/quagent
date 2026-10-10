@@ -25,6 +25,9 @@ write_files:
     content: |
       #!/bin/bash
       set -euxo pipefail
+      # シリアル getty は ttyS0 を初期化し直すときに焼き込みの出力を消すことが
+      # あるので止める (Gentoo と同じ。実行時のイメージには残らない)。
+      systemctl stop serial-getty@ttyS0.service || true
       U={{.User}}
       UID_=$(id -u "$U")
 
