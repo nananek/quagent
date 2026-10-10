@@ -54,7 +54,9 @@ CLI から直接操作することも可能です。
 quagent image recipes          # 利用可能なレシピ (OS) の一覧表示
 quagent image build arch       # ベースイメージのビルド (--refresh / --incremental 対応)
 quagent image ls / rm IMAGE    # ビルド済みイメージの一覧表示・削除
+quagent cache ls / clean       # Docker キャッシュの一覧表示・全削除
 quagent run --image arch       # VM を起動 (--mount-tmp: .tmp をホスト・ゲスト間で同期)
+
 ```
 
 - **イメージの管理:** 初回起動時など利用可能なイメージが存在しない場合は、管理画面（ベースイメージの管理）へ案内されます。CPU コア数やメモリ容量の指定、差分更新、不要イメージの一括削除（prune）が可能です。
@@ -185,7 +187,15 @@ VM からの新規アウトバウンド通信は既定ですべて遮断され�
 - 「今後常に許可」したドメインは `~/.local/share/quagent/always-allow.json` に保存され、`quagent always ls` / `quagent always rm` から確認・削除できます。
 - 許可ドメインであっても、プライベート IP や内部向けアドレスへの通信、および SNI/Host ヘッダーが一致しない通信は即座に切断されます。
 
+- **Docker イメージの Pull-through キャッシュ:**
+  - VM 内の rootless Docker によるイメージ取得は、vsock 経由でホスト側のローカルキャッシュ（`127.0.0.1:5000`）へ自動転送されます。
+  - **キャッシュヒット時:** 完全オフラインかつ承認不要で即座に高速返却されます。
+  - **upstream 取得時 (キャッシュミス時):** 外部レジストリからレイヤーをダウンロードする際は、承認コンソールで人間への確認（`[y]` 承認 / `[n]` 拒否）が求められます。
+  - **レジストリ対応:** Docker Hub (`docker.io`) は通常通り `docker pull <image>` で完全透過、`ghcr.io` は `docker pull 127.0.0.1:5000/ghcr.io/...` で取得可能です。
+  - **管理:** `quagent cache ls` でキャッシュ状況の確認、`quagent cache clean` または TUI から全クリアが可能です。
+
 ---
+
 
 ### 3. データ持ち出し防止 (Content Guard / DLP): 秘密鍵やトークンの漏洩を自動遮断する
 

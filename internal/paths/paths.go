@@ -37,3 +37,6 @@ func ConfigFile() string { return filepath.Join(xdg("XDG_CONFIG_HOME", ".config"
 
 // SkillsDir はユーザー共通スキル (~/.config/quagent/skills) の置き場。
 func SkillsDir() string { return filepath.Join(xdg("XDG_CONFIG_HOME", ".config"), "skills") }
+
+// DockerCacheDir はダウンロードした Docker イメージレイヤーの置き場。
+func DockerCacheDir() string { return filepath.Join(CacheDir(), "docker") }
