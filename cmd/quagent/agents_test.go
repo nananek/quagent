@@ -48,7 +48,7 @@ func TestAgyColorScheme(t *testing.T) {
 
 func TestAgentNames(t *testing.T) {
 	names := agentNames()
-	for _, want := range []string{"opencode", "claude", "agy"} {
+	for _, want := range []string{"opencode", "claude", "agy", "codex"} {
 		found := false
 		for _, n := range names {
 			if n == want {
@@ -67,6 +67,14 @@ func TestSetupAgyRequiresGeminiProvider(t *testing.T) {
 	err := setupAgy(vmGuest{}, cfg, []string{"anthropic", "openai"}, "test-token")
 	if err == nil {
 		t.Fatal("providers に gemini が無いのを通した")
+	}
+}
+
+func TestSetupCodexRequiresOpenAIProvider(t *testing.T) {
+	cfg := &config.Config{}
+	err := setupCodex(vmGuest{}, cfg, []string{"anthropic", "gemini"}, "test-token")
+	if err == nil {
+		t.Fatal("providers に openai が無いのを通した")
 	}
 }
 

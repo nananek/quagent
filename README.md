@@ -1,6 +1,6 @@
 # quagent
 
-quagent は、外向き通信をホスト側で厳格に遮断した使い捨て QEMU VM 上で、コーディングエージェント（opencode、Claude Code、agy）を自律かつ安全に動かすための実行環境です。
+quagent は、外向き通信をホスト側で厳格に遮断した使い捨て QEMU VM 上で、コーディングエージェント（opencode、Claude Code、agy、Codex）を自律かつ安全に動かすための実行環境です。
 
 > **このガイドの読み方:**
 > - **対象読者:** Linux 環境で各種コーディングエージェントを安全に動かしたい開発者（Linux 基本コマンドと tmux の操作を前提とします）。
@@ -62,6 +62,7 @@ quagent run --image arch       # VM を起動 (--mount-tmp: .tmp をホスト・
   - `opencode` (既定、`--auto` 付与)
   - `claude` (Claude Code、`--dangerously-skip-permissions` 付与)
   - `agy` (Antigravity CLI、`--dangerously-skip-permissions` 付与)
+  - `codex` (Codex CLI、`--dangerously-bypass-approvals-and-sandbox` 付与)
   ※ VM による強固な隔離環境下で動作するため、エージェント側の実行前プロンプト確認はスキップして自律実行されます。
 
 ### 画面構成: 上部でエージェントが自律動作し、下部承認コンソールで人間が判定する
@@ -113,7 +114,7 @@ API キー等の認証情報は VM 内には配置しません。ホスト側の
   "claude": { "subscription": "max" }
 }
 ```
-※ サブスクリプション利用時は、ホスト側で `claude setup-token` により長期トークンを作成して機密情報に指定します。
+※ サブスクリプション利用時は、ホスト側で `claude setup-token` により長期トークンを作成して機密情報に指定します。モデルを指定する場合は `"claude": { "subscription": "max", "model": "claude-sonnet-5.5" }` のように追記します。
 
 #### agy (Antigravity CLI) の設定例
 - **API キーで利用:**
@@ -139,6 +140,29 @@ API キー等の認証情報は VM 内には配置しません。ホスト側の
   }
   ```
   ※ ホスト側の OAuth ログイン情報から一時トークンを生成してプロキシが付与します（長期トークンは VM に渡りません）。`refresh_token_command` のほか、環境変数（`refresh_token_env`）やファイルパス（`refresh_token_file`）も指定可能です。詳細は [docs/design.md](docs/design.md#llm-api-の認証プロキシ-一時トークンで中継し本物の-api-キーを-vm-に渡さない) を参照してください。
+
+#### Codex (Codex CLI) の設定例
+- **サブスクリプションで利用 (ChatGPT Plus / Pro 等、ホスト側でログイン済み):**
+  ```json
+  {
+    "codex": {
+      "subscription": true
+    }
+  }
+  ```
+  ※ ホスト側の OAuth ログイン情報（`~/.codex/auth.json`）から一時トークンを生成してプロキシが付与します（長期トークンは VM に渡りません）。`refresh_token_command` のほか、環境変数（`refresh_token_env`）やファイルパス（`refresh_token_file`）も指定可能です。モデルを指定する場合は `"model": "gpt-5.2-codex-medium"` などを追記します。
+- **API キーで利用:**
+  ```json
+  {
+    "providers": {
+      "openai": {
+        "upstream": "https://api.openai.com/v1",
+        "secret_command": ["pass", "show", "openai/api-key"]
+      }
+    },
+    "codex": { "model": "gpt-5.2-codex-medium" }
+  }
+  ```
 
 - **機密情報の取得方法:** `secret_command`（コマンド実行）、`secret_env`（環境変数）、`secret_file`（ファイルパス）から選択できます。
 

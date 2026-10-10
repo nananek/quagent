@@ -20,6 +20,7 @@ import (
 	"github.com/nananek/quagent/internal/access"
 	"github.com/nananek/quagent/internal/antigravity"
 	"github.com/nananek/quagent/internal/authproxy"
+	"github.com/nananek/quagent/internal/codex"
 	"github.com/nananek/quagent/internal/config"
 	"github.com/nananek/quagent/internal/console"
 	"github.com/nananek/quagent/internal/guest"
@@ -186,6 +187,11 @@ func run(o runOpts) error {
 			return fmt.Errorf("agy のサブスクリプションを使えない: %w", err)
 		}
 	}
+	if o.Agent == "codex" && cfg.Codex.Subscription {
+		if err := warmupCodexHost(codexRefreshSource(cfg)); err != nil {
+			return fmt.Errorf("codex のサブスクリプションを使えない: %w", err)
+		}
+	}
 	repo, err := repoRoot(o.Repo)
 	if err != nil {
 		return err
@@ -318,7 +324,7 @@ func run(o runOpts) error {
 			return fmt.Errorf("agy のサブスクリプションを使えない: %w", err)
 		}
 		cfg.Agy.Seed = seed
-		svc.ExtraTokens = []string{seed}
+		svc.ExtraTokens = append(svc.ExtraTokens, seed)
 		// 起動直後のユーザー情報確認とプロフィール画像は guest から直接行くので、
 		// その宛先だけ egress も一時的に開ける (それ以外はプロキシ経由)。
 		// 画像の置き場所は人によって違うので、ユーザー情報から取る。
@@ -371,6 +377,53 @@ func run(o runOpts) error {
 			return err
 		}
 		providers = append(providers, antigravity.ProviderID)
+	}
+	var codexEgress *codexEgressController
+	if cfg.Codex.Subscription {
+		minter := codex.NewMinter(codexRefreshSource(cfg))
+		seed, err := minter.Token()
+		if err != nil {
+			return fmt.Errorf("codex のサブスクリプションを使えない: %w", err)
+		}
+		cfg.Codex.Seed = seed
+		cfg.Codex.AccountID = minter.AccountID()
+		svc.ExtraTokens = append(svc.ExtraTokens, seed)
+		egress := codex.EgressHosts
+		cfg.Codex.Egress = egress
+		codexEgress = &codexEgressController{egress: egress}
+		if headersOn && o.Agent == "codex" {
+			seen := map[string]bool{}
+			for _, p := range passthrough {
+				seen[strings.ToLower(p)] = true
+			}
+			for _, h := range egress {
+				if !seen[strings.ToLower(h)] {
+					passthrough = append(passthrough, h)
+					seen[strings.ToLower(h)] = true
+				}
+			}
+		}
+		secret := func() (string, error) {
+			tok, err := minter.Token()
+			if err != nil {
+				return "", err
+			}
+			return "Bearer " + tok, nil
+		}
+		if err := authproxy.RegisterDynamic(svc.Mux, codex.ProviderID, codex.Upstream,
+			"Authorization", secret, codex.Allow, logger, func(s string) {
+				select {
+				case llmDenied <- s:
+				default:
+				}
+			}, func(id, method, path string, status int) {
+				if id == codex.ProviderID && status/100 == 2 {
+					codexEgress.Revoke()
+				}
+			}); err != nil {
+			return err
+		}
+		providers = append(providers, codex.ProviderID)
 	}
 	if len(providers) == 0 {
 		logf("認証プロキシの provider が未設定 (%s)。VM から LLM API は使えない", config.Path())
@@ -583,6 +636,13 @@ runcmd:
 			agyEgress.Open()
 		}
 	}
+	if codexEgress != nil {
+		codexEgress.mgr = mgr
+		codexEgress.con = con
+		if o.Agent == "codex" {
+			codexEgress.Open()
+		}
+	}
 	go relayDenied(l, con)
 	go relayBlocked(l, con)
 	go relayTunnelBlocked(l, con)
@@ -696,7 +756,7 @@ runcmd:
 			return nil
 		default:
 		}
-		next, discard := askRestart(o, cur, cfg.Agy.Subscription, agyRefreshSource(cfg))
+		next, discard := askRestart(o, cur, cfg.Agy.Subscription, agyRefreshSource(cfg), cfg.Codex.Subscription, codexRefreshSource(cfg))
 		if next == "" {
 			discardLogs = discard
 			return nil
@@ -704,6 +764,8 @@ runcmd:
 		if next == cur {
 			if next == "agy" {
 				agyEgress.Open()
+			} else if next == "codex" {
+				codexEgress.Open()
 			}
 			continue
 		}
@@ -715,6 +777,11 @@ runcmd:
 			agyEgress.Open()
 		} else {
 			agyEgress.Revoke()
+		}
+		if next == "codex" {
+			codexEgress.Open()
+		} else {
+			codexEgress.Revoke()
 		}
 		cur = next
 	}
@@ -732,18 +799,34 @@ func warmupAgyHost(src antigravity.RefreshSource) error {
 	return nil
 }
 
-// askRestart は再起動フローの聞き取り。agy (サブスク) が選ばれたらホスト側で
+// warmupCodexHost はホスト側で codex を短時間起動してサブスク認証が通るか確かめる。
+func warmupCodexHost(src codex.RefreshSource) error {
+	logf("ホスト側で codex の起動確認中 (サブスク認証を通し、すぐ終了する)...")
+	if err := codex.Warmup(context.Background(), src); err != nil {
+		return err
+	}
+	logf("ホスト側の codex 起動確認 OK")
+	return nil
+}
+
+// askRestart は再起動フローの聞き取り。agy または codex (サブスク) が選ばれたらホスト側で
 // 起動確認してから返す。確認に失敗したら VM は残したまま選び直しに戻る
 // (next が空なら終了で、discardLogs がログを残さないか)。
-func askRestart(o runOpts, cur string, agySubscription bool, src antigravity.RefreshSource) (next string, discardLogs bool) {
+func askRestart(o runOpts, cur string, agySubscription bool, agySrc antigravity.RefreshSource, codexSubscription bool, codexSrc codex.RefreshSource) (next string, discardLogs bool) {
 	for {
 		n, discard := o.AfterSession(cur, restartChoices())
 		if n == "" {
 			return "", discard
 		}
 		if n == "agy" && agySubscription {
-			if err := agyWarmup(src); err != nil {
+			if err := agyWarmup(agySrc); err != nil {
 				logf("agy の起動確認に失敗したので選び直しに戻る (%s の VM は残っている): %v", cur, err)
+				continue
+			}
+		}
+		if n == "codex" && codexSubscription {
+			if err := codexWarmup(codexSrc); err != nil {
+				logf("codex の起動確認に失敗したので選び直しに戻る (%s の VM は残っている): %v", cur, err)
 				continue
 			}
 		}
@@ -753,6 +836,55 @@ func askRestart(o runOpts, cur string, agySubscription bool, src antigravity.Ref
 
 // agyWarmup はテストで差し替えられるよう変数にしておく (既定は warmupAgyHost)。
 var agyWarmup = func(src antigravity.RefreshSource) error { return warmupAgyHost(src) }
+
+// codexWarmup はテストで差し替えられるよう変数にしておく (既定は warmupCodexHost)。
+var codexWarmup = func(src codex.RefreshSource) error { return warmupCodexHost(src) }
+
+// codexEgressController は codex のサブスクリプションで一時的に開ける egress を管理する。
+type codexEgressController struct {
+	mu     sync.Mutex
+	mgr    *access.Manager
+	con    *console.Server
+	egress []string
+	open   bool
+}
+
+func (c *codexEgressController) Open() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.egress) == 0 || c.mgr == nil {
+		return
+	}
+	if err := c.mgr.Preallow(c.egress); err != nil {
+		logf("codex サブスクリプション: egress の開放に失敗: %v", err)
+		return
+	}
+	c.open = true
+	logf("codex サブスクリプション: %s への egress を一時的に開ける (起動時の確認用。初回の推論が通ったら閉じる)", strings.Join(c.egress, ", "))
+}
+
+func (c *codexEgressController) Revoke() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.open || c.mgr == nil {
+		return
+	}
+	revoked, err := c.mgr.Revoke(c.egress)
+	if err != nil {
+		logf("codex サブスクリプション: egress の取り消しに失敗: %v", err)
+		return
+	}
+	c.open = false
+	if len(revoked) > 0 && c.con != nil {
+		c.con.Log("codex の起動確認が済んだので一時 egress を閉じた (" + strings.Join(revoked, ", ") + ")")
+	}
+}
 
 // agyEgressController は agy のサブスクリプションで一時的に開ける egress
 // (ユーザー情報確認とプロフィール画像) を管理する。

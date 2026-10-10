@@ -60,6 +60,7 @@ var SensitiveDirCandidates = []string{
 	".config/op",
 	".claude",
 	".gemini",
+	".codex",
 }
 
 // IsSubpath は child が parent の配下にあるか調べ、相対パスと true を返す。

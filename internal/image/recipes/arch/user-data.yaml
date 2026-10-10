@@ -78,6 +78,10 @@ write_files:
       runuser -l "$U" -c 'curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash'
       test -x "/home/$U/.local/bin/agy"
 
+      # Codex CLI (公式インストーラー)
+      runuser -l "$U" -c 'curl -fsSL https://chatgpt.com/codex/install.sh | bash'
+      test -x "/home/$U/.local/bin/codex"
+
       # 作業ディレクトリ
       install -d -o "$U" -g "$U" /work
 

@@ -99,9 +99,9 @@ func archiveSkills(dir string) (*bytes.Buffer, int, error) {
 }
 
 // linkSkillsScript は VM 内で展開された ~/.quagent/skills の各スキルを
-// 各エージェント (opencode, claude, agy) の探索パスへシンボリックリンクするシェルスクリプト。
+// 各エージェント (opencode, claude, agy, codex) の探索パスへシンボリックリンクするシェルスクリプト。
 func linkSkillsScript() string {
-	return `mkdir -p ~/.config/opencode/skills ~/.claude/skills ~/.gemini/config/skills ~/.gemini/antigravity-cli/skills
+	return `mkdir -p ~/.config/opencode/skills ~/.claude/skills ~/.gemini/config/skills ~/.gemini/antigravity-cli/skills ~/.codex/skills
 for d in ~/.quagent/skills/*; do
   [ -d "$d" ] || continue
   name=$(basename "$d")
@@ -109,6 +109,7 @@ for d in ~/.quagent/skills/*; do
   ln -sfn "$d" ~/.claude/skills/"$name"
   ln -sfn "$d" ~/.gemini/config/skills/"$name"
   ln -sfn "$d" ~/.gemini/antigravity-cli/skills/"$name"
+  ln -sfn "$d" ~/.codex/skills/"$name"
 done`
 }
 

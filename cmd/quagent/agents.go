@@ -12,6 +12,7 @@ import (
 
 	"github.com/nananek/quagent/internal/antigravity"
 	"github.com/nananek/quagent/internal/authproxy"
+	"github.com/nananek/quagent/internal/codex"
 	"github.com/nananek/quagent/internal/config"
 	"github.com/nananek/quagent/internal/hostsvc"
 	"github.com/nananek/quagent/internal/mcpsrv"
@@ -56,6 +57,16 @@ if [ -f ~/.gemini/antigravity-cli/env.sh ]; then
   . ~/.gemini/antigravity-cli/env.sh
 fi
 agy --dangerously-skip-permissions ${AGY_FLAGS:-}`,
+	},
+	"codex": {
+		setup: setupCodex,
+		entrypoint: `#!/bin/bash
+# quagent: エージェントを起動する (終了したあと ↑ で呼び戻せる)
+cd /work
+if [ -f ~/.codex/env.sh ]; then
+  . ~/.codex/env.sh
+fi
+codex --dangerously-bypass-approvals-and-sandbox ${CODEX_FLAGS:-}`,
 	},
 }
 
@@ -413,6 +424,142 @@ fi
 AGY_ENV`
 	if out, err := g.sh(script, nil); err != nil {
 		return fmt.Errorf("~/.bashrc に agy 環境変数を書けない: %v: %s", err, out)
+	}
+	return nil
+}
+
+// codexProvider は codex (API キー利用時) に使わせる provider ID (OpenAI API)。
+const codexProvider = "openai"
+
+// codexRefreshSource は host の codex のサブスクリプション用の長期 refresh_token の
+// 取り出し方を config から作る。未指定ならトークンファイルを読む。
+func codexRefreshSource(cfg *config.Config) codex.RefreshSource {
+	return codex.RefreshSource{
+		Env:     cfg.Codex.RefreshTokenEnv,
+		File:    cfg.Codex.RefreshTokenFile,
+		Command: cfg.Codex.RefreshTokenCommand,
+	}
+}
+
+// codexConfigTOML は codex の ~/.codex/config.toml の内容を作る。
+func codexConfigTOML(model, mcpURL string) string {
+	var b strings.Builder
+	if model != "" {
+		b.WriteString(fmt.Sprintf("model = %q\n\n", model))
+	}
+	b.WriteString("[mcp_servers.quagent]\n")
+	b.WriteString(fmt.Sprintf("url = %q\n", mcpURL))
+	b.WriteString("bearer_token_env_var = \"QUAGENT_TOKEN\"\n")
+	return b.String()
+}
+
+// setupCodex は codex (OpenAI Codex CLI) が OpenAI API または ChatGPT サブスクリプションを
+// 認証プロキシ経由で使い、quagent の MCP を使うよう設定する。
+func setupCodex(g vmGuest, cfg *config.Config, providers []string, token string) error {
+	if cfg.Codex.Subscription {
+		return setupCodexSubscription(g, cfg, token)
+	}
+	if !slices.Contains(providers, codexProvider) {
+		return fmt.Errorf("codex を使うには config.json の providers に %q (OpenAI API) を設定する", codexProvider)
+	}
+	return setupCodexAPIKey(g, cfg, token)
+}
+
+func setupCodexAPIKey(g vmGuest, cfg *config.Config, token string) error {
+	tomlContent := codexConfigTOML(cfg.Codex.Model, guestMCPURL())
+	if err := g.writeFile("~/.codex/config.toml", []byte(tomlContent)); err != nil {
+		return err
+	}
+	if out, err := g.sh("chmod 600 ~/.codex/config.toml", nil); err != nil {
+		return fmt.Errorf("~/.codex/config.toml の権限を変えられない: %v: %s", err, out)
+	}
+
+	auth := map[string]any{
+		"auth_mode":      "apikey",
+		"openai_api_key": token,
+	}
+	if err := writeJSON(g, "~/.codex/auth.json", auth); err != nil {
+		return err
+	}
+
+	envLines := []string{
+		fmt.Sprintf("export QUAGENT_TOKEN=%s", shellQuote(token)),
+		fmt.Sprintf("export OPENAI_BASE_URL=%s", shellQuote(authproxy.GuestBaseURL(hostsvc.GuestOrigin(), codexProvider))),
+		fmt.Sprintf("export OPENAI_API_KEY=%s", shellQuote(token)),
+	}
+	if cfg.Codex.Model != "" {
+		envLines = append(envLines, fmt.Sprintf("export CODEX_FLAGS=%s", shellQuote("--model "+cfg.Codex.Model)))
+	}
+	envPath := "~/.codex/env.sh"
+	if err := g.writeFile(envPath, []byte(strings.Join(envLines, "\n")+"\n")); err != nil {
+		return err
+	}
+	if out, err := g.sh("chmod 600 "+envPath, nil); err != nil {
+		return fmt.Errorf("%s の権限を変えられない: %v: %s", envPath, err, out)
+	}
+
+	marker := "quagent: codex env"
+	script := `grep -qF ` + shellQuote(marker) + ` ~/.bashrc 2>/dev/null || cat >> ~/.bashrc <<'CODEX_ENV'
+# ` + marker + `
+if [ -f ~/.codex/env.sh ]; then
+  . ~/.codex/env.sh
+fi
+CODEX_ENV`
+	if out, err := g.sh(script, nil); err != nil {
+		return fmt.Errorf("~/.bashrc に codex 環境変数を書けない: %v: %s", err, out)
+	}
+	return nil
+}
+
+func setupCodexSubscription(g vmGuest, cfg *config.Config, token string) error {
+	tomlContent := codexConfigTOML(cfg.Codex.Model, guestMCPURL())
+	if err := g.writeFile("~/.codex/config.toml", []byte(tomlContent)); err != nil {
+		return err
+	}
+	if out, err := g.sh("chmod 600 ~/.codex/config.toml", nil); err != nil {
+		return fmt.Errorf("~/.codex/config.toml の権限を変えられない: %v: %s", err, out)
+	}
+
+	auth := map[string]any{
+		"auth_mode": "chatgpt",
+		"tokens": map[string]any{
+			"access_token":  token,
+			"refresh_token": "quagent",
+			"id_token":      "quagent",
+			"account_id":    cfg.Codex.AccountID,
+		},
+	}
+	if err := writeJSON(g, "~/.codex/auth.json", auth); err != nil {
+		return err
+	}
+
+	envLines := []string{
+		fmt.Sprintf("export QUAGENT_TOKEN=%s", shellQuote(token)),
+		fmt.Sprintf("export CHATGPT_BASE_URL=%s", shellQuote(authproxy.GuestBaseURL(hostsvc.GuestOrigin(), codex.ProviderID))),
+		fmt.Sprintf("export OPENAI_BASE_URL=%s", shellQuote(authproxy.GuestBaseURL(hostsvc.GuestOrigin(), codex.ProviderID))),
+		fmt.Sprintf("export OPENAI_API_KEY=%s", shellQuote(token)),
+		"export DISABLE_AUTOUPDATER=1",
+	}
+	if cfg.Codex.Model != "" {
+		envLines = append(envLines, fmt.Sprintf("export CODEX_FLAGS=%s", shellQuote("--model "+cfg.Codex.Model)))
+	}
+	envPath := "~/.codex/env.sh"
+	if err := g.writeFile(envPath, []byte(strings.Join(envLines, "\n")+"\n")); err != nil {
+		return err
+	}
+	if out, err := g.sh("chmod 600 "+envPath, nil); err != nil {
+		return fmt.Errorf("%s の権限を変えられない: %v: %s", envPath, err, out)
+	}
+
+	marker := "quagent: codex env"
+	script := `grep -qF ` + shellQuote(marker) + ` ~/.bashrc 2>/dev/null || cat >> ~/.bashrc <<'CODEX_ENV'
+# ` + marker + `
+if [ -f ~/.codex/env.sh ]; then
+  . ~/.codex/env.sh
+fi
+CODEX_ENV`
+	if out, err := g.sh(script, nil); err != nil {
+		return fmt.Errorf("~/.bashrc に codex 環境変数を書けない: %v: %s", err, out)
 	}
 	return nil
 }
