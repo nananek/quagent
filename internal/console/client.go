@@ -89,8 +89,7 @@ var (
 	styleActiveTab = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(colCyan).
-			Border(lipgloss.NormalBorder(), false, false, true, false).
-			BorderForeground(colCyan).
+			Underline(true).
 			Padding(0, 1)
 
 	styleInactiveTab = lipgloss.NewStyle().
@@ -107,7 +106,7 @@ var (
 	styleModal = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colWarning).
-			Padding(1, 2)
+			Padding(0, 2)
 
 	styleFooter = lipgloss.NewStyle().
 			Foreground(colDim)
@@ -267,7 +266,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.ready = true
-		vpHeight := max(3, m.height-4)
+		vpHeight := max(1, m.height-3)
 		m.logViewport.Width = max(20, m.width-2)
 		m.logViewport.Height = vpHeight
 		m = m.updateLogViewportContent()
@@ -292,6 +291,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		nextM, cmd := m.handleKeyMsg(msg)
+		return nextM, cmd
+
+	case tea.MouseMsg:
+		nextM, cmd := m.handleMouseMsg(msg)
 		return nextM, cmd
 	}
 
@@ -618,39 +621,316 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// 1. ホイール操作 (ログ閲覧、履歴閲覧、申請キュー閲覧)
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		if m.activeTab == tabLogs {
+			m.logViewport.LineUp(3)
+			m.logAutoScroll = false
+			return m, nil
+		} else if m.activeTab == tabHistory {
+			if m.selectedHistory > 0 {
+				m.selectedHistory--
+			}
+			return m, nil
+		} else if m.activeTab == tabPending && len(m.pending) > 1 {
+			if m.selectedPending > 0 {
+				m.selectedPending--
+			}
+			return m, nil
+		}
+		return m, nil
+
+	case tea.MouseButtonWheelDown:
+		if m.activeTab == tabLogs {
+			m.logViewport.LineDown(3)
+			if m.logViewport.AtBottom() {
+				m.logAutoScroll = true
+			}
+			return m, nil
+		} else if m.activeTab == tabHistory {
+			if m.selectedHistory < len(m.history)-1 {
+				m.selectedHistory++
+			}
+			return m, nil
+		} else if m.activeTab == tabPending && len(m.pending) > 1 {
+			if m.selectedPending < len(m.pending)-1 {
+				m.selectedPending++
+			}
+			return m, nil
+		}
+		return m, nil
+	}
+
+	// 左クリック (Press) を処理
+	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionPress {
+		return m, nil
+	}
+
+	// 終了確認モーダル表示中
+	if m.quiting {
+		// [y] 終了する (左半分) / [n / Esc] キャンセル (右半分または枠外)
+		if msg.X < m.width/2 {
+			m.decide(Msg{Type: "quit"})
+			return m, tea.Quit
+		}
+		m.quiting = false
+		return m, nil
+	}
+
+	// ヘルプ表示中: 任意の場所をクリックで閉じる
+	if m.showHelp {
+		m.showHelp = false
+		return m, nil
+	}
+
+	// 質問入力中: 枠外クリックでキャンセル
+	if m.asking {
+		if msg.Y <= 1 || msg.Y >= m.height-2 {
+			m.asking = false
+			m.questionInput.Blur()
+		}
+		return m, nil
+	}
+
+	// ヘッダー行 (Y == 0) のクリック: タブ切り替え
+	if msg.Y == 0 {
+		return m.handleHeaderClick(msg.X)
+	}
+
+	// フッター行 (Y >= m.height - 1) のクリック
+	if msg.Y >= m.height-1 {
+		return m.handleFooterClick(msg.X)
+	}
+
+	// タブごとのクリック
+	switch m.activeTab {
+	case tabPending:
+		return m.handlePendingClick(msg.X, msg.Y)
+	case tabLogs:
+		if msg.Y < m.height/2 {
+			m.logViewport.LineUp(3)
+			m.logAutoScroll = false
+		} else {
+			m.logViewport.LineDown(3)
+			if m.logViewport.AtBottom() {
+				m.logAutoScroll = true
+			}
+		}
+		return m, nil
+	case tabHistory:
+		return m.handleHistoryClick(msg.Y)
+	}
+
+	return m, nil
+}
+
+func (m model) handleHeaderClick(x int) (tea.Model, tea.Cmd) {
+	titleWidth := lipgloss.Width(styleTitle.Render("quagent 承認コンソール"))
+
+	pendingBadge := ""
+	if len(m.pending) > 0 {
+		pendingBadge = fmt.Sprintf(" (%d)", len(m.pending))
+	}
+	tab1W := lipgloss.Width(styleInactiveTab.Render("1: 承認待ち" + pendingBadge))
+
+	logsBadge := ""
+	if m.unreadLogs > 0 {
+		logsBadge = fmt.Sprintf(" ●%d", m.unreadLogs)
+	}
+	tab2W := lipgloss.Width(styleInactiveTab.Render("2: ログ" + logsBadge))
+
+	histBadge := ""
+	if len(m.history) > 0 {
+		histBadge = fmt.Sprintf(" (%d)", len(m.history))
+	}
+	tab3W := lipgloss.Width(styleInactiveTab.Render("3: 履歴" + histBadge))
+
+	t1Start := titleWidth + 3
+	t1End := t1Start + tab1W
+	t2Start := t1End + 1
+	t2End := t2Start + tab2W
+	t3Start := t2End + 1
+	t3End := t3Start + tab3W
+
+	if x >= t1Start && x <= t1End {
+		m.activeTab = tabPending
+	} else if x >= t2Start && x <= t2End {
+		m.activeTab = tabLogs
+		m.unreadLogs = 0
+	} else if x >= t3Start && x <= t3End {
+		m.activeTab = tabHistory
+	}
+	return m, nil
+}
+
+func (m model) handleFooterClick(x int) (tea.Model, tea.Cmd) {
+	if x <= 16 {
+		m.activeTab = (m.activeTab + 1) % 3
+		if m.activeTab == tabLogs {
+			m.unreadLogs = 0
+		}
+		return m, nil
+	}
+
+	if x >= m.width-10 {
+		m.quiting = true
+		return m, nil
+	} else if x >= m.width-24 {
+		m.showHelp = true
+		return m, nil
+	}
+
+	return m, nil
+}
+
+func (m model) handlePendingClick(x, y int) (tea.Model, tea.Cmd) {
+	if len(m.pending) == 0 {
+		return m, nil
+	}
+
+	// 複数申請があるときのキュー切り替え (カード上部)
+	if len(m.pending) > 1 && y <= 2 {
+		if x < 20 {
+			if m.selectedPending > 0 {
+				m.selectedPending--
+			} else {
+				m.selectedPending = len(m.pending) - 1
+			}
+		} else {
+			if m.selectedPending < len(m.pending)-1 {
+				m.selectedPending++
+			} else {
+				m.selectedPending = 0
+			}
+		}
+		return m, nil
+	}
+
+	r := m.pending[m.selectedPending]
+	switch r.Type {
+	case "clip":
+		// [y] コピー許可    [n] 拒否
+		if x < 22 {
+			m.decide(Msg{Type: "clipdecide", ID: r.ID, Status: access.Approved})
+		} else {
+			m.decide(Msg{Type: "clipdecide", ID: r.ID, Status: access.Denied})
+		}
+	case "prrequest":
+		// [y] 承認して push    [n] 拒否
+		if x < 24 {
+			m.decide(Msg{Type: "prdecide", ID: r.ID, Status: access.Approved})
+		} else {
+			m.decide(Msg{Type: "prdecide", ID: r.ID, Status: access.Denied})
+		}
+	case "relaxrequest":
+		// [1] 今回のみ (5分)    [2] セッション許可    [d] 拒否    [q] 質問を返す
+		switch {
+		case x < 22:
+			m.decide(Msg{Type: "relaxdecide", ID: r.ID, Status: access.Approved, Kind: access.Once})
+		case x < 44:
+			m.decide(Msg{Type: "relaxdecide", ID: r.ID, Status: access.Approved, Kind: access.Session})
+		case x < 56:
+			m.decide(Msg{Type: "relaxdecide", ID: r.ID, Status: access.Denied})
+		default:
+			m.asking = true
+			m.questionInput.Reset()
+			m.questionInput.Focus()
+			return m, textinput.Blink
+		}
+	default: // request
+		// [1] 今回のみ (5分)    [2] セッション許可    [3] 恒久許可    [d] 拒否    [q] 質問を返す
+		switch {
+		case x < 22:
+			m.decide(Msg{Type: "decide", ID: r.ID, Status: access.Approved, Kind: access.Once})
+		case x < 44:
+			m.decide(Msg{Type: "decide", ID: r.ID, Status: access.Approved, Kind: access.Session})
+		case x < 58:
+			m.decide(Msg{Type: "decide", ID: r.ID, Status: access.Approved, Kind: access.Always})
+		case x < 70:
+			m.decide(Msg{Type: "decide", ID: r.ID, Status: access.Denied})
+		default:
+			m.asking = true
+			m.questionInput.Reset()
+			m.questionInput.Focus()
+			return m, textinput.Blink
+		}
+	}
+
+	return m, nil
+}
+
+func (m model) handleHistoryClick(y int) (tea.Model, tea.Cmd) {
+	if len(m.history) == 0 {
+		return m, nil
+	}
+	idx := max(0, y-2)
+	if idx < len(m.history) {
+		m.selectedHistory = idx
+	}
+	return m, nil
+}
+
 func (m model) View() string {
 	if !m.ready {
 		return "初期化中..."
 	}
 
-	var sb strings.Builder
+	header := m.renderHeader()
+	footer := m.renderFooter()
 
-	// 1. ヘッダー (タイトル、タブ、接続状態)
-	sb.WriteString(m.renderHeader())
-	sb.WriteString("\n")
+	availHeight := max(1, m.height-2)
 
-	// 2. メインコンテンツ
 	var content string
 	switch {
 	case m.quiting:
-		content = m.renderQuitModal()
+		content = m.renderQuitModal(availHeight)
 	case m.showHelp:
-		content = m.renderHelpModal()
+		content = m.renderHelpModal(availHeight)
 	case m.asking:
-		content = m.renderAskingCard()
+		content = m.renderAskingCard(availHeight)
 	case m.activeTab == tabPending:
-		content = m.renderPendingTab()
+		content = m.renderPendingTab(availHeight)
 	case m.activeTab == tabLogs:
 		content = m.renderLogsTab()
 	case m.activeTab == tabHistory:
-		content = m.renderHistoryTab()
+		content = m.renderHistoryTab(availHeight)
 	}
 
-	sb.WriteString(content)
-	sb.WriteString("\n")
+	content = strings.TrimRight(content, "\n")
+	contentLines := 0
+	if content != "" {
+		contentLines = strings.Count(content, "\n") + 1
+	}
 
-	// 3. フッター (操作ガイド)
-	sb.WriteString(m.renderFooter())
+	var sb strings.Builder
+	sb.WriteString(header)
+
+	rem := availHeight - contentLines
+	if rem >= 2 && m.activeTab != tabLogs {
+		sb.WriteString("\n\n")
+		sb.WriteString(content)
+		sb.WriteString("\n\n")
+	} else if rem >= 1 && m.activeTab != tabLogs {
+		sb.WriteString("\n")
+		sb.WriteString(content)
+		sb.WriteString("\n\n")
+	} else {
+		sb.WriteString("\n")
+		sb.WriteString(content)
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString(footer)
+
+	if m.height > 0 {
+		lines := strings.Split(sb.String(), "\n")
+		if len(lines) > m.height {
+			lines = lines[:m.height]
+			return strings.Join(lines, "\n")
+		}
+	}
 
 	return sb.String()
 }
@@ -702,16 +982,22 @@ func (m model) renderHeader() string {
 		connStatus = lipgloss.NewStyle().Foreground(colWarning).Render("○ 再接続待機")
 	}
 
-	space := max(1, m.width-lipgloss.Width(title)-lipgloss.Width(tabs)-lipgloss.Width(connStatus)-4)
-	return lipgloss.JoinHorizontal(lipgloss.Center, title, "  ", tabs, strings.Repeat(" ", space), connStatus)
+	space := max(1, m.width-lipgloss.Width(title)-lipgloss.Width(tabs)-lipgloss.Width(connStatus)-3)
+	return lipgloss.JoinHorizontal(lipgloss.Top, title, "   ", tabs, strings.Repeat(" ", space), connStatus)
 }
 
-func (m model) renderPendingTab() string {
+func (m model) renderPendingTab(availHeight int) string {
 	if len(m.pending) == 0 {
+		cardWidth := max(30, m.width-4)
+		padV := 0
+		if availHeight >= 5 {
+			padV = 1
+		}
 		box := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colDim).
-			Padding(1, 2).
+			Padding(padV, 2).
+			Width(cardWidth).
 			Render("✓ 承認待ちの申請はありません (エージェントが作業中)")
 		return box
 	}
@@ -742,7 +1028,7 @@ func (m model) renderPendingTab() string {
 	case "prrequest":
 		sb.WriteString(fmt.Sprintf("%s %s → %s\n", styleLabel.Render("ブランチ:"), Sanitize(r.Branch), Sanitize(r.Base)))
 		sb.WriteString(fmt.Sprintf("%s %s\n", styleLabel.Render("タイトル:"), Sanitize(r.Title)))
-		if b := strings.TrimSpace(r.Body); b != "" {
+		if b := strings.TrimSpace(r.Body); b != "" && availHeight >= 8 {
 			sb.WriteString(fmt.Sprintf("%s\n%s\n", styleLabel.Render("本文:"), Sanitize(truncateRunes(b, 500))))
 		}
 	case "relaxrequest":
@@ -773,7 +1059,11 @@ func (m model) renderPendingTab() string {
 	default:
 		actions = "[1] 今回のみ (5分)    [2] セッション許可    [3] 恒久許可    [d] 拒否    [q] 質問を返す"
 	}
-	sb.WriteString("\n" + styleKey.Render(actions))
+	if availHeight >= 8 {
+		sb.WriteString("\n" + styleKey.Render(actions))
+	} else {
+		sb.WriteString(styleKey.Render(actions))
+	}
 
 	return styleCard.Width(max(30, m.width-4)).Render(sb.String())
 }
@@ -787,19 +1077,25 @@ func (m model) renderLogsTab() string {
 	return header + "\n" + m.logViewport.View()
 }
 
-func (m model) renderHistoryTab() string {
+func (m model) renderHistoryTab(availHeight int) string {
 	if len(m.history) == 0 {
+		cardWidth := max(30, m.width-4)
+		padV := 0
+		if availHeight >= 5 {
+			padV = 1
+		}
 		return lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colDim).
-			Padding(1, 2).
+			Padding(padV, 2).
+			Width(cardWidth).
 			Render("まだ決着した申請はありません")
 	}
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(styleDim("決着履歴 (%d 件)  [↑/↓ で選択]\n"), len(m.history)))
 
-	maxItems := max(3, m.height-6)
+	maxItems := max(1, availHeight-1)
 	for i, h := range m.history {
 		if i >= maxItems {
 			sb.WriteString(styleDim(fmt.Sprintf("... 他 %d 件省略\n", len(m.history)-maxItems)))
@@ -832,22 +1128,30 @@ func (m model) renderHistoryTab() string {
 	return sb.String()
 }
 
-func (m model) renderAskingCard() string {
+func (m model) renderAskingCard(availHeight int) string {
 	var sb strings.Builder
 	sb.WriteString(styleTitle.Render("エージェントへの質問を入力") + "\n\n")
 	sb.WriteString(m.questionInput.View() + "\n\n")
 	sb.WriteString(styleDim("[Enter] 送信    [Esc] キャンセル"))
-	return styleModal.Width(max(30, m.width-6)).Render(sb.String())
+	padV := 0
+	if availHeight >= 7 {
+		padV = 1
+	}
+	return styleModal.Padding(padV, 2).Width(max(30, m.width-6)).Render(sb.String())
 }
 
-func (m model) renderQuitModal() string {
+func (m model) renderQuitModal(availHeight int) string {
 	var sb strings.Builder
 	sb.WriteString(styleTitle.Render("VM を破棄して終了しますか?") + "\n\n")
 	sb.WriteString(styleKey.Render("[y] 終了する") + "    " + styleDim("[n / Esc] キャンセル"))
-	return styleModal.Width(max(30, m.width-6)).Render(sb.String())
+	padV := 0
+	if availHeight >= 6 {
+		padV = 1
+	}
+	return styleModal.Padding(padV, 2).Width(max(30, m.width-6)).Render(sb.String())
 }
 
-func (m model) renderHelpModal() string {
+func (m model) renderHelpModal(availHeight int) string {
 	var sb strings.Builder
 	sb.WriteString(styleTitle.Render("quagent 承認コンソール ヘルプ") + "\n\n")
 	sb.WriteString("Tab / Shift+Tab   タブ切り替え (承認待ち / ログ / 履歴)\n")
@@ -858,7 +1162,11 @@ func (m model) renderHelpModal() string {
 	sb.WriteString("y / n             クリップボード/PRの許可・拒否\n")
 	sb.WriteString("Q / Ctrl+C        VM を破棄して終了確認\n\n")
 	sb.WriteString(styleDim("任意のキーまたは Esc で閉じる"))
-	return styleModal.Width(max(40, m.width-6)).Render(sb.String())
+	padV := 0
+	if availHeight >= 12 {
+		padV = 1
+	}
+	return styleModal.Padding(padV, 2).Width(max(40, m.width-6)).Render(sb.String())
 }
 
 func (m model) renderFooter() string {
@@ -896,7 +1204,7 @@ func RunClient(sock string) (err error) {
 	}()
 
 	m := newModel(sock)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	quitCh := make(chan struct{})
 	defer close(quitCh)
