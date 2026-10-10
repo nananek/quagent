@@ -2,11 +2,13 @@ package dockercache
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 func parseNPMPath(p string) (action, relPath, pkgName, version string, ok bool) {
@@ -127,9 +129,18 @@ func (s *Server) handleNPMTarball(w http.ResponseWriter, r *http.Request, relPat
 
 	// 2. キャッシュミス: 承認
 	if s.batch != nil {
-		if err := s.batch.RequestApproval("npm", pkgName, version); err != nil {
-			http.Error(w, fmt.Sprintf("Forbidden: %v", err), http.StatusForbidden)
-			return
+		if !s.batch.IsApproved("npm", pkgName) {
+			resolver := NewNPMResolver(s.client)
+			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+			defer cancel()
+			items, err := resolver.ResolveDependencies(ctx, pkgName, version, 200)
+			if err != nil || len(items) == 0 {
+				items = []BatchItem{{Ecosystem: "npm", Name: pkgName, Version: version}}
+			}
+			if err := s.batch.RequestApprovalItems("npm", items); err != nil {
+				http.Error(w, fmt.Sprintf("Forbidden: %v", err), http.StatusForbidden)
+				return
+			}
 		}
 	}
 

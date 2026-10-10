@@ -204,20 +204,10 @@ func TestAskBatchDownload(t *testing.T) {
 	}
 
 	var lastID int
-	ask := func(info BatchDownloadInfo) (chan struct {
-		kind access.Kind
-		err  error
-	}, Msg) {
-		resCh := make(chan struct {
-			kind access.Kind
-			err  error
-		}, 1)
+	ask := func(info BatchDownloadInfo) (chan error, Msg) {
+		resCh := make(chan error, 1)
 		go func() {
-			k, e := s.AskBatchDownload(info)
-			resCh <- struct {
-				kind access.Kind
-				err  error
-			}{k, e}
+			resCh <- s.AskBatchDownload(info)
 		}()
 		for {
 			_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
@@ -232,7 +222,7 @@ func TestAskBatchDownload(t *testing.T) {
 		}
 	}
 
-	// 1. 今回のみ承認 (access.Once)
+	// 1. 承認 (access.Approved)
 	resCh, req := ask(BatchDownloadInfo{
 		Ecosystem: "cargo",
 		Items:     []BatchItem{{Ecosystem: "cargo", Name: "serde", Version: "1.0.197"}},
@@ -240,28 +230,14 @@ func TestAskBatchDownload(t *testing.T) {
 	if req.BatchEcosystem != "cargo" || len(req.BatchItems) != 1 || req.BatchItems[0].Name != "serde" {
 		t.Fatalf("バッチリクエスト内容が違う: %+v", req)
 	}
-	if err := enc.Encode(Msg{Type: "batchdecide", ID: req.ID, Status: access.Approved, Kind: access.Once}); err != nil {
+	if err := enc.Encode(Msg{Type: "batchdecide", ID: req.ID, Status: access.Approved}); err != nil {
 		t.Fatal(err)
 	}
-	res := <-resCh
-	if res.err != nil || res.kind != access.Once {
-		t.Fatalf("Once 承認期待だが got kind=%v, err=%v", res.kind, res.err)
+	if err := <-resCh; err != nil {
+		t.Fatalf("承認期待だが got err=%v", err)
 	}
 
-	// 2. セッション承認 (access.Session)
-	resCh, req = ask(BatchDownloadInfo{
-		Ecosystem: "npm",
-		Items:     []BatchItem{{Ecosystem: "npm", Name: "express", Version: "4.18.2"}},
-	})
-	if err := enc.Encode(Msg{Type: "batchdecide", ID: req.ID, Status: access.Approved, Kind: access.Session}); err != nil {
-		t.Fatal(err)
-	}
-	res = <-resCh
-	if res.err != nil || res.kind != access.Session {
-		t.Fatalf("Session 承認期待だが got kind=%v, err=%v", res.kind, res.err)
-	}
-
-	// 3. 拒否
+	// 2. 拒否 (access.Denied)
 	resCh, req = ask(BatchDownloadInfo{
 		Ecosystem: "pypi",
 		Items:     []BatchItem{{Ecosystem: "pypi", Name: "malicious-pkg", Version: "0.1.0"}},
@@ -269,8 +245,7 @@ func TestAskBatchDownload(t *testing.T) {
 	if err := enc.Encode(Msg{Type: "batchdecide", ID: req.ID, Status: access.Denied}); err != nil {
 		t.Fatal(err)
 	}
-	res = <-resCh
-	if res.err == nil {
+	if err := <-resCh; err == nil {
 		t.Fatal("拒否したのに nil が返った")
 	}
 }
@@ -554,7 +529,7 @@ func TestTUIModelDecisions(t *testing.T) {
 	newM, _ = m.Update(socketMsg(Msg{Type: "dockersettled", ID: 3, Status: access.Approved}))
 	m = newM.(model)
 
-	// 3.6 batchrequest 要求 (y/1 で Once, a/2 で Session)
+	// 3.6 batchrequest 要求 (y/1 で Approved, n/d で Denied)
 	newM, _ = m.Update(socketMsg(Msg{
 		Type:           "batchrequest",
 		ID:             4,
@@ -566,13 +541,13 @@ func TestTUIModelDecisions(t *testing.T) {
 	m = newM.(model)
 	select {
 	case out := <-m.outChan:
-		if out.Type != "batchdecide" || out.Status != access.Approved || out.Kind != access.Once {
-			t.Errorf("expected Once batchdecide with key '1', got %+v", out)
+		if out.Type != "batchdecide" || out.Status != access.Approved {
+			t.Errorf("expected Approved batchdecide with key '1', got %+v", out)
 		}
 	default:
 		t.Fatal("expected batchdecide on outChan")
 	}
-	newM, _ = m.Update(socketMsg(Msg{Type: "batchsettled", ID: 4, Status: access.Approved, Kind: access.Once}))
+	newM, _ = m.Update(socketMsg(Msg{Type: "batchsettled", ID: 4, Status: access.Approved}))
 	m = newM.(model)
 
 	// 4. request 申請と決定 (1, 2, 3, d, q)
@@ -1016,7 +991,7 @@ func TestTUIModelMouseDecisions(t *testing.T) {
 	newM, _ = m.Update(socketMsg(Msg{Type: "clipsettled", ID: 11, Status: access.Approved}))
 	m = newM.(model)
 
-	// 3. batchrequest 要求に対するマウスクリック ([y] 今回承認 / [a] セッション承認 / [n] 拒否)
+	// 3. batchrequest 要求に対するマウスクリック ([y] 承認して取得 / [n] 拒否)
 	newM, _ = m.Update(socketMsg(Msg{
 		Type:           "batchrequest",
 		ID:             12,
@@ -1025,44 +1000,22 @@ func TestTUIModelMouseDecisions(t *testing.T) {
 	}))
 	m = newM.(model)
 
-	// [y] 今回承認 (X < 18)
+	// [y] 承認して取得 (X < 24)
 	newM, _ = m.Update(tea.MouseMsg{X: 10, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = newM.(model)
 	select {
 	case out := <-m.outChan:
-		if out.Type != "batchdecide" || out.Status != access.Approved || out.Kind != access.Once {
-			t.Errorf("expected batchdecide Once on mouse click, got %+v", out)
+		if out.Type != "batchdecide" || out.Status != access.Approved {
+			t.Errorf("expected batchdecide Approved on mouse click, got %+v", out)
 		}
 	default:
 		t.Fatal("expected batchdecide on outChan after mouse click")
 	}
 
-	newM, _ = m.Update(socketMsg(Msg{Type: "batchsettled", ID: 12, Status: access.Approved, Kind: access.Once}))
+	newM, _ = m.Update(socketMsg(Msg{Type: "batchsettled", ID: 12, Status: access.Approved}))
 	m = newM.(model)
 
-	// [a] セッション承認 (18 <= X < 40)
-	newM, _ = m.Update(socketMsg(Msg{
-		Type:           "batchrequest",
-		ID:             13,
-		BatchEcosystem: "pypi",
-		BatchItems:     []BatchItem{{Ecosystem: "pypi", Name: "jupyterlab", Version: "4.6.4"}},
-	}))
-	m = newM.(model)
-	newM, _ = m.Update(tea.MouseMsg{X: 25, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
-	m = newM.(model)
-	select {
-	case out := <-m.outChan:
-		if out.Type != "batchdecide" || out.Status != access.Approved || out.Kind != access.Session {
-			t.Errorf("expected batchdecide Session on mouse click, got %+v", out)
-		}
-	default:
-		t.Fatal("expected batchdecide Session on outChan after mouse click")
-	}
-
-	newM, _ = m.Update(socketMsg(Msg{Type: "batchsettled", ID: 13, Status: access.Approved, Kind: access.Session}))
-	m = newM.(model)
-
-	// [n] 拒否 (X >= 40)
+	// [n] 拒否 (X >= 24)
 	newM, _ = m.Update(socketMsg(Msg{
 		Type:           "batchrequest",
 		ID:             14,

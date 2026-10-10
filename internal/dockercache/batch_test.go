@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nananek/quagent/internal/access"
 	"github.com/nananek/quagent/internal/console"
 )
 
@@ -15,12 +14,12 @@ func TestBatchManagerAggregation(t *testing.T) {
 	var lastInfo console.BatchDownloadInfo
 	var mu sync.Mutex
 
-	askBatch := func(info console.BatchDownloadInfo) (access.Kind, error) {
+	askBatch := func(info console.BatchDownloadInfo) error {
 		atomic.AddInt32(&callCount, 1)
 		mu.Lock()
 		lastInfo = info
 		mu.Unlock()
-		return access.Once, nil
+		return nil
 	}
 
 	bm := NewBatchManager(askBatch)
@@ -55,38 +54,50 @@ func TestBatchManagerAggregation(t *testing.T) {
 	}
 }
 
-func TestBatchManagerSessionApproval(t *testing.T) {
+func TestBatchManagerPreResolvedItems(t *testing.T) {
 	var callCount int32
+	var lastInfo console.BatchDownloadInfo
+	var mu sync.Mutex
 
-	askBatch := func(info console.BatchDownloadInfo) (access.Kind, error) {
+	askBatch := func(info console.BatchDownloadInfo) error {
 		atomic.AddInt32(&callCount, 1)
-		return access.Session, nil // セッション承認
+		mu.Lock()
+		lastInfo = info
+		mu.Unlock()
+		return nil
 	}
 
 	bm := NewBatchManager(askBatch)
-	bm.Window = 30 * time.Millisecond
 
-	// 1回目
-	if err := bm.RequestApproval("npm", "lodash", "4.17.21"); err != nil {
+	// 事前解決で得られた 3 つのアイテムを一括承認
+	items := []BatchItem{
+		{Ecosystem: "pypi", Name: "jupyterlab", Version: "4.6.4"},
+		{Ecosystem: "pypi", Name: "async-lru", Version: "2.0.4"},
+		{Ecosystem: "pypi", Name: "httpx", Version: "0.27.0"},
+	}
+
+	if err := bm.RequestApprovalItems("pypi", items); err != nil {
 		t.Fatal(err)
 	}
+
 	if c := atomic.LoadInt32(&callCount); c != 1 {
 		t.Fatalf("expected 1 call, got %d", c)
 	}
-
-	// 2回目 (別のパッケージ) -> セッション承認済みなので即座に通るはず (AskBatch 呼び出しなし)
-	if err := bm.RequestApproval("npm", "express", "4.18.2"); err != nil {
-		t.Fatal(err)
+	if len(lastInfo.Items) != 3 {
+		t.Fatalf("expected 3 items, got %d", len(lastInfo.Items))
 	}
+
+	// 承認済みの各アイテムは個別の RequestApproval でも即座に通過する (AskBatch 呼び出しが増えない)
+	for _, it := range items {
+		if !bm.IsApproved("pypi", it.Name) {
+			t.Errorf("expected %s to be approved", it.Name)
+		}
+		if err := bm.RequestApproval("pypi", it.Name, it.Version); err != nil {
+			t.Errorf("RequestApproval error: %v", err)
+		}
+	}
+
 	if c := atomic.LoadInt32(&callCount); c != 1 {
-		t.Fatalf("expected still 1 call due to session approval, got %d", c)
-	}
-
-	// 別のエコシステム (go) -> まだセッション承認されていないので AskBatch されるはず
-	if err := bm.RequestApproval("go", "github.com/gin-gonic/gin", "v1.9.1"); err != nil {
-		t.Fatal(err)
-	}
-	if c := atomic.LoadInt32(&callCount); c != 2 {
-		t.Fatalf("expected 2 calls, got %d", c)
+		t.Fatalf("expected still 1 call, got %d", c)
 	}
 }
