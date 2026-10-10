@@ -39,7 +39,7 @@ var agents = map[string]agentSpec{
 # quagent: エージェントを起動する (終了したあと ↑ で呼び戻せる)
 cd /work
 # 更新確認とモデル一覧の取得は外へ出られず DNS の拒否が並ぶだけなので止める
-OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 opencode --auto /work`,
+OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 opencode --standalone --auto /work`,
 	},
 	"claude": {
 		setup: setupClaude,

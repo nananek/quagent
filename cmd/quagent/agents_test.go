@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nananek/quagent/internal/config"
@@ -195,5 +196,15 @@ func TestBuildOpencodeConfig(t *testing.T) {
 		if options["apiKey"] != token {
 			t.Errorf("provider[%q].options.apiKey = %v, want %v", id, options["apiKey"], token)
 		}
+	}
+}
+
+func TestOpencodeEntrypoint(t *testing.T) {
+	spec, ok := agents["opencode"]
+	if !ok {
+		t.Fatal("agents[opencode] not found")
+	}
+	if !strings.Contains(spec.entrypoint, "opencode --standalone --auto /work") {
+		t.Errorf("entrypoint does not contain '--standalone --auto /work': %q", spec.entrypoint)
 	}
 }
