@@ -1,4 +1,4 @@
-package dockercache
+package proxycache
 
 import (
 	"crypto/sha256"
@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -42,7 +43,7 @@ func NewStorage(rootDir string, maxSizeGiB int) (*Storage, error) {
 		maxSizeGiB = 10
 	}
 
-	for _, sub := range []string{"blobs/sha256", "manifests", "tmp"} {
+	for _, sub := range []string{"docker/blobs/sha256", "docker/manifests", "go", "cargo", "npm", "pypi", "tmp"} {
 		if err := os.MkdirAll(filepath.Join(rootDir, sub), 0755); err != nil {
 			return nil, fmt.Errorf("キャッシュディレクトリ作成失敗: %w", err)
 		}
@@ -60,7 +61,7 @@ func (s *Storage) blobPath(digest string) (string, error) {
 		return "", fmt.Errorf("不正な digest 形式: %s", digest)
 	}
 	hash := strings.TrimPrefix(digest, "sha256:")
-	return filepath.Join(s.rootDir, "blobs", "sha256", hash), nil
+	return filepath.Join(s.rootDir, "docker", "blobs", "sha256", hash), nil
 }
 
 // HasBlob は blob がキャッシュに存在するかを返す。
@@ -159,7 +160,7 @@ func (s *Storage) manifestPaths(registry, repository, reference string) (dataPat
 	if strings.Contains(registry, "..") || strings.Contains(repository, "..") || strings.Contains(reference, "..") {
 		return "", "", errors.New("不正なパス文字が含まれています")
 	}
-	dir := filepath.Join(s.rootDir, "manifests", registry, filepath.Clean(repository))
+	dir := filepath.Join(s.rootDir, "docker", "manifests", registry, filepath.Clean(repository))
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", "", err
 	}
@@ -228,32 +229,37 @@ type blobInfo struct {
 	modTime time.Time
 }
 
-// evictIfNeededLocked は blob の合計サイズが maxBytes を超えている場合、
-// 最も古い blob から順に削除する (s.mu 保持前提)。
+// evictIfNeededLocked はキャッシュ全体の合計サイズが maxBytes を超えている場合、
+// 最も古いファイルから順に削除する (s.mu 保持前提)。
 func (s *Storage) evictIfNeededLocked() {
-	blobsDir := filepath.Join(s.rootDir, "blobs", "sha256")
-	entries, err := os.ReadDir(blobsDir)
-	if err != nil {
-		return
-	}
-
-	var blobs []blobInfo
+	var files []blobInfo
 	var totalSize int64
 
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		blobs = append(blobs, blobInfo{
-			path:    filepath.Join(blobsDir, e.Name()),
-			size:    info.Size(),
-			modTime: info.ModTime(),
+	scanDirs := []string{
+		filepath.Join(s.rootDir, "docker", "blobs", "sha256"),
+		filepath.Join(s.rootDir, "go"),
+		filepath.Join(s.rootDir, "cargo"),
+		filepath.Join(s.rootDir, "npm"),
+		filepath.Join(s.rootDir, "pypi"),
+	}
+
+	for _, dir := range scanDirs {
+		_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			info, err := d.Info()
+			if err != nil {
+				return nil
+			}
+			files = append(files, blobInfo{
+				path:    p,
+				size:    info.Size(),
+				modTime: info.ModTime(),
+			})
+			totalSize += info.Size()
+			return nil
 		})
-		totalSize += info.Size()
 	}
 
 	if totalSize <= s.maxBytes {
@@ -261,11 +267,11 @@ func (s *Storage) evictIfNeededLocked() {
 	}
 
 	// 最も古い順 (modTime 昇順) にソート
-	sort.Slice(blobs, func(i, j int) bool {
-		return blobs[i].modTime.Before(blobs[j].modTime)
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].modTime.Before(files[j].modTime)
 	})
 
-	for _, b := range blobs {
+	for _, b := range files {
 		if totalSize <= s.maxBytes {
 			break
 		}
@@ -287,7 +293,7 @@ func (s *Storage) pkgFilePath(ecosystem, relPath string) (string, error) {
 	if strings.HasPrefix(cleanRel, "..") {
 		return "", errors.New("不正なパスです")
 	}
-	return filepath.Join(s.rootDir, "packages", ecosystem, cleanRel), nil
+	return filepath.Join(s.rootDir, ecosystem, cleanRel), nil
 }
 
 // HasPkgFile はパッケージキャッシュファイルが存在するかを返す。

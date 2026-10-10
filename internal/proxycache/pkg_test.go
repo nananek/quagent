@@ -1,4 +1,4 @@
-package dockercache
+package proxycache
 
 import (
 	"encoding/json"

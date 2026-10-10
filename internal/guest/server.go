@@ -24,17 +24,17 @@ import (
 // Serve が設定ファイルから読み、handle が起動のたびに起動役へ包む。テストでは nil。
 var SandboxPolicy *sandbox.Policy
 
-// GuestDockerPort は guest 内で Docker レジストリキャッシュの中継を待ち受けるポート。
-const GuestDockerPort = 5000
+// GuestProxyCachePort は guest 内でパッケージキャッシュプロキシの中継を待ち受けるポート。
+const GuestProxyCachePort = 5000
 
 // Serve は VM 内で vsock を待ち受け、host からのコマンドを実行する (`quagent __guest`)。
 // 実行するのはこのプロセスのユーザー (作業用の一般ユーザー) の権限。あわせて
 // 127.0.0.1:relayPort への接続を host の窓口 (vsock の hostPort) へ中継する。
-// hostDockerPort が 0 でなければ、127.0.0.1:GuestDockerPort への接続を host の
-// Docker キャッシュ窓口 (vsock の hostDockerPort) へ中継する。
+// hostProxyCachePort が 0 でなければ、127.0.0.1:GuestProxyCachePort への接続を host の
+// パッケージキャッシュ窓口 (vsock の hostProxyCachePort) へ中継する。
 // SandboxPolicy が有効なら、host から来たコマンドを起動役 (`__sandbox`) 経由で起動し、
 // 本人には外せない seccomp / Landlock をかける。
-func Serve(relayPort int, hostPort uint32, hostDockerPort uint32) error {
+func Serve(relayPort int, hostPort uint32, hostProxyCachePort uint32) error {
 	policy, err := sandbox.Load(sandbox.ConfigPath)
 	if err != nil {
 		return fmt.Errorf("sandbox の方針を読めない: %w", err)
@@ -63,13 +63,13 @@ func Serve(relayPort int, hostPort uint32, hostDockerPort uint32) error {
 		log.Printf("127.0.0.1:%d -> host の窓口 (vsock :%d) を中継", relayPort, hostPort)
 		go relay(rl, func() (net.Conn, error) { return vsock.Dial(vsock.Host, hostPort, nil) })
 	}
-	if hostDockerPort != 0 {
-		dl, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", GuestDockerPort))
+	if hostProxyCachePort != 0 {
+		dl, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", GuestProxyCachePort))
 		if err == nil {
-			log.Printf("127.0.0.1:%d -> host の Docker キャッシュ (vsock :%d) を中継", GuestDockerPort, hostDockerPort)
-			go relaySimple(dl, func() (net.Conn, error) { return vsock.Dial(vsock.Host, hostDockerPort, nil) })
+			log.Printf("127.0.0.1:%d -> host のパッケージキャッシュ (vsock :%d) を中継", GuestProxyCachePort, hostProxyCachePort)
+			go relaySimple(dl, func() (net.Conn, error) { return vsock.Dial(vsock.Host, hostProxyCachePort, nil) })
 		} else {
-			log.Printf("Docker キャッシュ中継の待ち受けに失敗: %v", err)
+			log.Printf("パッケージキャッシュ中継の待ち受けに失敗: %v", err)
 		}
 	}
 	return serve(&hostOnly{l})

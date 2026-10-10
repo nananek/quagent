@@ -54,7 +54,7 @@ CLI から直接操作することも可能です。
 quagent image recipes          # 利用可能なレシピ (OS) の一覧表示
 quagent image build arch       # ベースイメージのビルド (--refresh / --incremental 対応)
 quagent image ls / rm IMAGE    # ビルド済みイメージの一覧表示・削除
-quagent cache ls / clean       # Docker キャッシュの一覧表示・全削除
+quagent cache ls / clean       # キャッシュの一覧表示・全削除
 quagent run --image arch       # VM を起動 (--mount-tmp: .tmp をホスト・ゲスト間で同期)
 
 ```
@@ -192,6 +192,7 @@ VM からの新規アウトバウンド通信は既定ですべて遮断され�
   - **キャッシュヒット時:** 完全オフラインかつ承認不要で即座に高速返却されます。
   - **依存関係事前解決とバッチ集約承認 (連打防止):** キャッシュミス時に外部からダウンロードする際は、プロキシが上流メタデータから依存関係ツリーを事前に走査・解決し、必要な全パッケージ一覧をまとめて承認コンソールで一括確認（`[y]` 承認して取得 / `[n]` 拒否）を求めます。何十個もの依存パッケージも 1 回の承認でまとめて取得可能です。
   - **エコシステム対応:** Docker Hub (`docker.io`), `ghcr.io`, Go (`proxy.golang.org`), Cargo (`crates.io`), npm (`registry.npmjs.org`), PyPI (`pypi.org`) に標準対応。
+  - **保存先:** ホスト側の `~/.cache/quagent/proxy/` 配下に統一されています（Docker は `docker/blobs/`, `docker/manifests/`、言語パッケージは `go/`, `cargo/`, `npm/`, `pypi/`）。保存先と容量上限は `~/.config/quagent/config.json` の `cache`（`dir`, `max_size_gib`）で変更できます。
   - **管理:** `quagent cache ls` で各エコシステムのキャッシュ状況の確認、`quagent cache clean [ecosystem]` または TUI から削除が可能です。
 
 ---
