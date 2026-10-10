@@ -218,6 +218,37 @@ func TestUserDataTemplates(t *testing.T) {
 	}
 }
 
+// 展開後の user-data に行頭から始まる不正な行が無いこと。write_files の
+// リテラルブロック (`content: |`) の中に行頭の行 (ヒアドキュメントの本体や
+// 終端など) があると YAML 全体が壊れ、cloud-init が何も実行せず VM が
+// 放置される (ビルドがタイムアウトまで終わらない)。
+func TestUserDataNoColumnZeroContent(t *testing.T) {
+	rs, err := Recipes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rs {
+		tmpl, err := template.New("user-data").Parse(r.userData)
+		if err != nil {
+			t.Fatalf("%s: %v", r.Name, err)
+		}
+		var b bytes.Buffer
+		if err := tmpl.Execute(&b, map[string]string{"User": "agent", "Marker": "QUAGENT_BUILD_OK"}); err != nil {
+			t.Fatalf("%s: %v", r.Name, err)
+		}
+		for i, line := range strings.Split(b.String(), "\n") {
+			if line == "" || strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") ||
+				strings.HasPrefix(line, "#") || line == "---" || line == "..." {
+				continue
+			}
+			// トップレベルのマッピングキー (例: users:) だけが行頭に来られる。
+			if !strings.Contains(line, ":") {
+				t.Errorf("%s の %d 行目が行頭から始まり YAML を壊す: %q", r.Name, i+1, line)
+			}
+		}
+	}
+}
+
 // 付帯情報は既定 (bios) では書かず、uefi のときだけ書いて読める。
 func TestImageMeta(t *testing.T) {
 	dir := t.TempDir()
