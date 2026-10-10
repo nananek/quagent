@@ -51,13 +51,84 @@ func TokenFile() string {
 	return filepath.Join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token")
 }
 
+// RefreshSource はサブスクリプション用の長期 refresh_token の取り出し方。
+// すべて空ならトークンファイル (TokenFile) を読む。config の agy の
+// refresh_token_env / refresh_token_file / refresh_token_command に対応する。
+type RefreshSource struct {
+	Env     string
+	File    string
+	Command []string
+}
+
+// Configured は取り出し方が指定されているか (ファイル読みではないか) を返す。
+func (s RefreshSource) Configured() bool {
+	return s.Env != "" || s.File != "" || len(s.Command) > 0
+}
+
+// fetch は取り出し方に従って素の出力 (JSON または refresh_token そのもの) を返す。
+// 秘密は host のプロセス内だけで使い、guest には渡さない。
+func (s RefreshSource) fetch() (string, error) {
+	var raw []byte
+	var err error
+	switch {
+	case s.Env != "":
+		v, ok := os.LookupEnv(s.Env)
+		if !ok {
+			return "", fmt.Errorf("環境変数 %s が未設定", s.Env)
+		}
+		raw = []byte(v)
+	case s.File != "":
+		raw, err = os.ReadFile(expandHome(s.File))
+	case len(s.Command) > 0:
+		cmd := exec.Command(s.Command[0], s.Command[1:]...)
+		cmd.Stderr = os.Stderr
+		raw, err = cmd.Output()
+	default:
+		return "", fmt.Errorf("refresh_token_env / refresh_token_file / refresh_token_command のどれかが必要")
+	}
+	if err != nil {
+		return "", err
+	}
+	out := strings.TrimSpace(string(raw))
+	if out == "" {
+		return "", fmt.Errorf("refresh_token の取り出し方の出力が空")
+	}
+	return out, nil
+}
+
+// extractRefreshToken は取り出し方の出力から長期の refresh_token を抜く。
+// トークンファイルと同じ JSON (token.refresh_token) ならそれを抜き、
+// そうでなければ出力全体を素の refresh_token とみなす。
+func extractRefreshToken(out string) (string, error) {
+	var t struct {
+		Token struct {
+			RefreshToken string `json:"refresh_token"`
+		} `json:"token"`
+	}
+	if err := json.Unmarshal([]byte(out), &t); err == nil {
+		if t.Token.RefreshToken == "" {
+			return "", fmt.Errorf("出力に token.refresh_token が無い (agy にログインし直すか、取り出し方の出力を確かめる)")
+		}
+		return t.Token.RefreshToken, nil
+	}
+	return out, nil
+}
+
+func expandHome(p string) string {
+	if rest, ok := strings.CutPrefix(p, "~/"); ok {
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, rest)
+	}
+	return p
+}
+
 // CheckLogin は host の agy にログイン済みかだけを確かめる (通信なし)。
 // VM を起動する前に失敗を返せるよう、run 開始直後の検査用。
-func CheckLogin() error {
+func CheckLogin(src RefreshSource) error {
 	if _, err := exec.LookPath("agy"); err != nil {
 		return fmt.Errorf("agy が見つからない: %w", err)
 	}
-	if _, err := refreshToken(); err != nil {
+	if _, err := refreshTokenFrom(src); err != nil {
 		return err
 	}
 	return nil
@@ -71,8 +142,8 @@ const WarmupTimeout = 60 * time.Second
 // コマンド終了でプロセスは必ず終わる (起動しっぱなしにしない)。
 // 先にホストで起動しておかないとゲスト側で失敗することがあるため、
 // VM 起動前 (および agy への切り替え前) に呼ぶ。
-func Warmup(ctx context.Context) error {
-	if err := CheckLogin(); err != nil {
+func Warmup(ctx context.Context, src RefreshSource) error {
+	if err := CheckLogin(src); err != nil {
 		return err
 	}
 	if ctx == nil {
@@ -98,8 +169,16 @@ func Warmup(ctx context.Context) error {
 	return nil
 }
 
-// refreshToken はトークンファイルから長期の refresh_token を読む。
-func refreshToken() (string, error) {
+// refreshTokenFrom は長期の refresh_token を読む。取り出し方 (src) が指定されて
+// いればそれを使い、無ければトークンファイルを読む (agy がファイルに書く場合)。
+func refreshTokenFrom(src RefreshSource) (string, error) {
+	if src.Configured() {
+		out, err := src.fetch()
+		if err != nil {
+			return "", err
+		}
+		return extractRefreshToken(out)
+	}
 	path := TokenFile()
 	if path == "" {
 		return "", fmt.Errorf("ホームディレクトリが分からない")
@@ -128,6 +207,7 @@ type Minter struct {
 	token  string
 	expiry time.Time
 	cred   credentials
+	src    RefreshSource
 	mint   func() (string, error)
 }
 
@@ -136,9 +216,9 @@ type credentials struct {
 	id, secret string
 }
 
-// NewMinter は Minter を作る。
-func NewMinter() *Minter {
-	m := &Minter{}
+// NewMinter は Minter を作る。src が空ならトークンファイルを読む。
+func NewMinter(src RefreshSource) *Minter {
+	m := &Minter{src: src}
 	m.mint = m.refresh
 	return m
 }
@@ -152,7 +232,7 @@ func (m *Minter) Token() (string, error) {
 	}
 	mintFn := m.mint
 	if mintFn == nil {
-		mintFn = NewMinter().refresh
+		mintFn = NewMinter(m.src).refresh
 	}
 	tok, err := mintFn()
 	if err != nil {
@@ -165,11 +245,11 @@ func (m *Minter) Token() (string, error) {
 
 // Mint は refresh_token から新しいアクセストークンを 1 つ作る (guest の
 // トークンファイルの種に使う。長持ちはしないので推論には Minter を使う)。
-func Mint() (string, error) { return NewMinter().refresh() }
+func Mint(src RefreshSource) (string, error) { return NewMinter(src).refresh() }
 
 // refresh は Minter の作り直し (覚えたクライアント情報を使い回す)。
 func (m *Minter) refresh() (string, error) {
-	rt, err := refreshToken()
+	rt, err := refreshTokenFrom(m.src)
 	if err != nil {
 		return "", err
 	}

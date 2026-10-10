@@ -330,6 +330,16 @@ func agyColorScheme(cfg *config.Config) string {
 	return host.ColorScheme
 }
 
+// agyRefreshSource は host の agy のサブスクリプション用の長期 refresh_token の
+// 取り出し方を config から作る。未指定ならトークンファイルを読む。
+func agyRefreshSource(cfg *config.Config) antigravity.RefreshSource {
+	return antigravity.RefreshSource{
+		Env:     cfg.Agy.RefreshTokenEnv,
+		File:    cfg.Agy.RefreshTokenFile,
+		Command: cfg.Agy.RefreshTokenCommand,
+	}
+}
+
 // setupAgySubscription は agy が host のサブスクリプション (OAuth ログイン) を
 // 認証プロキシ経由で使うよう設定する。API キーは要らない。guest の agy は普段の
 // OAuth 経路で動くが、向き先 (CLOUD_CODE_URL) だけプロキシに向け、送ってきた合言葉は

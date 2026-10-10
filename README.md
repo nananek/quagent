@@ -126,6 +126,16 @@ API キー等の認証情報は VM 内には配置しません。ホスト側の
   }
   ```
   ※ ホスト側の OAuth ログイン情報から一時トークンを生成してプロキシが付与します（長期トークンは VM に渡りません）。
+  ※ 長期の `refresh_token` は既定でホストのトークンファイル (`~/.gemini/antigravity-cli/antigravity-oauth-token`) から読みます。agy がトークンを secret-service (キーリング) に書く環境や、`pass` 等で別管理している場合は、以下で取り出し方を指定します (出力はトークンファイルと同じ JSON でも素の `refresh_token` でも可):
+  ```json
+  {
+    "agy": {
+      "subscription": true,
+      "refresh_token_command": ["pass", "show", "secret-service/Default/password_for_antigravity_on_gemini__gl2m"]
+    }
+  }
+  ```
+  `refresh_token_env` (環境変数名)、`refresh_token_file` (ファイルパス) も使えます。secret-service を直接読む場合は `["secret-tool", "lookup", ...]` を `refresh_token_command` に指定します。
 
 - **機密情報の取得方法:** `secret_command`（コマンド実行）、`secret_env`（環境変数）、`secret_file`（ファイルパス）から選択できます。
 
