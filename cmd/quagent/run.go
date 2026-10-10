@@ -1070,6 +1070,10 @@ func runTmux(session string, agent, consoleArgv []string, quit <-chan struct{}) 
 		logf("%v", err)
 		_ = tmux("set-option", "-t", session, "detach-on-destroy", "off")
 	}
+	// マウス操作を有効にして、承認コンソールのボタンクリックやスクロール、ペイン操作を行えるようにする
+	if err := tmux("set-option", "-t", session, "mouse", "on"); err != nil {
+		logf("%v", err)
+	}
 	if err := tmux(append([]string{"split-window", "-v", "-l", "30%", "-t", session + ":"}, consoleArgv...)...); err != nil {
 		return err
 	}

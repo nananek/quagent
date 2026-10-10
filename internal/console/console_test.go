@@ -738,3 +738,116 @@ func TestTUIModelView(t *testing.T) {
 		t.Errorf("quit modal view unexpected: %q", view)
 	}
 }
+
+func TestTUIModelMouseTabSwitching(t *testing.T) {
+	m := newModel("test.sock")
+	newM, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	m = newM.(model)
+
+	if m.activeTab != tabPending {
+		t.Fatalf("expected initial tab tabPending, got %d", m.activeTab)
+	}
+
+	// タブ2 (ログ) の位置 (X: 40, Y: 0) をクリック
+	newM, _ = m.Update(tea.MouseMsg{X: 40, Y: 0, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = newM.(model)
+	if m.activeTab != tabLogs {
+		t.Fatalf("expected tabLogs after click, got %d", m.activeTab)
+	}
+
+	// タブ3 (履歴) の位置 (X: 52, Y: 0) をクリック
+	newM, _ = m.Update(tea.MouseMsg{X: 52, Y: 0, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = newM.(model)
+	if m.activeTab != tabHistory {
+		t.Fatalf("expected tabHistory after click, got %d", m.activeTab)
+	}
+
+	// タブ1 (承認待ち) の位置 (X: 28, Y: 0) をクリック
+	newM, _ = m.Update(tea.MouseMsg{X: 28, Y: 0, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = newM.(model)
+	if m.activeTab != tabPending {
+		t.Fatalf("expected tabPending after click, got %d", m.activeTab)
+	}
+}
+
+func TestTUIModelMouseDecisions(t *testing.T) {
+	m := newModel("test.sock")
+	newM, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	m = newM.(model)
+
+	// 1. request 申請に対するマウスクリック ([1] 今回のみ)
+	newM, _ = m.Update(socketMsg(Msg{Type: "request", ID: 10, Domains: []string{"example.com"}}))
+	m = newM.(model)
+
+	newM, _ = m.Update(tea.MouseMsg{X: 10, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = newM.(model)
+	select {
+	case out := <-m.outChan:
+		if out.Type != "decide" || out.Kind != access.Once {
+			t.Errorf("expected decide Once on mouse click, got %+v", out)
+		}
+	default:
+		t.Fatal("expected decide on outChan after mouse click")
+	}
+
+	// 決着
+	newM, _ = m.Update(socketMsg(Msg{Type: "settled", ID: 10, Status: access.Approved, Kind: access.Once}))
+	m = newM.(model)
+
+	// 2. clip 要求に対するマウスクリック ([y] コピー許可)
+	newM, _ = m.Update(socketMsg(Msg{Type: "clip", ID: 11, Text: "clip test"}))
+	m = newM.(model)
+
+	newM, _ = m.Update(tea.MouseMsg{X: 10, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = newM.(model)
+	select {
+	case out := <-m.outChan:
+		if out.Type != "clipdecide" || out.Status != access.Approved {
+			t.Errorf("expected clipdecide Approved on mouse click, got %+v", out)
+		}
+	default:
+		t.Fatal("expected clipdecide on outChan after mouse click")
+	}
+}
+
+func TestTUIModelMouseScrollAndModals(t *testing.T) {
+	m := newModel("test.sock")
+	newM, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	m = newM.(model)
+
+	// ログタブに切り替えてスクロール
+	m.activeTab = tabLogs
+	newM, _ = m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp})
+	m = newM.(model)
+	if m.logAutoScroll {
+		t.Error("expected logAutoScroll=false after wheel up")
+	}
+
+	// フッターで [?] ヘルプをクリック (X: 80, Y: 23)
+	newM, _ = m.Update(tea.MouseMsg{X: 80, Y: 23, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = newM.(model)
+	if !m.showHelp {
+		t.Error("expected showHelp=true after clicking help in footer")
+	}
+
+	// 画面クリックでヘルプを閉じる
+	newM, _ = m.Update(tea.MouseMsg{X: 50, Y: 10, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = newM.(model)
+	if m.showHelp {
+		t.Error("expected showHelp=false after clicking screen")
+	}
+
+	// フッターで [Q] 終了をクリック (X: 95, Y: 23)
+	newM, _ = m.Update(tea.MouseMsg{X: 95, Y: 23, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = newM.(model)
+	if !m.quiting {
+		t.Error("expected quiting=true after clicking quit in footer")
+	}
+
+	// キャンセル (右半分をクリック)
+	newM, _ = m.Update(tea.MouseMsg{X: 80, Y: 10, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = newM.(model)
+	if m.quiting {
+		t.Error("expected quiting=false after clicking cancel on quit modal")
+	}
+}
