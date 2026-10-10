@@ -146,6 +146,7 @@ func TestRegisterDynamicBadUpstream(t *testing.T) {
 		t.Fatal("expected error for non-https upstream")
 	}
 
+	// ホスト名なし
 	err = RegisterDynamic(mux, "test", "https://", "Authorization",
 		func() (string, error) { return "tok", nil }, nil, log.New(io.Discard, "", 0), nil, nil)
 	if err == nil {
@@ -213,4 +214,3 @@ func TestZenAliasesAndDeduplication(t *testing.T) {
 		t.Errorf("deduplicated path = %q, want '/zen/go/v1/chat/completions'", prReq.Out.URL.Path)
 	}
 }
-

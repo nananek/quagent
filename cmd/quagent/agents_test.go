@@ -197,4 +197,3 @@ func TestBuildOpencodeConfig(t *testing.T) {
 		}
 	}
 }
-

@@ -461,4 +461,3 @@ func TestEffectiveProviders(t *testing.T) {
 		t.Errorf("expected nil for nil config, got %+v", effNil)
 	}
 }
-
