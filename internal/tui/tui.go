@@ -23,7 +23,6 @@ import (
 	"github.com/nananek/quagent/internal/paths"
 )
 
-
 // Launch は TUI で決めた起動設定。
 type Launch struct {
 	Repo   string `json:"repo"`
@@ -173,7 +172,6 @@ func cleanCacheMenu() error {
 	}
 	return newForm(huh.NewGroup(huh.NewNote().Title("完了").Description("Docker キャッシュを全削除しました。"))).Run()
 }
-
 
 // AfterChoice はエージェントのセッションが終わったあとに選んだ次の操作。
 type AfterChoice struct {

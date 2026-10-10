@@ -1172,7 +1172,6 @@ func (m model) renderActionButtons(r Msg, isHoverRow bool) string {
 		}
 		return strY + "    " + strN
 
-
 	case "relaxrequest":
 		// [1] 今回のみ (5分)    [2] セッション許可    [d] 拒否    [q] 質問を返す
 		btn1 := "[1] 今回のみ (5分)"

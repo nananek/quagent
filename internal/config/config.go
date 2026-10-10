@@ -178,7 +178,6 @@ func (p *DockerCachePolicy) DirResolved() string {
 	return paths.DockerCacheDir()
 }
 
-
 // ResourcePolicyOrDefault は設定が存在すれば既定値を補完して返し、
 // 未設定ならデフォルトを返す。
 func (c *Config) ResourcePolicyOrDefault() ResourcePolicy {

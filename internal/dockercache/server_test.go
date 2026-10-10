@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -72,8 +71,8 @@ func TestParsePath(t *testing.T) {
 			wantOK:       true,
 		},
 		{
-			path:         "/v2/invalid",
-			wantOK:       false,
+			path:   "/v2/invalid",
+			wantOK: false,
 		},
 	}
 

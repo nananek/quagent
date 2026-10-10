@@ -91,4 +91,3 @@ func GenerateDockerDaemonJSON(seccompProfilePath string, registryMirrors ...stri
 	}
 	return json.MarshalIndent(cfg, "", "  ")
 }
-

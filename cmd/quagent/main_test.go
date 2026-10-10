@@ -98,7 +98,6 @@ func TestDispatchCache(t *testing.T) {
 	}
 }
 
-
 func TestCmdRunArgErrors(t *testing.T) {
 	// 不正なエージェント名
 	if err := cmdRun([]string{"--agent", "unknown_agent"}); err == nil {

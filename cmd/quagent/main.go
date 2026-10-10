@@ -24,7 +24,6 @@ import (
 	"github.com/nananek/quagent/internal/tui"
 )
 
-
 const usage = `usage:
   quagent                                      TUI (VM の起動設定とベースイメージの管理)
   quagent image recipes                        使えるレシピ (OS) の一覧
@@ -297,7 +296,6 @@ func cmdCache(args []string) error {
 	}
 	return fmt.Errorf("cache: ls または clean を指定してください")
 }
-
 
 // consoleCommand は承認コンソール UI を動かす隠しサブコマンド名。
 const consoleCommand = "__console"

@@ -34,11 +34,11 @@ type tokenEntry struct {
 
 // BaseUpstream は一般的な OCI レジストリの共通実装。
 type BaseUpstream struct {
-	name       string
+	name        string
 	registryURL string
-	tokenURL   string
-	service    string
-	client     *http.Client
+	tokenURL    string
+	service     string
+	client      *http.Client
 
 	mu     sync.Mutex
 	tokens map[string]tokenEntry // key: repository

@@ -452,7 +452,6 @@ func run(o runOpts) error {
 			cacheSrv.Port, cfg.DockerCache.DirResolved(), cfg.DockerCache.MaxSizeGiBResolved())
 	}
 
-
 	// VM の受け口 (quagent 自身) を seed に入れ、cloud-init で常駐させる。
 	// ssh は完全に停止する (vsock 経由のみ)。
 	tmpCmd := ""

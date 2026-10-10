@@ -75,7 +75,6 @@ func Serve(relayPort int, hostPort uint32, hostDockerPort uint32) error {
 	return serve(&hostOnly{l})
 }
 
-
 // hostOnly は host (CID 2) 以外からの接続を切る。ほかの VM や、VM の中から自分自身への
 // vsock の接続はここで落とす。
 type hostOnly struct{ net.Listener }
@@ -179,7 +178,6 @@ func relaySimple(l net.Listener, dial func() (net.Conn, error)) {
 		}()
 	}
 }
-
 
 // maxGuestConns は VM 内の受け口で同時に受け付けるコマンド接続の上限。
 const maxGuestConns = 64

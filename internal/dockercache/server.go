@@ -35,7 +35,6 @@ type Server struct {
 	approvedRepos map[string]bool // key: "registry/repository"
 }
 
-
 // NewServer は新しい Server を作成する。
 func NewServer(storage *Storage, dockerHub, ghcr Upstream) *Server {
 	if dockerHub == nil {
@@ -362,4 +361,3 @@ func (c *guardConn) Close() error {
 	c.once.Do(func() { <-c.sem })
 	return c.Conn.Close()
 }
-

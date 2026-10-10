@@ -127,4 +127,3 @@ func TestGenerateDockerDaemonJSON(t *testing.T) {
 		t.Errorf("unexpected registry-mirrors: %v", cfgWithMirrors.RegistryMirrors)
 	}
 }
-

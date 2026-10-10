@@ -28,9 +28,9 @@ type Storage struct {
 
 // ManifestMeta はキャッシュされたマニフェストのヘッダー情報。
 type ManifestMeta struct {
-	ContentType   string `json:"content_type"`
-	Digest        string `json:"digest"`
-	CachedAt      time.Time `json:"cached_at"`
+	ContentType string    `json:"content_type"`
+	Digest      string    `json:"digest"`
+	CachedAt    time.Time `json:"cached_at"`
 }
 
 // NewStorage は指定されたディレクトリと最大容量で Storage を作成する。

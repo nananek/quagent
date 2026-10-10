@@ -112,9 +112,26 @@ func TestAskPR(t *testing.T) {
 }
 
 func TestAskDockerDownload(t *testing.T) {
-	s, c, enc, dec := startPair(t)
-	defer s.Close()
-	defer c.Close()
+	sock := filepath.Join(t.TempDir(), "console.sock")
+	m, err := access.NewManager(noApply{}, filepath.Join(t.TempDir(), "always.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(m, sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+
+	c, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	enc, dec := json.NewEncoder(c), json.NewDecoder(c)
+	if err := enc.Encode(Msg{Type: "ui"}); err != nil {
+		t.Fatal(err)
+	}
 
 	var lastID int
 	ask := func(info DockerImageInfo) (chan error, Msg) {
@@ -163,7 +180,6 @@ func TestAskDockerDownload(t *testing.T) {
 		t.Fatal("拒否したのに nil が返った")
 	}
 }
-
 
 func TestClipboardPreview(t *testing.T) {
 	// 1. 通常テキスト

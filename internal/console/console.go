@@ -56,7 +56,6 @@ type Msg struct {
 	DockerReference  string `json:"docker_reference,omitempty"`
 }
 
-
 const (
 	writeTimeout = 2 * time.Second // UI が受け取らなくても本体が止まらないように
 	maxBacklog   = 200             // UI が繋がる前に溜めるログ
@@ -129,7 +128,6 @@ type dockerRequest struct {
 	status   access.Status
 	approved bool
 }
-
 
 // NewServer は sock で待ち受ける Server を作る。
 func NewServer(m *access.Manager, sock string) (*Server, error) {
@@ -266,7 +264,6 @@ func (s *Server) register(cl *client) {
 	s.dockerMu.Unlock()
 	s.clients[cl] = true
 }
-
 
 func requestMsg(r *access.Request) Msg {
 	return Msg{Type: "request", ID: r.ID, Domains: r.Domains, Reason: r.Reason,
@@ -406,7 +403,6 @@ func dockerRequestMsg(r *dockerRequest) Msg {
 		Deadline:         r.created.Add(access.DecisionTimeout).Format("15:04:05"),
 	}
 }
-
 
 // watch は新しい申請を UI に送り、決着した申請 (時間切れを含む) を知らせる。
 func (s *Server) watch() {
