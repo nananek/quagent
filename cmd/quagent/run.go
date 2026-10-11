@@ -190,6 +190,10 @@ func run(o runOpts) error {
 	// ヘッダの制限 (header_policy) は、HTTPS を平文に戻さないと掛けられないので、
 	// 有効なら TLS を終端する (使い捨て CA)。passthrough_https の行き先は終端しない。
 	headersOn := cfg.HeaderPolicy != nil && cfg.HeaderPolicy.Enabled
+	// Content Guard (DLP) はリクエストを平文に戻さないと検査できない。DLP が有効なら
+	// header_policy の有無に関わらず HTTPS を TLS 終端する (使い捨て CA を使う)。
+	dlpOn := cfg.ContentGuard.IsEnabled()
+	tlsTermOn := headersOn || dlpOn
 	var passthrough []string
 	if cfg.HeaderPolicy != nil {
 		passthrough, err = normalizePassthrough(cfg.HeaderPolicy.Passthrough)
@@ -325,7 +329,7 @@ func run(o runOpts) error {
 	// guest の信頼ストアに入れ、秘密鍵は host の作業ディレクトリ (0700) から出さない。
 	var ca *tlsmitm.CA
 	var caCert string
-	if headersOn {
+	if tlsTermOn {
 		ca, err = tlsmitm.NewCA()
 		if err != nil {
 			return fmt.Errorf("TLS 終端の CA を作れない: %w", err)
@@ -337,6 +341,9 @@ func run(o runOpts) error {
 		if len(passthrough) > 0 {
 			logf("注意: %s は終端せず素通しするので、ヘッダは絞れない", strings.Join(passthrough, ", "))
 		}
+	}
+	if dlpOn && !headersOn {
+		logf("Content Guard (DLP) のため HTTPS を使い捨て CA で TLS 終端する")
 	}
 	cfg.Providers = cfg.EffectiveProviders()
 	providers, err := authproxy.Register(svc.Mux, cfg.Providers, logger, func(s string) {
@@ -633,7 +640,7 @@ runcmd:
 	} else {
 		logf("QEMU サンドボックス: 有効 (名前空間分離、ディレクトリ最小化、Landlock、Seccomp)")
 	}
-	if headersOn {
+	if tlsTermOn {
 		keyPEM, err := ca.KeyPEM()
 		if err != nil {
 			return fmt.Errorf("TLS 終端の CA の鍵を書き出せない: %w", err)
@@ -648,7 +655,6 @@ runcmd:
 	if headersOn {
 		spec.HeaderPolicy = cfg.HeaderPolicy
 	}
-	dlpOn := cfg.ContentGuard.IsEnabled()
 	spec.DLPEnabled = dlpOn
 	if dlpOn {
 		logf("Content Guard (DLP / DNS トンネリング検知): 有効")

@@ -181,7 +181,7 @@ func TestDetectTunneling(t *testing.T) {
 		},
 		{
 			name:        "Suspicious query type TXT with long label",
-			query:       "data-exfiltration-payload-chunk-01.example.com",
+			query:       strings.Repeat("a", 35) + ".example.com",
 			qtype:       dnsmessage.TypeTXT,
 			wantBlocked: true,
 			wantReason:  "異常なクエリタイプ",

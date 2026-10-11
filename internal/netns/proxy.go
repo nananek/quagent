@@ -172,7 +172,9 @@ func (p *webProxy) terminates(name string) bool {
 // handleHTTP は 80 の接続を扱う。ヘッダの制限が有効なら Host を確かめたうえで
 // リクエストごとにヘッダを絞る (無いときは Host だけ確かめて素通しする)。
 func (p *webProxy) handleHTTP(c net.Conn, dst string) {
-	if p.headers != nil {
+	// ヘッダ制限・動的緩和・DLP のいずれかが有効なら、リクエストを解析して
+	// 検査する (平文 HTTP も DLP の対象)。どれも無ければ Host だけ確認して素通しする。
+	if p.headers != nil || p.dlp != nil || p.hasRelaxations() {
 		_ = c.SetDeadline(time.Time{})
 		p.serveHTTP1(c, bufio.NewReader(c), dst, "", false)
 		return

@@ -280,9 +280,9 @@ func detectTunneling(name string, qtype dnsmessage.Type) (suspicious bool, reaso
 	}
 
 	labels := strings.Split(name, ".")
-	// 2. サブドメイン階層数 (6 階層超のラベルは異常)
-	if len(labels) > 6 {
-		return true, fmt.Sprintf("サブドメイン階層過大 (%d階層 > 6)", len(labels))
+	// 2. サブドメイン階層数 (6 階層以上のラベルは異常)
+	if len(labels) >= 6 {
+		return true, fmt.Sprintf("サブドメイン階層過大 (%d階層 >= 6)", len(labels))
 	}
 
 	for _, label := range labels {
@@ -291,17 +291,23 @@ func detectTunneling(name string, qtype dnsmessage.Type) (suspicious bool, reaso
 			return true, fmt.Sprintf("ラベル長過大 (%d文字 > 45)", len(label))
 		}
 
-		// 4. シャノンエントロピー (25 文字以上のラベルでエントロピー > 4.2 bits/char)
+		// 4. シャノンエントロピー (25 文字以上のラベルでエントロピー > 3.8 bits/char)
 		if len(label) >= 25 {
 			ent := shannonEntropy(label)
-			if ent > 4.2 {
-				return true, fmt.Sprintf("高エントロピーラベル検知 (%.2f bits/char > 4.2, 長さ %d)", ent, len(label))
+			if ent > 3.8 {
+				return true, fmt.Sprintf("高エントロピーラベル検知 (%.2f bits/char > 3.8, 長さ %d)", ent, len(label))
 			}
 		}
 	}
 
-	// 5. 不審なレコードタイプ (TXT などでの持ち出し試行)
-	if qtype == dnsmessage.TypeTXT {
+	// 5. 不審なレコードタイプ (TXT/NULL/ANY などでの持ち出し試行)
+	// dnsmessage に NULL/ANY の定数が無いので番号で指定する。
+	const (
+		typeNULL dnsmessage.Type = 10
+		typeANY  dnsmessage.Type = 255
+	)
+	switch qtype {
+	case dnsmessage.TypeTXT, typeNULL, typeANY:
 		// 通常の A/AAAA 以外のクエリで、先頭ラベルが 30 文字以上ある場合はトンネリングと判断
 		if len(labels) > 0 && len(labels[0]) > 30 {
 			return true, fmt.Sprintf("異常なクエリタイプ (%s) かつ 長大ラベル", qtype.String())

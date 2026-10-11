@@ -1435,8 +1435,8 @@ func (m model) renderHistoryTab(availHeight int) string {
 			h.SettledAt.Format("15:04:05"),
 			h.ID,
 			h.Type,
-			truncateRunes(h.Target, 30),
-			lipgloss.NewStyle().Bold(true).Foreground(statusColor).Render(h.Result),
+			truncateRunes(Sanitize(h.Target), 30),
+			lipgloss.NewStyle().Bold(true).Foreground(statusColor).Render(Sanitize(h.Result)),
 		)
 
 		isRowHover := m.mouseIn && (m.mouseY == i+2 || m.mouseY == i+3)

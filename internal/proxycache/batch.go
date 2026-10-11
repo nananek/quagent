@@ -30,10 +30,14 @@ type BatchManager struct {
 	pendingQueues map[string]*batchQueue // ecosystem -> queue
 }
 
-// normalizeItemKey はエコシステムとパッケージ名から統一的なキーを生成する。
+// normalizeItemKey はエコシステムごとの規則でパッケージ名を正規化し、承認キーを作る。
+// 規則をまたいで潰すと、承認ダイアログに出ていない別パッケージが承認扱いになる。
 func normalizeItemKey(ecosystem, name string) string {
-	n := strings.ToLower(strings.TrimSpace(name))
-	n = strings.ReplaceAll(n, "_", "-")
+	n := strings.TrimSpace(name)
+	if ecosystem == "pypi" {
+		// PyPI は PEP 503 に従い小文字化し、- . _ を - に畳む。
+		n = normalizePyPIName(n)
+	}
 	return ecosystem + ":" + n
 }
 
