@@ -136,6 +136,15 @@ func (p *webProxy) serveHTTP1(client net.Conn, br *bufio.Reader, dst, name strin
 				p.block("Host " + host)
 				return
 			}
+		} else {
+			// TLS 終端した HTTPS は、リクエストの Host が接続時の SNI と一致することを
+			// 確かめる (h2 経路と同じ)。共有 CDN で SNI と Host をずらし、許可ドメインの
+			// 接続を通して別サイトへ到達するのを防ぐ。
+			h, err := normalizeHost(req.Host)
+			if err != nil || h != name {
+				p.block(fmt.Sprintf("Host %s (SNI %s と一致しない)", req.Host, name))
+				return
+			}
 		}
 		normalizeRequest(req, host, secure)
 		upgrade := isUpgrade(req)
