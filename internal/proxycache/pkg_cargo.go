@@ -80,6 +80,19 @@ func (s *Server) handleCargoIndex(w http.ResponseWriter, r *http.Request, relPat
 		}
 		defer resp.Body.Close()
 
+		// エラー応答はキャッシュせず、キャッシュがあればそれを返す。
+		if resp.StatusCode != http.StatusOK {
+			if data, err := s.storage.GetPkgFile("cargo", cacheKey); err == nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(data)
+				return
+			}
+			w.WriteHeader(resp.StatusCode)
+			_, _ = io.Copy(w, resp.Body)
+			return
+		}
+
 		data, err := io.ReadAll(resp.Body)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)

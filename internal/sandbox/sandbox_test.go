@@ -350,3 +350,23 @@ func count(xs []int, v int) int {
 	}
 	return n
 }
+
+// TestReadWritePathsPrefersXDG は、XDG_RUNTIME_DIR があればそれを使うことを
+// 確かめる (subbox の userns 内では getuid() が 0 になるため)。
+func TestReadWritePathsPrefersXDG(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1234")
+	p := &Policy{}
+	paths, _ := p.readWritePaths()
+	found := false
+	for _, path := range paths {
+		if path == "/run/user/1234" {
+			found = true
+		}
+		if path == "/run/user/0" {
+			t.Fatalf("userns 内の uid=0 のパスが入った: %v", paths)
+		}
+	}
+	if !found {
+		t.Fatalf("XDG_RUNTIME_DIR が既定パスに無い: %v", paths)
+	}
+}

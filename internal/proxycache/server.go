@@ -24,7 +24,6 @@ type Server struct {
 
 	// Port は host で待ち受ける vsock ポート。
 	Port uint32
-	cid  uint32
 
 	// AskApproval は upstream ダウンロード時に人間の承認を求めるコールバック。
 	// nil なら常に許可。
@@ -322,7 +321,6 @@ func (s *Server) handleBlob(w http.ResponseWriter, r *http.Request, registry, re
 
 // Start は host の vsock で待ち受けを始める (ポートは空いているものを選ぶ)。
 func (s *Server) Start(cid uint32) error {
-	s.cid = cid
 	var l net.Listener
 	var err error
 	for range 20 {

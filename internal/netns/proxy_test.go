@@ -93,28 +93,6 @@ func TestParseClientHelloTruncated(t *testing.T) {
 	}
 }
 
-func TestHostFromRequest(t *testing.T) {
-	cases := []struct {
-		in      string
-		want    string
-		wantErr bool
-	}{
-		{"GET / HTTP/1.1\r\nHost: Example.COM:8080\r\n\r\n", "example.com", false},
-		{"GET / HTTP/1.1\r\nhost: a.b.example\r\n\r\n", "a.b.example", false},
-		{"GET / HTTP/1.1\r\nX: y\r\nHost: z.example\r\n\r\n", "z.example", false},
-		{"CONNECT example.com:443 HTTP/1.1\r\n\r\n", "example.com", false},
-		{"GET / HTTP/1.0\r\n\r\n", "", true},
-		{"GET /\r\n\r\n", "", true},
-		{"", "", true},
-	}
-	for _, c := range cases {
-		got, err := hostFromRequest([]byte(c.in))
-		if (err != nil) != c.wantErr || got != c.want {
-			t.Errorf("hostFromRequest(%q) = %q, %v; want %q, err=%v", c.in, got, err, c.want, c.wantErr)
-		}
-	}
-}
-
 func TestNormalizeHost(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"example.com", "example.com"},
@@ -168,35 +146,6 @@ func TestProxyTerminates(t *testing.T) {
 	// passthrough が無ければ常に終端する。
 	if !(&webProxy{}).terminates("anything.example") {
 		t.Error("passthrough 無しで終端しないと判定した")
-	}
-}
-
-func TestReadHost(t *testing.T) {
-	// 1. 正常な HTTP リクエスト
-	r1 := bufio.NewReader(strings.NewReader("GET / HTTP/1.1\r\nHost: example.org\r\n\r\n"))
-	host, err := readHost(r1)
-	if err != nil || host != "example.org" {
-		t.Fatalf("readHost: got %q, %v; want example.org", host, err)
-	}
-
-	// 2. CONNECT リクエスト
-	r2 := bufio.NewReader(strings.NewReader("CONNECT api.example.com:443 HTTP/1.1\r\n\r\n"))
-	host, err = readHost(r2)
-	if err != nil || host != "api.example.com" {
-		t.Fatalf("readHost CONNECT: got %q, %v; want api.example.com", host, err)
-	}
-
-	// 3. 途中で切れた (EOF)
-	r3 := bufio.NewReader(strings.NewReader("GET / HTTP/1.1\r\nHost: truncated"))
-	if _, err := readHost(r3); err == nil {
-		t.Fatal("expected error on truncated input")
-	}
-
-	// 4. ヘッダが大きすぎる (> proxyMaxHead)
-	bigHeader := "GET / HTTP/1.1\r\nX-Big: " + strings.Repeat("A", proxyMaxHead+10) + "\r\n\r\n"
-	r4 := bufio.NewReader(strings.NewReader(bigHeader))
-	if _, err := readHost(r4); err == nil {
-		t.Fatal("expected error on oversized header")
 	}
 }
 
@@ -371,19 +320,22 @@ func TestHandleTLS(t *testing.T) {
 }
 
 func TestHandleHTTP(t *testing.T) {
-	// 1. 壊れた HTTP -> block
-	var blockedReason string
+	// 1. 壊れた HTTP -> 解析に失敗して接続を閉じる (dial しない)
+	dialed := false
 	p := &webProxy{
-		blocked: func(reason string) { blockedReason = reason },
 		allowed: func(name string) bool { return true },
+		dial: func(network, addr string, mark int) (net.Conn, error) {
+			dialed = true
+			return &dummyConn{Reader: bytes.NewReader(nil), Writer: io.Discard}, nil
+		},
 	}
 	p.handleHTTP(&dummyConn{Reader: bytes.NewReader([]byte("GARBAGE\r\n\r\n")), Writer: io.Discard}, "203.0.113.1:80")
-	if !strings.Contains(blockedReason, "Host 203.0.113.1") {
-		t.Errorf("expected blocked reason for bad HTTP, got %q", blockedReason)
+	if dialed {
+		t.Error("壊れた HTTP なのに dial した")
 	}
 
 	// 2. 不許可な Host
-	blockedReason = ""
+	var blockedReason string
 	p = &webProxy{
 		blocked: func(reason string) { blockedReason = reason },
 		allowed: func(name string) bool { return name == "good.com" },
@@ -393,8 +345,8 @@ func TestHandleHTTP(t *testing.T) {
 		t.Errorf("expected blocked Host evil.com, got %q", blockedReason)
 	}
 
-	// 3. 許可された Host (headers == nil で pipe 呼び出し)
-	dialed := false
+	// 3. 許可された Host (点検が無くてもリクエストごとに Host を確かめて転送する)
+	dialed = false
 	p = &webProxy{
 		allowed: func(name string) bool { return name == "good.com" },
 		dial: func(network, addr string, mark int) (net.Conn, error) {
@@ -500,5 +452,36 @@ func TestNormalizeRequest(t *testing.T) {
 	normalizeRequest(reqPlain, "example.com", false)
 	if reqPlain.URL.Scheme != "http" || reqPlain.URL.Host != "example.com" || reqPlain.Host != "example.com" {
 		t.Errorf("plain normalizeRequest unexpected: URL=%v Host=%q", reqPlain.URL, reqPlain.Host)
+	}
+}
+
+// TestHandleHTTPRechecksHostEachRequest は、平文 HTTP で接続の 2 本目以降の
+// リクエストも Host を確かめることを確かめる。素通しすると keep-alive や
+// パイプラインで許可外の Host に届いてしまう。
+func TestHandleHTTPRechecksHostEachRequest(t *testing.T) {
+	var blocked []string
+	dialed := 0
+	p := &webProxy{
+		allowed: func(name string) bool { return name == "good.com" },
+		blocked: func(reason string) { blocked = append(blocked, reason) },
+		dial: func(network, addr string, mark int) (net.Conn, error) {
+			dialed++
+			return &dummyConn{
+				Reader: bytes.NewReader([]byte(
+					"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" +
+						"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")),
+				Writer: io.Discard,
+			}, nil
+		},
+	}
+	reqs := "GET / HTTP/1.1\r\nHost: good.com\r\n\r\nGET / HTTP/1.1\r\nHost: evil.com\r\n\r\n"
+	client := &dummyConn{Reader: bytes.NewReader([]byte(reqs)), Writer: io.Discard}
+	p.handleHTTP(client, "203.0.113.1:80")
+
+	if dialed != 1 {
+		t.Fatalf("dialed = %d, want 1", dialed)
+	}
+	if len(blocked) != 1 || blocked[0] != "Host evil.com" {
+		t.Fatalf("blocked = %v, want [Host evil.com]", blocked)
 	}
 }

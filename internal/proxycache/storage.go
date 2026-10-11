@@ -303,7 +303,7 @@ func (s *Storage) HasPkgFile(ecosystem, relPath string) (bool, int64) {
 		return false, 0
 	}
 	fi, err := os.Stat(p)
-	if err != nil {
+	if err != nil || fi.IsDir() {
 		return false, 0
 	}
 	return true, fi.Size()
@@ -323,6 +323,11 @@ func (s *Storage) OpenPkgFile(ecosystem, relPath string) (*os.File, int64, error
 	if err != nil {
 		f.Close()
 		return nil, 0, err
+	}
+	// ディレクトリはキャッシュされたファイルではない (io.ReadAll が EISDIR になる)。
+	if fi.IsDir() {
+		f.Close()
+		return nil, 0, fmt.Errorf("キャッシュパスがディレクトリ: %s", p)
 	}
 	now := time.Now()
 	_ = os.Chtimes(p, now, now)

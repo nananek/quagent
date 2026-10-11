@@ -297,7 +297,9 @@ func maskSensitiveFallback(home string) error {
 	for _, rel := range SensitiveDirCandidates {
 		target := filepath.Join(home, rel)
 		if st, err := os.Stat(target); err == nil && st.IsDir() {
-			_ = syscall.Mount("tmpfs", target, "tmpfs", syscall.MS_NODEV|syscall.MS_NOEXEC|syscall.MS_NOSUID|syscall.MS_RDONLY, "")
+			if err := syscall.Mount("tmpfs", target, "tmpfs", syscall.MS_NODEV|syscall.MS_NOEXEC|syscall.MS_NOSUID|syscall.MS_RDONLY, ""); err != nil {
+				return fmt.Errorf("機密ディレクトリのマスクに失敗 (%s): %w", target, err)
+			}
 		}
 	}
 	return nil

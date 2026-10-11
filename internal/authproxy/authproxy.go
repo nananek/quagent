@@ -68,6 +68,23 @@ func allowed(rules []rule, method, path string) bool {
 	return false
 }
 
+// unsafePath は . または .. のセグメントを含むかを返す。復号済みのパスで
+// 判定する (upstream 側の正規化で別の操作に化けるのを防ぐ)。
+func unsafePath(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "." || seg == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+// canonicalPath は EscapedPath に符号化されたスラッシュ (%2F) が無いかを返す。
+// あると mux の正規化をすり抜けて、復号後のパスだけが変わる。
+func canonicalPath(escaped string) bool {
+	return !strings.Contains(escaped, "%2f") && !strings.Contains(escaped, "%2F")
+}
+
 // Register は providers の転送ルートを mux に登録し、登録した provider ID を返す。
 // 秘密は起動時に一度だけ取り出す (secret_command の対話を run 開始時に済ませるため)。
 // 許可していない操作は upstream へ送らず 403 を返し、denied に知らせる (nil 可)。
@@ -157,6 +174,17 @@ func registerAll(mux *http.ServeMux, registers map[string]secretSource, logger *
 func gate(id string, rules []rule, next http.Handler, logger *log.Logger, denied func(string)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rest := strings.TrimPrefix(r.URL.Path, Prefix+id)
+		// mux は EscapedPath で照合するので %2F は正規化されないが、r.URL.Path は
+		// 復号される。復号後に .. が現れるパスを通すと、許可規則の前方一致を
+		// すり抜け、upstream 側の正規化で別の操作に化ける。正準でないパスは断る。
+		if !canonicalPath(r.URL.EscapedPath()) || unsafePath(rest) {
+			logger.Printf("llm %s 不正なパス %s %q -> 403", id, r.Method, rest)
+			if denied != nil {
+				denied(fmt.Sprintf("%s %s %q", id, r.Method, rest))
+			}
+			http.Error(w, "quagent: non-canonical path", http.StatusForbidden)
+			return
+		}
 		if !allowed(rules, r.Method, rest) {
 			logger.Printf("llm %s 許可外 %s %q -> 403", id, r.Method, rest)
 			if denied != nil {

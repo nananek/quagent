@@ -673,6 +673,7 @@ func (m *Manager) SubmitRelaxation(rel Relaxation, reason string) (*RelaxRequest
 		m.mu.Unlock()
 		res, err := m.approveRelaxation(r, Session, true)
 		if err != nil {
+			m.settleRelaxation(r, Result{RequestID: id, Host: rel.Host, Status: Denied})
 			return nil, err
 		}
 		m.settleRelaxation(r, res)
@@ -728,6 +729,17 @@ func (m *Manager) settleRelaxation(r *RelaxRequest, res Result) {
 
 // DecideRelaxation は承認コンソールからの判断を反映する。
 func (m *Manager) DecideRelaxation(id int, d Decision) error {
+	// 決着させられない入力は、claim する前に弾く (claim 後だと申請が宙に浮く)。
+	switch d.Status {
+	case Approved:
+		if d.Kind != Once && d.Kind != Session && d.Kind != Always {
+			return fmt.Errorf("不正な許可種別: %q", d.Kind)
+		}
+	case Denied, Question:
+	default:
+		return fmt.Errorf("不正な判断ステータス: %s", d.Status)
+	}
+
 	m.mu.Lock()
 	r, ok := m.relaxByID[id]
 	if !ok {
@@ -746,6 +758,8 @@ func (m *Manager) DecideRelaxation(id int, d Decision) error {
 	case Approved:
 		res, err := m.approveRelaxation(r, d.Kind, false)
 		if err != nil {
+			// 反映に失敗しても、待っているエージェントを止めないよう決着させる。
+			m.settleRelaxation(r, Result{RequestID: id, Host: r.Relaxation.Host, Status: Denied})
 			return err
 		}
 		m.settleRelaxation(r, res)
@@ -753,8 +767,6 @@ func (m *Manager) DecideRelaxation(id int, d Decision) error {
 		m.settleRelaxation(r, Result{RequestID: id, Host: r.Relaxation.Host, Status: Denied})
 	case Question:
 		m.settleRelaxation(r, Result{RequestID: id, Host: r.Relaxation.Host, Status: Question, Question: d.Question})
-	default:
-		return fmt.Errorf("不正な判断ステータス: %s", d.Status)
 	}
 	return nil
 }
