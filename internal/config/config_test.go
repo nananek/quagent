@@ -461,3 +461,43 @@ func TestEffectiveProviders(t *testing.T) {
 		t.Errorf("expected nil for nil config, got %+v", effNil)
 	}
 }
+
+func TestCachePolicyResolved(t *testing.T) {
+	// nil は既定値
+	var nilPolicy *CachePolicy
+	if !nilPolicy.IsEnabled() {
+		t.Error("nil は有効であるべき")
+	}
+	if nilPolicy.MaxSizeGiBResolved() != 10 {
+		t.Errorf("MaxSizeGiBResolved(nil) = %d, want 10", nilPolicy.MaxSizeGiBResolved())
+	}
+	if nilPolicy.DirResolved() == "" {
+		t.Error("DirResolved(nil) が空")
+	}
+
+	// 明示設定
+	off := false
+	p := &CachePolicy{Enabled: &off, MaxSizeGiB: 3, Dir: "/tmp/cache"}
+	if p.IsEnabled() {
+		t.Error("Enabled=false が反映されない")
+	}
+	if p.MaxSizeGiBResolved() != 3 {
+		t.Errorf("MaxSizeGiBResolved = %d, want 3", p.MaxSizeGiBResolved())
+	}
+	if p.DirResolved() != "/tmp/cache" {
+		t.Errorf("DirResolved = %q, want /tmp/cache", p.DirResolved())
+	}
+
+	// ~/ の展開
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	p2 := &CachePolicy{Dir: "~/cachedir"}
+	if got, want := p2.DirResolved(), filepath.Join(home, "cachedir"); got != want {
+		t.Errorf("DirResolved = %q, want %q", got, want)
+	}
+
+	// 0 以下なら既定 10
+	if got := (&CachePolicy{MaxSizeGiB: 0}).MaxSizeGiBResolved(); got != 10 {
+		t.Errorf("MaxSizeGiBResolved(0) = %d, want 10", got)
+	}
+}

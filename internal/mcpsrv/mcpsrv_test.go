@@ -323,3 +323,33 @@ func TestRelaxationToolsIntegration(t *testing.T) {
 		t.Fatal(listAfter.Content)
 	}
 }
+
+// TestDescribeRelaxation は、動的緩和の説明が接続許可と取り違えない道具名を
+// 案内し、緩和には無いドメインのクールダウンを書かないことを確かめる。
+func TestDescribeRelaxation(t *testing.T) {
+	pending := describeRelaxation(access.Result{Status: access.Pending})
+	if !strings.Contains(pending.Message, "wait_header_relaxation") {
+		t.Errorf("pending が wait_header_relaxation を案内しない: %q", pending.Message)
+	}
+	if strings.Contains(pending.Message, "wait_network_access") {
+		t.Errorf("pending が接続許可の道具を案内する: %q", pending.Message)
+	}
+
+	question := describeRelaxation(access.Result{Status: access.Question})
+	if !strings.Contains(question.Message, "request_header_relaxation") {
+		t.Errorf("question が request_header_relaxation を案内しない: %q", question.Message)
+	}
+
+	denied := describeRelaxation(access.Result{Status: access.Denied})
+	if strings.Contains(denied.Message, "10 minutes") {
+		t.Errorf("緩和に無いクールダウンを書いている: %q", denied.Message)
+	}
+
+	// 通常の接続許可は従来どおり
+	if net := describe(access.Result{Status: access.Pending}); !strings.Contains(net.Message, "wait_network_access") {
+		t.Errorf("接続許可が wait_network_access を案内しない: %q", net.Message)
+	}
+	if net := describe(access.Result{Status: access.Denied}); !strings.Contains(net.Message, "10 minutes") {
+		t.Errorf("接続許可のクールダウンが消えた: %q", net.Message)
+	}
+}

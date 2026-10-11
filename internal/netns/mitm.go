@@ -162,20 +162,22 @@ func (p *webProxy) serveHTTP1(client net.Conn, br *bufio.Reader, dst, name strin
 				return
 			}
 		}
+		// Expect: 100-continue のクライアントは本文を待っているので、点検で本文を
+		// 読む前に続行を伝える。応答済みなので転送するときは Expect を落とす。
+		// DLP の本文検査より先に行う (順序が逆だと、本文を送らないクライアントを
+		// 読もうとして止まってしまう)。
+		if hasToken(req.Header, "Expect", "100-continue") {
+			if _, err := io.WriteString(client, "HTTP/1.1 100 Continue\r\n\r\n"); err != nil {
+				return
+			}
+			req.Header.Del("Expect")
+		}
 		if p.dlp != nil {
 			if detected, pattern, preview, err := p.dlp.InspectRequest(req); err == nil && detected {
 				p.block(fmt.Sprintf("DLP %s %s (%s: %s)", req.Method, host, pattern, preview))
 				_ = writeHTTP1Error(client, http.StatusForbidden, fmt.Sprintf("quagent: DLP violation (%s)", pattern))
 				return
 			}
-		}
-		// Expect: 100-continue のクライアントは本文を待っているので、点検で本文を
-		// 読む前に続行を伝える。応答済みなので転送するときは Expect を落とす。
-		if hasToken(req.Header, "Expect", "100-continue") {
-			if _, err := io.WriteString(client, "HTTP/1.1 100 Continue\r\n\r\n"); err != nil {
-				return
-			}
-			req.Header.Del("Expect")
 		}
 		p.filter(req, host)
 		if up == nil {

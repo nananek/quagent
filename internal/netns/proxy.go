@@ -169,28 +169,12 @@ func (p *webProxy) terminates(name string) bool {
 	return true
 }
 
-// handleHTTP は 80 の接続を扱う。ヘッダの制限が有効なら Host を確かめたうえで
-// リクエストごとにヘッダを絞る (無いときは Host だけ確かめて素通しする)。
+// handleHTTP は 80 の接続を扱う。平文 HTTP もリクエストごとに Host を確かめる
+// (接続の最初だけ確かめて素通しすると、keep-alive やパイプラインの 2 本目以降で
+// 許可外の Host に届いてしまう)。ヘッダ制限・DLP が有効ならその点検も行う。
 func (p *webProxy) handleHTTP(c net.Conn, dst string) {
-	// ヘッダ制限・動的緩和・DLP のいずれかが有効なら、リクエストを解析して
-	// 検査する (平文 HTTP も DLP の対象)。どれも無ければ Host だけ確認して素通しする。
-	if p.headers != nil || p.dlp != nil || p.hasRelaxations() {
-		_ = c.SetDeadline(time.Time{})
-		p.serveHTTP1(c, bufio.NewReader(c), dst, "", false)
-		return
-	}
-	// 確認で読んだ分 (リクエストヘッダ) を覚えておき、そのまま転送する。
-	cr := &captureReader{r: c}
-	name, err := readHost(bufio.NewReader(cr))
-	if err != nil {
-		p.block(fmt.Sprintf("Host %s (%v)", dst, err))
-		return
-	}
-	if !p.allowed(name) {
-		p.block("Host " + name)
-		return
-	}
-	p.pipe(c, dst, name, io.MultiReader(bytes.NewReader(cr.buf), c))
+	_ = c.SetDeadline(time.Time{})
+	p.serveHTTP1(c, bufio.NewReader(c), dst, "", false)
 }
 
 // pipe は点検せず、上流へそのまま流す (SNI/Host の確認だけ済ませた接続)。
@@ -456,52 +440,6 @@ func parseServerName(b []byte) (string, bool) {
 		b = b[l:]
 	}
 	return "", false
-}
-
-// readHost は HTTP リクエストヘッダを読み、Host (CONNECT なら要求先) を取り出す。
-func readHost(r *bufio.Reader) (string, error) {
-	var b []byte
-	for {
-		line, err := r.ReadString('\n')
-		if err != nil {
-			return "", err
-		}
-		if len(b)+len(line) > proxyMaxHead {
-			return "", errors.New("HTTP ヘッダが大きすぎる")
-		}
-		b = append(b, line...)
-		if line == "\r\n" || line == "\n" {
-			break
-		}
-	}
-	return hostFromRequest(b)
-}
-
-// hostFromRequest は HTTP/1.x のリクエストから接続先の名前を取り出す。Host が
-// 無ければ止める側に倒す (HTTP/1.0 などでも黙って通さない)。
-func hostFromRequest(b []byte) (string, error) {
-	lines := strings.Split(string(b), "\n")
-	if len(lines) == 0 {
-		return "", errors.New("空のリクエスト")
-	}
-	first := strings.Fields(strings.TrimRight(lines[0], "\r"))
-	if len(first) < 2 {
-		return "", errors.New("リクエスト行が不正")
-	}
-	if first[0] == "CONNECT" {
-		return normalizeHost(first[1])
-	}
-	for _, ln := range lines[1:] {
-		ln = strings.TrimRight(ln, "\r")
-		if ln == "" {
-			break
-		}
-		k, v, ok := strings.Cut(ln, ":")
-		if ok && strings.EqualFold(strings.TrimSpace(k), "Host") {
-			return normalizeHost(strings.TrimSpace(v))
-		}
-	}
-	return "", errors.New("Host ヘッダが無い")
 }
 
 // normalizeHost は Host からポートを落として小文字にする。

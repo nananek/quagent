@@ -1688,6 +1688,7 @@ func Sanitize(s string) string {
 		case r == '\t':
 			b.WriteString("    ")
 		case unicode.IsControl(r), r == utf8.RuneError,
+			r == 0x061C, // ARABIC LETTER MARK (書字方向を入れ替える)
 			r >= 0x202A && r <= 0x202E, r >= 0x2066 && r <= 0x2069, r == 0x200E, r == 0x200F:
 			fmt.Fprintf(&b, "\\u%04x", r)
 		default:

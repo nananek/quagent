@@ -298,7 +298,13 @@ func (p *Policy) readWritePaths() (paths []string, explicit bool) {
 		paths = append(paths, home)
 	}
 	paths = append(paths, "/work", "/tmp", "/var/tmp", "/dev/shm")
-	paths = append(paths, fmt.Sprintf("/run/user/%d", os.Getuid()))
+	// XDG_RUNTIME_DIR は名前空間の外の値をそのまま引き継ぐので、subbox の
+	// userns の中でも正しい値になる (/run/user/0 に化けない)。無ければ uid から組む。
+	if rt := os.Getenv("XDG_RUNTIME_DIR"); rt != "" {
+		paths = append(paths, rt)
+	} else {
+		paths = append(paths, fmt.Sprintf("/run/user/%d", os.Getuid()))
+	}
 	return paths, false
 }
 

@@ -1,9 +1,12 @@
 package netns
 
 import (
+	"encoding/binary"
+	"io"
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
 )
@@ -226,5 +229,81 @@ func TestDNSHandleTunnelingBlocked(t *testing.T) {
 	}
 	if !strings.Contains(blockedReason, "高エントロピー") {
 		t.Errorf("blockedReason = %q", blockedReason)
+	}
+}
+
+// TestDNSServeUDPRefused は UDP の入り口 (serveUDP) が、許可外の問い合わせに
+// REFUSED を返すところまでを確かめる。
+func TestDNSServeUDPRefused(t *testing.T) {
+	pc, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	srv := &dnsServer{
+		sem:      make(chan struct{}, 4),
+		allowed:  func(string) bool { return false },
+		onDenied: func(string) {},
+	}
+	go srv.serveUDP(pc)
+
+	conn, err := net.Dial("udp4", pc.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := conn.Write(buildQuery("blocked.com", dnsmessage.TypeA)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 512)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("応答が来ない: %v", err)
+	}
+	if got := parseRCode(t, buf[:n]); got != dnsmessage.RCodeRefused {
+		t.Fatalf("RCode = %v, want REFUSED", got)
+	}
+}
+
+// TestDNSServeTCPRefused は TCP の入り口 (serveTCP) が、許可外の問い合わせに
+// 長さ前置きつきで REFUSED を返すところまでを確かめる。
+func TestDNSServeTCPRefused(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	srv := &dnsServer{
+		sem:      make(chan struct{}, 4),
+		allowed:  func(string) bool { return false },
+		onDenied: func(string) {},
+	}
+	go srv.serveTCP(ln)
+
+	conn, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+	q := buildQuery("blocked.com", dnsmessage.TypeA)
+	msg := binary.BigEndian.AppendUint16(nil, uint16(len(q)))
+	msg = append(msg, q...)
+	if _, err := conn.Write(msg); err != nil {
+		t.Fatal(err)
+	}
+
+	var hdr [2]byte
+	if _, err := io.ReadFull(conn, hdr[:]); err != nil {
+		t.Fatalf("応答ヘッダが読めない: %v", err)
+	}
+	resp := make([]byte, binary.BigEndian.Uint16(hdr[:]))
+	if _, err := io.ReadFull(conn, resp); err != nil {
+		t.Fatal(err)
+	}
+	if got := parseRCode(t, resp); got != dnsmessage.RCodeRefused {
+		t.Fatalf("RCode = %v, want REFUSED", got)
 	}
 }

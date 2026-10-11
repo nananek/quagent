@@ -100,7 +100,9 @@ func RunSubboxWith(argv []string, path string) error {
 		if p.MaskAgentConfigOn() {
 			home, err := os.UserHomeDir()
 			if err == nil && home != "" {
-				_ = MaskSensitivePaths(home, SensitiveAgentConfigPaths)
+				if err := MaskSensitivePaths(home, SensitiveAgentConfigPaths); err != nil {
+					return fmt.Errorf("機密パスの不可視化に失敗: %w", err)
+				}
 			}
 		}
 		if err := p.Apply(); err != nil {

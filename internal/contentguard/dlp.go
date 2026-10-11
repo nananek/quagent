@@ -115,20 +115,38 @@ func (s *DLPScanner) InspectRequest(req *http.Request) (detected bool, patternNa
 
 	// 3. リクエストボディの検査
 	if req.Body != nil {
-		bodyBytes, err := io.ReadAll(io.LimitReader(req.Body, MaxInspectBodySize+1))
+		orig := req.Body
+		// 上限まで読む (+1 バイトで上限超過を検知する)。上限を超えた場合は、読んだ分と
+		// 続きを繋いで転送する。検査の都合で本文を切り詰めると、Content-Length と
+		// 実体が食い違い、上流が待ち続けてしまう。
+		bodyBytes, err := io.ReadAll(io.LimitReader(orig, MaxInspectBodySize+1))
 		if err != nil {
 			return false, "", "", err
 		}
-		// 元の Body を閉じて、再読み込み可能なバッファで差し替える
-		_ = req.Body.Close()
-		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-
-		if len(bodyBytes) > 0 {
-			if matched, name, preview := s.InspectText(string(bodyBytes)); matched {
-				return true, fmt.Sprintf("%s in request body", name), preview, nil
+		if len(bodyBytes) > MaxInspectBodySize {
+			req.Body = &prefixReadCloser{
+				r: io.MultiReader(bytes.NewReader(bodyBytes), orig),
+				c: orig,
 			}
+		} else {
+			_ = orig.Close()
+			req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		}
+
+		if matched, name, preview := s.InspectText(string(bodyBytes)); matched {
+			return true, fmt.Sprintf("%s in request body", name), preview, nil
 		}
 	}
 
 	return false, "", "", nil
 }
+
+// prefixReadCloser は先頭に固定のバイト列を返し、そのあとは元の Body を読む
+// ReadCloser。DLP 検査で上限まで読んだ分を捨てずに転送するために使う。
+type prefixReadCloser struct {
+	r io.Reader
+	c io.Closer
+}
+
+func (p *prefixReadCloser) Read(b []byte) (int, error) { return p.r.Read(b) }
+func (p *prefixReadCloser) Close() error               { return p.c.Close() }

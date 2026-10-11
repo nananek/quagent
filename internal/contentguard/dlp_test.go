@@ -177,3 +177,40 @@ func TestMaskValue(t *testing.T) {
 		t.Errorf("MaskValue = %q, want 'AIzaSy****'", got)
 	}
 }
+
+// TestInspectRequestPreservesLargeBody は、検査上限 (MaxInspectBodySize) を超える
+// 本文でも、転送する本文が切り詰められないことを確かめる。Content-Length と実体が
+// 食い違うと上流が待ち続けてしまう。
+func TestInspectRequestPreservesLargeBody(t *testing.T) {
+	scanner := NewDLPScanner()
+	payload := strings.Repeat("a", MaxInspectBodySize+123)
+	req, err := http.NewRequest("POST", "https://example.com/upload", strings.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.ContentLength != int64(len(payload)) {
+		t.Fatalf("前提が崩れている: ContentLength = %d", req.ContentLength)
+	}
+
+	detected, _, _, err := scanner.InspectRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detected {
+		t.Fatal("クリーンな本文を検知した")
+	}
+
+	got, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(payload) {
+		t.Fatalf("本文長 = %d, want %d (検査で切り詰められた)", len(got), len(payload))
+	}
+	if string(got) != payload {
+		t.Fatal("本文の中身が変わった")
+	}
+	if req.ContentLength != int64(len(payload)) {
+		t.Fatalf("ContentLength = %d, want %d", req.ContentLength, len(payload))
+	}
+}

@@ -2,6 +2,7 @@ package netns
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -1032,5 +1033,147 @@ func TestProxyDynamicRelaxation(t *testing.T) {
 	}
 	if string(body) != "echo: secret-payload" {
 		t.Fatalf("body = %q, want 'echo: secret-payload'", string(body))
+	}
+}
+
+// reasonRecorder は blocked コールバックの理由を別 goroutine から安全に読む。
+type reasonRecorder struct {
+	mu sync.Mutex
+	r  string
+}
+
+func (rr *reasonRecorder) set(s string) { rr.mu.Lock(); rr.r = s; rr.mu.Unlock() }
+func (rr *reasonRecorder) get() string  { rr.mu.Lock(); defer rr.mu.Unlock(); return rr.r }
+
+// dlpTestProxy は DLP 有効の透明プロキシを 127.0.0.1 に立てる (originalDst は使わない)。
+func dlpTestProxy(t *testing.T, proxyCA *tlsmitm.CA, upstreamAddr string, roots *x509.CertPool, blocked func(string)) string {
+	t.Helper()
+	p := &webProxy{
+		allowed:       func(name string) bool { return name == "allowed.example" },
+		blocked:       blocked,
+		mitm:          proxyCA,
+		upstreamRoots: roots,
+		sem:           make(chan struct{}, 8),
+		dlp:           contentguard.NewDLPScanner(),
+		dial: func(network, addr string, mark int) (net.Conn, error) {
+			return net.Dial(network, upstreamAddr)
+		},
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go p.terminate(c, upstreamAddr, "allowed.example")
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// TestProxyDLPExpectContinue は、Expect: 100-continue のクライアントに対して
+// DLP が本文を読む前に 100 Continue を返すことを確かめる。順序が逆だと、本文を
+// 送らないクライアントを読もうとして停止してしまう。
+func TestProxyDLPExpectContinue(t *testing.T) {
+	upCA, _ := tlsmitm.NewCA()
+	proxyCA, _ := tlsmitm.NewCA()
+	upstreamAddr, roots := testUpstream(t, upCA, "allowed.example", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	var rec reasonRecorder
+	proxyAddr := dlpTestProxy(t, proxyCA, upstreamAddr, roots, rec.set)
+
+	conn, err := tls.Dial("tcp", proxyAddr, &tls.Config{RootCAs: poolFor(t, proxyCA), ServerName: "allowed.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	body := "secret = " + "AK" + "IAIOSFODNN7EXAMPLE"
+	if _, err := fmt.Fprintf(conn, "POST /upload HTTP/1.1\r\nHost: allowed.example\r\nContent-Length: %d\r\nExpect: 100-continue\r\n\r\n", len(body)); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(conn)
+	// 本文を送る前に 100 Continue が返ること。順序が逆だとここで止まる。
+	line, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("100 Continue を待てない (DLP が本文を先に読んでいる疑い): %v", err)
+	}
+	if !strings.Contains(line, "100 Continue") {
+		t.Fatalf("最初の応答行 = %q, want 100 Continue", line)
+	}
+	for {
+		l, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		if l == "\r\n" {
+			break
+		}
+	}
+	if _, err := io.WriteString(conn, body); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("最終応答を読めない: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+	if got := rec.get(); !strings.Contains(got, "DLP") {
+		t.Fatalf("blocked = %q, want DLP", got)
+	}
+}
+
+// TestProxyDLPLargeBodyForwarded は、検査上限を超える本文が切り詰められずに
+// 上流へ届くことを確かめる。
+func TestProxyDLPLargeBodyForwarded(t *testing.T) {
+	upCA, _ := tlsmitm.NewCA()
+	proxyCA, _ := tlsmitm.NewCA()
+	var mu sync.Mutex
+	gotLen := -1
+	upstreamAddr, roots := testUpstream(t, upCA, "allowed.example", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		gotLen = len(b)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	proxyAddr := dlpTestProxy(t, proxyCA, upstreamAddr, roots, func(string) {})
+
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: poolFor(t, proxyCA), ServerName: "allowed.example"},
+			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+				return net.Dial("tcp", proxyAddr)
+			},
+		},
+	}
+
+	payload := bytes.Repeat([]byte("a"), contentguard.MaxInspectBodySize+4096)
+	req, _ := http.NewRequest("POST", "https://allowed.example/big", bytes.NewReader(payload))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	mu.Lock()
+	n := gotLen
+	mu.Unlock()
+	if n != len(payload) {
+		t.Fatalf("上流が受けた本文長 = %d, want %d (DLP 検査で切り詰められた)", n, len(payload))
 	}
 }

@@ -26,6 +26,11 @@ func WrapCommand(argv []string, opts Options) []string {
 	if !Available() || len(argv) == 0 {
 		return argv
 	}
+	return append(append([]string{"systemd-run"}, wrapArgs(opts)...), argv...)
+}
+
+// wrapArgs は systemd-run に渡すリソース制限の引数を組み立てる。
+func wrapArgs(opts Options) []string {
 	args := []string{"--user", "--scope", "--quiet"}
 	if opts.CPUQuotaPercent > 0 {
 		args = append(args, "-p", fmt.Sprintf("CPUQuota=%d%%", opts.CPUQuotaPercent))
@@ -40,5 +45,5 @@ func WrapCommand(argv []string, opts Options) []string {
 		}
 		args = append(args, "-p", fmt.Sprintf("MemoryMax=%dM", totalM))
 	}
-	return append(append([]string{"systemd-run"}, args...), argv...)
+	return args
 }

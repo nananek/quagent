@@ -1163,3 +1163,38 @@ func TestTUIModelViewExactDimensions(t *testing.T) {
 		}
 	}
 }
+
+func TestRequestMsg(t *testing.T) {
+	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	r := &access.Request{
+		ID:      7,
+		Domains: []string{"example.com", "api.example.com"},
+		Reason:  "テスト",
+		Created: created,
+	}
+	msg := requestMsg(r)
+	if msg.Type != "request" || msg.ID != 7 || len(msg.Domains) != 2 || msg.Reason != "テスト" {
+		t.Fatalf("requestMsg = %+v", msg)
+	}
+	want := created.Add(access.DecisionTimeout).Format("15:04:05")
+	if msg.Deadline != want {
+		t.Fatalf("Deadline = %q, want %q", msg.Deadline, want)
+	}
+}
+
+// TestSanitizeBidiControls は、書字方向を入れ替える制御文字 (U+061C を含む) が
+// エスケープされることを確かめる。
+func TestSanitizeBidiControls(t *testing.T) {
+	in := "a\u061Cb\u202Ec\u200Fd\u2066e"
+	got := Sanitize(in)
+	for _, raw := range []string{"\u061C", "\u202E", "\u200F", "\u2066"} {
+		if strings.ContainsRune(got, []rune(raw)[0]) {
+			t.Fatalf("Sanitize に生の制御文字が残る: %q", got)
+		}
+	}
+	for _, want := range []string{"\\u061c", "\\u202e", "\\u200f", "\\u2066"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Sanitize に %s が無い: %q", want, got)
+		}
+	}
+}

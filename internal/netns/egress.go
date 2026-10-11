@@ -173,6 +173,12 @@ func (e *egress) webBlocked(reason string) {
 		return
 	}
 	e.mu.Unlock()
+	// DLP 遮断は種別を分けて通知する (コンソールやログで区別できるように)。
+	if strings.HasPrefix(reason, "DLP ") {
+		log.Printf("web: DLP 遮断 %s", reason)
+		e.events.send(Event{DLPBlocked: reason})
+		return
+	}
 	log.Printf("web: 許可外 %s", reason)
 	e.events.send(Event{Blocked: reason})
 }

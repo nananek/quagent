@@ -106,6 +106,16 @@ type resultOut struct {
 }
 
 func describe(r access.Result) resultOut {
+	return describeWith(r, "request_network_access", "wait_network_access", true)
+}
+
+// describeRelaxation は動的緩和の結果を説明する。待ち直しの道具が違い、
+// ドメインの 10 分クールダウンも掛からない (緩和は別枠)。
+func describeRelaxation(r access.Result) resultOut {
+	return describeWith(r, "request_header_relaxation", "wait_header_relaxation", false)
+}
+
+func describeWith(r access.Result, requestTool, waitTool string, cooldown bool) resultOut {
 	out := resultOut{Result: r}
 	switch r.Status {
 	case access.Approved:
@@ -118,14 +128,22 @@ func describe(r access.Result) resultOut {
 			out.Message = "Approved for the rest of this session. This does not expire: release it as soon as you are done."
 		}
 	case access.Denied:
-		out.Message = "Denied by the reviewer. These domains cannot be requested again for 10 minutes; find another way or explain to the user."
+		if cooldown {
+			out.Message = "Denied by the reviewer. These domains cannot be requested again for 10 minutes; find another way or explain to the user."
+		} else {
+			out.Message = "Denied by the reviewer. Find another way or explain to the user."
+		}
 	case access.Question:
-		out.Message = "The reviewer has a question instead of a decision. Answer it in the reason of a new request_network_access call."
+		out.Message = fmt.Sprintf("The reviewer has a question instead of a decision. Answer it in the reason of a new %s call.", requestTool)
 	case access.TimedOut:
-		out.Message = fmt.Sprintf("Denied because the reviewer did not respond within %s (timeout, not an explicit denial). "+
-			"These domains cannot be requested again for %s.", access.DecisionTimeout, access.DenyCooldown)
+		if cooldown {
+			out.Message = fmt.Sprintf("Denied because the reviewer did not respond within %s (timeout, not an explicit denial). "+
+				"These domains cannot be requested again for %s.", access.DecisionTimeout, access.DenyCooldown)
+		} else {
+			out.Message = fmt.Sprintf("Denied because the reviewer did not respond within %s (timeout, not an explicit denial).", access.DecisionTimeout)
+		}
 	case access.Pending:
-		out.Message = "Still waiting for the reviewer. Call wait_network_access with this request_id to keep waiting."
+		out.Message = fmt.Sprintf("Still waiting for the reviewer. Call %s with this request_id to keep waiting.", waitTool)
 	}
 	return out
 }
@@ -228,7 +246,7 @@ func Handler(m *access.Manager, pub PRPublisher, logf func(string), extra ...fun
 		if err != nil {
 			return nil, resultOut{}, err
 		}
-		return nil, describe(res), nil
+		return nil, describeRelaxation(res), nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -239,7 +257,7 @@ func Handler(m *access.Manager, pub PRPublisher, logf func(string), extra ...fun
 		if err != nil {
 			return nil, resultOut{}, err
 		}
-		return nil, describe(res), nil
+		return nil, describeRelaxation(res), nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{

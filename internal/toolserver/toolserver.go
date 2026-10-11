@@ -89,7 +89,6 @@ type Server struct {
 	name   string
 	cfg    config.ToolServer
 	base   string // 末尾の / を除いた base URL
-	host   string
 	ops    map[string]*operation
 	client *http.Client
 	logf   func(string)
@@ -106,7 +105,7 @@ func Load(ctx context.Context, name string, cfg config.ToolServer, logf func(str
 	}
 	u.RawQuery, u.Fragment = "", ""
 	s := &Server{
-		name: name, cfg: cfg, base: strings.TrimRight(u.String(), "/"), host: u.Host,
+		name: name, cfg: cfg, base: strings.TrimRight(u.String(), "/"),
 		client: &http.Client{
 			Timeout:   callTimeout,
 			Transport: uaTransport{next: http.DefaultTransport},

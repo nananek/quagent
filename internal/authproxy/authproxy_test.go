@@ -215,3 +215,28 @@ func TestZenAliasesAndDeduplication(t *testing.T) {
 		t.Errorf("deduplicated path = %q, want '/zen/go/v1/chat/completions'", prReq.Out.URL.Path)
 	}
 }
+
+// TestGateRejectsNonCanonicalPath は、%2F で mux の正規化をすり抜けた .. を
+// 断ることを確かめる (復号後の .. で許可規則を回避し、upstream 側の正規化で
+// 別の操作に化けるのを防ぐ)。
+func TestGateRejectsNonCanonicalPath(t *testing.T) {
+	var reached []string
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = append(reached, r.Method+" "+r.URL.Path) })
+	rules, _ := parseRules([]string{"GET /v1/models/*"})
+	var denied []string
+	h := gate("p", rules, next, log.New(io.Discard, "", 0), func(s string) { denied = append(denied, s) })
+
+	req := httptest.NewRequest(http.MethodGet, "/llm/p/v1/models/..%2F..%2Ffiles", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || len(reached) != 0 || len(denied) != 1 {
+		t.Fatalf("code=%d reached=%v denied=%v", rec.Code, reached, denied)
+	}
+
+	// 正準な許可パスは通る
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/llm/p/v1/models/x", nil))
+	if len(reached) != 1 {
+		t.Fatalf("正準なパスが届かない: code=%d", rec.Code)
+	}
+}

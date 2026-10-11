@@ -2,6 +2,7 @@ package access
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -450,5 +451,106 @@ func TestRelaxationLifecycle(t *testing.T) {
 	res4, _ := m.WaitRelaxation(context.Background(), req4.ID, 10*time.Millisecond)
 	if res4.Status != Denied {
 		t.Fatalf("status = %s, want denied", res4.Status)
+	}
+}
+
+// TestPruneRelaxationsExpiresOnce は、Once 承認の動的緩和が期限どおりに失効し、
+// プロキシ (Applier) へ反映されることを確かめる。子側は緩和の期限を知らないので、
+// 親が PruneRelaxations を呼ばないと失効しない。
+func TestPruneRelaxationsExpiresOnce(t *testing.T) {
+	m, f := newTestManager(t)
+	base := time.Now()
+	m.now = func() time.Time { return base }
+
+	req, err := m.SubmitRelaxation(Relaxation{Host: "api.example.com", Methods: []string{"POST"}}, "理由")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DecideRelaxation(req.ID, Decision{Status: Approved, Kind: Once}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.Relaxations()["api.example.com"]; !ok {
+		t.Fatal("Once 承認直後に緩和が有効でない")
+	}
+
+	// 期限内は失効しない
+	m.PruneRelaxations()
+	if _, ok := f.lastRelax["api.example.com"]; !ok {
+		t.Fatal("期限前に失効した")
+	}
+
+	// 期限を過ぎると失効し、プロキシへも反映される
+	m.now = func() time.Time { return base.Add(OnceTTL + time.Minute) }
+	m.PruneRelaxations()
+	if _, ok := m.Relaxations()["api.example.com"]; ok {
+		t.Fatal("期限切れの緩和が有効なまま")
+	}
+	if _, ok := f.lastRelax["api.example.com"]; ok {
+		t.Fatalf("期限切れの緩和がプロキシに残る: %+v", f.lastRelax)
+	}
+}
+
+// errApplier は SetRelaxations を必ず失敗させる Applier (反映失敗時の挙動用)。
+type errApplier struct{ err error }
+
+func (e errApplier) SetGrants([]netns.Grant) error { return nil }
+func (e errApplier) SetRelaxations(map[string]headerpolicy.HostRule) error {
+	return e.err
+}
+
+// TestDecideRelaxationValidatesKind は、不正な種別を claim の前に弾き、
+// 申請が宙に浮かないことを確かめる。
+func TestDecideRelaxationValidatesKind(t *testing.T) {
+	m, _ := newTestManager(t)
+	req, err := m.SubmitRelaxation(Relaxation{Host: "api.example.com", Methods: []string{"POST"}}, "理由")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.DecideRelaxation(req.ID, Decision{Status: Approved, Kind: Kind("bogus")}); err == nil {
+		t.Fatal("不正な種別が通った")
+	}
+	// claim していないので、まだ pending のまま
+	res, err := m.WaitRelaxation(context.Background(), req.ID, 10*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != Pending {
+		t.Fatalf("status = %s, want pending", res.Status)
+	}
+
+	// 正しい種別なら承認して決着する
+	if err := m.DecideRelaxation(req.ID, Decision{Status: Approved, Kind: Once}); err != nil {
+		t.Fatal(err)
+	}
+	res, err = m.WaitRelaxation(context.Background(), req.ID, 10*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != Approved {
+		t.Fatalf("status = %s, want approved", res.Status)
+	}
+}
+
+// TestDecideRelaxationSettlesOnApplyError は、反映に失敗しても待機側が
+// 止まらない (Denied で決着する) ことを確かめる。
+func TestDecideRelaxationSettlesOnApplyError(t *testing.T) {
+	m, err := NewManager(errApplier{err: errors.New("boom")}, filepath.Join(t.TempDir(), "always.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := m.SubmitRelaxation(Relaxation{Host: "api.example.com", Methods: []string{"POST"}}, "理由")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DecideRelaxation(req.ID, Decision{Status: Approved, Kind: Once}); err == nil {
+		t.Fatal("反映失敗なのにエラーにならない")
+	}
+	res, err := m.WaitRelaxation(context.Background(), req.ID, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != Denied {
+		t.Fatalf("status = %s, want denied", res.Status)
 	}
 }

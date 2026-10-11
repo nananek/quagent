@@ -673,6 +673,7 @@ func (m *Manager) SubmitRelaxation(rel Relaxation, reason string) (*RelaxRequest
 		m.mu.Unlock()
 		res, err := m.approveRelaxation(r, Session, true)
 		if err != nil {
+			m.settleRelaxation(r, Result{RequestID: id, Host: rel.Host, Status: Denied})
 			return nil, err
 		}
 		m.settleRelaxation(r, res)
@@ -728,6 +729,17 @@ func (m *Manager) settleRelaxation(r *RelaxRequest, res Result) {
 
 // DecideRelaxation は承認コンソールからの判断を反映する。
 func (m *Manager) DecideRelaxation(id int, d Decision) error {
+	// 決着させられない入力は、claim する前に弾く (claim 後だと申請が宙に浮く)。
+	switch d.Status {
+	case Approved:
+		if d.Kind != Once && d.Kind != Session && d.Kind != Always {
+			return fmt.Errorf("不正な許可種別: %q", d.Kind)
+		}
+	case Denied, Question:
+	default:
+		return fmt.Errorf("不正な判断ステータス: %s", d.Status)
+	}
+
 	m.mu.Lock()
 	r, ok := m.relaxByID[id]
 	if !ok {
@@ -746,6 +758,8 @@ func (m *Manager) DecideRelaxation(id int, d Decision) error {
 	case Approved:
 		res, err := m.approveRelaxation(r, d.Kind, false)
 		if err != nil {
+			// 反映に失敗しても、待っているエージェントを止めないよう決着させる。
+			m.settleRelaxation(r, Result{RequestID: id, Host: r.Relaxation.Host, Status: Denied})
 			return err
 		}
 		m.settleRelaxation(r, res)
@@ -753,8 +767,6 @@ func (m *Manager) DecideRelaxation(id int, d Decision) error {
 		m.settleRelaxation(r, Result{RequestID: id, Host: r.Relaxation.Host, Status: Denied})
 	case Question:
 		m.settleRelaxation(r, Result{RequestID: id, Host: r.Relaxation.Host, Status: Question, Question: d.Question})
-	default:
-		return fmt.Errorf("不正な判断ステータス: %s", d.Status)
 	}
 	return nil
 }
@@ -822,6 +834,29 @@ func (m *Manager) syncRelaxations() error {
 		return m.apply.SetRelaxations(active)
 	}
 	return nil
+}
+
+// PruneRelaxations は期限切れの動的緩和を失効させ、プロキシへ反映する。子側の
+// HostRule には期限が無く、子は期限を知らないので、親が定期的に呼んで反映する。
+// 何も失効していなければ送信しない (毎分の無駄な往復を避ける)。
+func (m *Manager) PruneRelaxations() {
+	m.mu.Lock()
+	now := m.now().Unix()
+	changed := false
+	for host, exp := range m.relaxExpirations {
+		if exp != 0 && now >= exp {
+			delete(m.relaxExpirations, host)
+			delete(m.relaxations, host)
+			changed = true
+		}
+	}
+	m.mu.Unlock()
+	if !changed {
+		return
+	}
+	if err := m.syncRelaxations(); err != nil {
+		m.logf("動的緩和の失効を反映できない: %v", err)
+	}
 }
 
 // WaitRelaxation は申請の決着を timeout まで待つ。

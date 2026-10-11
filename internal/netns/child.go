@@ -180,13 +180,9 @@ func (c *child) run() error {
 	// 3. 透明プロキシ: 許可した IP への Web 接続の SNI/Host を確かめる。nft の
 	// redirect 先が無いと接続が弾かれるので、qemu を起動する前に待ち受ける。
 	// TerminateHTTPS なら TLS を終端し、平文に戻した HTTP のヘッダを絞る。
-	web := newWebProxy(c.holder.Process.Pid, eg.allowed, func(reason string) {
-		if strings.HasPrefix(reason, "DLP ") {
-			c.events.send(Event{DLPBlocked: reason})
-		} else {
-			c.events.send(Event{Blocked: reason})
-		}
-	})
+	// 遮断の記録・通知は egress に任せる。DNS の拒否と同じく量を抑えるため、
+	// 直に events.send せず eg.webBlocked を通す (DLP かどうかの振り分けもここで行う)。
+	web := newWebProxy(c.holder.Process.Pid, eg.allowed, eg.webBlocked)
 	if c.spec.TerminateHTTPS {
 		ca, err := tlsmitm.FromPEM([]byte(c.spec.CACertPEM), []byte(c.spec.CAKeyPEM))
 		if err != nil {
