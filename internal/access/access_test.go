@@ -452,3 +452,39 @@ func TestRelaxationLifecycle(t *testing.T) {
 		t.Fatalf("status = %s, want denied", res4.Status)
 	}
 }
+
+// TestPruneRelaxationsExpiresOnce は、Once 承認の動的緩和が期限どおりに失効し、
+// プロキシ (Applier) へ反映されることを確かめる。子側は緩和の期限を知らないので、
+// 親が PruneRelaxations を呼ばないと失効しない。
+func TestPruneRelaxationsExpiresOnce(t *testing.T) {
+	m, f := newTestManager(t)
+	base := time.Now()
+	m.now = func() time.Time { return base }
+
+	req, err := m.SubmitRelaxation(Relaxation{Host: "api.example.com", Methods: []string{"POST"}}, "理由")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DecideRelaxation(req.ID, Decision{Status: Approved, Kind: Once}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.Relaxations()["api.example.com"]; !ok {
+		t.Fatal("Once 承認直後に緩和が有効でない")
+	}
+
+	// 期限内は失効しない
+	m.PruneRelaxations()
+	if _, ok := f.lastRelax["api.example.com"]; !ok {
+		t.Fatal("期限前に失効した")
+	}
+
+	// 期限を過ぎると失効し、プロキシへも反映される
+	m.now = func() time.Time { return base.Add(OnceTTL + time.Minute) }
+	m.PruneRelaxations()
+	if _, ok := m.Relaxations()["api.example.com"]; ok {
+		t.Fatal("期限切れの緩和が有効なまま")
+	}
+	if _, ok := f.lastRelax["api.example.com"]; ok {
+		t.Fatalf("期限切れの緩和がプロキシに残る: %+v", f.lastRelax)
+	}
+}

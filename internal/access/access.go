@@ -824,6 +824,29 @@ func (m *Manager) syncRelaxations() error {
 	return nil
 }
 
+// PruneRelaxations は期限切れの動的緩和を失効させ、プロキシへ反映する。子側の
+// HostRule には期限が無く、子は期限を知らないので、親が定期的に呼んで反映する。
+// 何も失効していなければ送信しない (毎分の無駄な往復を避ける)。
+func (m *Manager) PruneRelaxations() {
+	m.mu.Lock()
+	now := m.now().Unix()
+	changed := false
+	for host, exp := range m.relaxExpirations {
+		if exp != 0 && now >= exp {
+			delete(m.relaxExpirations, host)
+			delete(m.relaxations, host)
+			changed = true
+		}
+	}
+	m.mu.Unlock()
+	if !changed {
+		return
+	}
+	if err := m.syncRelaxations(); err != nil {
+		m.logf("動的緩和の失効を反映できない: %v", err)
+	}
+}
+
 // WaitRelaxation は申請の決着を timeout まで待つ。
 func (m *Manager) WaitRelaxation(ctx context.Context, id int, timeout time.Duration) (Result, error) {
 	m.mu.Lock()

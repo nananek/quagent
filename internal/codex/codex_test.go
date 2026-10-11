@@ -191,3 +191,40 @@ func TestRefreshSource(t *testing.T) {
 		t.Fatalf("fetch() = %q, %v; want my-cmd-token", out, err)
 	}
 }
+
+// TestReadAuthFrom は取り出し方 (env / file) から認証情報を読む経路を確かめる。
+func TestReadAuthFrom(t *testing.T) {
+	// env に JSON を入れる
+	t.Setenv("TEST_CODEX_AUTH", `{"tokens":{"access_token":"acc-1","refresh_token":"ref-1","account_id":"acc-id"}}`)
+	info, err := readAuthFrom(RefreshSource{Env: "TEST_CODEX_AUTH"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.AccessToken != "acc-1" || info.RefreshToken != "ref-1" || info.AccountID != "acc-id" {
+		t.Fatalf("readAuthFrom(env) = %+v", info)
+	}
+
+	// file に素のトークン文字列を入れる
+	dir := t.TempDir()
+	path := filepath.Join(dir, "auth.json")
+	if err := os.WriteFile(path, []byte("plain-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err = readAuthFrom(RefreshSource{File: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.AccessToken != "plain-token" {
+		t.Fatalf("readAuthFrom(file) = %+v", info)
+	}
+
+	// 取り出し方が未設定で TokenFile も無ければエラー
+	t.Setenv("HOME", t.TempDir())
+	if _, err := readAuthFrom(RefreshSource{}); err == nil {
+		t.Fatal("未設定なのにエラーにならなかった")
+	}
+
+	if TokenFile() == "" {
+		t.Fatal("TokenFile() が空")
+	}
+}

@@ -62,3 +62,25 @@ func TestWrapCommand(t *testing.T) {
 		}
 	}
 }
+
+func TestWrapArgs(t *testing.T) {
+	// 全指定
+	got := strings.Join(wrapArgs(Options{CPUQuotaPercent: 200, MemMiB: 4096, MemoryOverheadMiB: 512, TasksMax: 512}), " ")
+	for _, want := range []string{"--user", "--scope", "--quiet", "CPUQuota=200%", "MemoryMax=4608M", "TasksMax=512"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("wrapArgs に %q が無い: %q", want, got)
+		}
+	}
+
+	// 何も指定しなければ制限の -p は付かない
+	empty := strings.Join(wrapArgs(Options{}), " ")
+	if strings.Contains(empty, "-p") {
+		t.Errorf("制限未指定なのに -p がある: %q", empty)
+	}
+
+	// メモリのみ (オーバーヘッド無し)
+	mem := strings.Join(wrapArgs(Options{MemMiB: 2048}), " ")
+	if !strings.Contains(mem, "MemoryMax=2048M") {
+		t.Errorf("wrapArgs に MemoryMax=2048M が無い: %q", mem)
+	}
+}

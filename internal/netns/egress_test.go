@@ -160,6 +160,46 @@ func TestWebBlocked(t *testing.T) {
 	}
 }
 
+// TestWebBlockedClassifiesDLP は、DLP 遮断が Blocked ではなく DLPBlocked として
+// 通知されることを確かめる。child.go は遮断の振り分けを webBlocked に任せる。
+func TestWebBlockedClassifiesDLP(t *testing.T) {
+	e, _ := newTestEgress(nil)
+	r, w := io.Pipe()
+	e.events = &eventWriter{enc: json.NewEncoder(w)}
+	got := make(chan Event, 8)
+	go func() {
+		dec := json.NewDecoder(r)
+		for {
+			var ev Event
+			if err := dec.Decode(&ev); err != nil {
+				return
+			}
+			got <- ev
+		}
+	}()
+
+	e.webBlocked("DLP GET allowed.example (AWS Access Key in request body: AKIA****)")
+	e.webBlocked("blocked.example (SNI)")
+	w.Close()
+
+	select {
+	case ev := <-got:
+		if ev.DLPBlocked == "" || ev.Blocked != "" {
+			t.Fatalf("DLP 遮断が DLPBlocked にならない: %+v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("DLP のイベントが来ない")
+	}
+	select {
+	case ev := <-got:
+		if ev.Blocked == "" || ev.DLPBlocked != "" {
+			t.Fatalf("許可外 Web が Blocked にならない: %+v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Blocked のイベントが来ない")
+	}
+}
+
 func TestReadControl(t *testing.T) {
 	// 1. 正常な control json
 	input := `{"Grants":[{"Pattern":"example.com","Expires":12345}]}` + "\n"

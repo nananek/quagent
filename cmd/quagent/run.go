@@ -731,6 +731,21 @@ runcmd:
 	go relayBlocked(l, con)
 	go relayTunnelBlocked(l, con)
 	go relayDLPBlocked(l, con)
+	// Once の動的緩和は、子 (プロキシ) が期限を知らないので親が定期的に失効させる。
+	relaxCtx, relaxCancel := context.WithCancel(context.Background())
+	defer relaxCancel()
+	go func() {
+		tick := time.NewTicker(time.Minute)
+		defer tick.Stop()
+		for {
+			select {
+			case <-relaxCtx.Done():
+				return
+			case <-tick.C:
+				mgr.PruneRelaxations()
+			}
+		}
+	}()
 	go func() {
 		// 連打で承認コンソールを埋めないよう 1 分に 10 件まで (残りは host.log にある)
 		var window time.Time

@@ -1163,3 +1163,21 @@ func TestTUIModelViewExactDimensions(t *testing.T) {
 		}
 	}
 }
+
+func TestRequestMsg(t *testing.T) {
+	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	r := &access.Request{
+		ID:      7,
+		Domains: []string{"example.com", "api.example.com"},
+		Reason:  "テスト",
+		Created: created,
+	}
+	msg := requestMsg(r)
+	if msg.Type != "request" || msg.ID != 7 || len(msg.Domains) != 2 || msg.Reason != "テスト" {
+		t.Fatalf("requestMsg = %+v", msg)
+	}
+	want := created.Add(access.DecisionTimeout).Format("15:04:05")
+	if msg.Deadline != want {
+		t.Fatalf("Deadline = %q, want %q", msg.Deadline, want)
+	}
+}
