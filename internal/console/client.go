@@ -1573,7 +1573,10 @@ func RunClient(sock string) (err error) {
 	}()
 
 	m := newModel(sock)
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	// ホバー表示 (タブ・ボタン・履歴行の下線や背景のマーキング) には、ボタンを
+	// 押していないときのマウス移動も要る。CellMotion では押下中の移動しか
+	// 届かないので、AllMotion (1003) で常時受け取る。
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseAllMotion())
 
 	quitCh := make(chan struct{})
 	defer close(quitCh)
