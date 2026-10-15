@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/nananek/quagent/internal/guest"
 )
 
 func parseNPMPath(p string) (action, relPath, pkgName, version string, ok bool) {
@@ -98,8 +100,8 @@ func (s *Server) handleNPMMetadata(w http.ResponseWriter, r *http.Request, relPa
 	}
 
 	// tarball URL をローカルプロキシに置換
-	// https://registry.npmjs.org/ -> http://127.0.0.1:5000/npm/
-	rewritten := bytes.ReplaceAll(data, []byte("https://registry.npmjs.org/"), []byte("http://127.0.0.1:5000/npm/"))
+	// https://registry.npmjs.org/ -> http://<guest の中継アドレス>/npm/
+	rewritten := bytes.ReplaceAll(data, []byte("https://registry.npmjs.org/"), []byte("http://"+guest.GuestProxyCacheAddr+"/npm/"))
 
 	_, _ = s.storage.SavePkgFile("npm", cacheKey, bytes.NewReader(rewritten))
 

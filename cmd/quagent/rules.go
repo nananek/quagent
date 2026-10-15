@@ -2,11 +2,15 @@ package main
 
 import (
 	"fmt"
+	"strings"
+
+	"github.com/nananek/quagent/internal/guest"
 )
 
-// guestRulesContent は使い捨て VM 上で動く各コーディングエージェントに共通で
-// 遵守させる基本制約と行動規範。
-const guestRulesContent = `# quagent VM 実行環境の制約と運用ルール
+// guestRulesTemplate は使い捨て VM 上で動く各コーディングエージェントに共通で
+// 遵守させる基本制約と行動規範。プロキシの中継アドレスは {{PROXY_CACHE_ADDR}}
+// プレースホルダにしておき、guestRulesContent で実値へ展開する。
+const guestRulesTemplate = `# quagent VM 実行環境の制約と運用ルール
 
 本環境は、外向き通信をホスト側で厳格に遮断した使い捨て QEMU VM 上で動作しています。
 エージェントは以下の原則を厳守して作業を行ってください。
@@ -27,15 +31,18 @@ const guestRulesContent = `# quagent VM 実行環境の制約と運用ルール
 - **再現性の担保**: CI や別の使い捨て VM、他の開発者の環境でも全く同じ手順で再現・実行できる検証手順 (Dockerfile、docker compose、スクリプトなど) を常に用いてください。
 
 ## 4. Docker イメージのキャッシュと利用方法
-- **Docker Hub (docker.io)**: daemon.json の registry-mirrors により自動的にホスト側のローカルキャッシュ (127.0.0.1:5000) へ問い合わせます。通常通り docker pull <image> や docker run 等を実行してください（初回のみホスト側で取得承認を求められます）。
-- **GitHub Container Registry (ghcr.io)**: docker pull 127.0.0.1:5000/ghcr.io/<owner>/<repo>:<tag> のプレフィックス形式で指定することで、ホスト側のキャッシュプロキシ経由で取得できます。
+- **Docker Hub (docker.io)**: daemon.json の registry-mirrors により自動的にホスト側のローカルキャッシュ ({{PROXY_CACHE_ADDR}}) へ問い合わせます。通常通り docker pull <image> や docker run 等を実行してください（初回のみホスト側で取得承認を求められます）。
+- **GitHub Container Registry (ghcr.io)**: docker pull {{PROXY_CACHE_ADDR}}/ghcr.io/<owner>/<repo>:<tag> のプレフィックス形式で指定することで、ホスト側のキャッシュプロキシ経由で取得できます。
 
 ## 5. 言語パッケージのキャッシュとバッチ集約承認 (Go, Cargo, npm, PyPI)
-- 環境変数および設定ファイル (GOPROXY, config.toml, .npmrc, pip.conf) により、各パッケージマネージャーは自動的にローカルキャッシュ (127.0.0.1:5000) を参照します。
+- 環境変数および設定ファイル (GOPROXY, config.toml, .npmrc, pip.conf) により、各パッケージマネージャーは自動的にローカルキャッシュ ({{PROXY_CACHE_ADDR}}) を参照します。
 - **依存関係事前解決とバッチ集約承認**: 初回の未キャッシュ依存関係ダウンロード時は、プロキシが事前に依存関係ツリーを解決し、必要なパッケージ一覧をまとめて承認コンソールで一括確認を求められます。
 - **キャッシュヒット**: 一度キャッシュされたパッケージは完全オフラインかつ承認不要で即座に高速返却されます。
-- **コンテナ内でのキャッシュ利用**: VM 内で Docker コンテナを起動してパッケージダウンロードを伴うビルド・テストを行う場合は、コンテナからローカルプロキシを参照できるようエージェントが実行時引数として --net=host や環境変数（例: GOPROXY="http://127.0.0.1:5000/go,direct"、Makefile 実行時なら DOCKER_ARGS="--net=host -e GOPROXY=http://127.0.0.1:5000/go,direct"）を付与してください。リポジトリの Makefile や Dockerfile 等に 127.0.0.1:5000 などの VM 固有設定をハードコードしてはなりません。
+- **コンテナ内でのキャッシュ利用**: VM 内で Docker コンテナを起動してパッケージダウンロードを伴うビルド・テストを行う場合は、コンテナからローカルプロキシを参照できるようエージェントが実行時引数として --net=host や環境変数（例: GOPROXY="http://{{PROXY_CACHE_ADDR}}/go,direct"、Makefile 実行時なら DOCKER_ARGS="--net=host -e GOPROXY=http://{{PROXY_CACHE_ADDR}}/go,direct"）を付与してください。リポジトリの Makefile や Dockerfile 等に 127.0.0.1 などの VM 固有設定をハードコードしてはなりません。
 `
+
+// guestRulesContent は中継アドレスを実際の値に展開した共通ルール本文。
+var guestRulesContent = strings.ReplaceAll(guestRulesTemplate, "{{PROXY_CACHE_ADDR}}", guest.GuestProxyCacheAddr)
 
 // linkRulesScript は VM 内の ~/.quagent/rules.md を各エージェント
 // (opencode, claude, agy, codex) のグローバル指示・ルール探索パスへシンボリックリンクするシェルスクリプト。

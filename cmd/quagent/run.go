@@ -140,32 +140,34 @@ exec /bin/sh "$@"`
 
 // pkgCacheWriteFiles は言語パッケージ (Go, Cargo, npm, PyPI) の透過キャッシュ設定を guest に置く write_files の断片。
 func pkgCacheWriteFiles(guestUser string) (string, string) {
+	proxy := guest.GuestProxyCacheAddr
 	files := fmt.Sprintf(`  - path: /etc/profile.d/quagent-pkgcache.sh
     permissions: '0644'
     content: |
-      export GOPROXY="http://127.0.0.1:5000/go,direct"
-      export PIP_INDEX_URL="http://127.0.0.1:5000/pypi/simple/"
+      export GOPROXY="http://%s/go,direct"
+      export PIP_INDEX_URL="http://%s/pypi/simple/"
       export PIP_TRUSTED_HOST="127.0.0.1"
-      export NPM_CONFIG_REGISTRY="http://127.0.0.1:5000/npm/"
+      export NPM_CONFIG_REGISTRY="http://%s/npm/"
   - path: /home/%s/.cargo/config.toml
     permissions: '0644'
     content: |
       [registries.crates-io]
       protocol = "sparse"
-      index = "sparse+http://127.0.0.1:5000/cargo/index/"
+      index = "sparse+http://%s/cargo/index/"
 
       [source.crates-io]
-      registry = "sparse+http://127.0.0.1:5000/cargo/index/"
+      registry = "sparse+http://%s/cargo/index/"
   - path: /home/%s/.npmrc
     permissions: '0644'
     content: |
-      registry=http://127.0.0.1:5000/npm/
+      registry=http://%s/npm/
   - path: /home/%s/.config/pip/pip.conf
     permissions: '0644'
     content: |
       [global]
-      index-url = http://127.0.0.1:5000/pypi/simple/
-      trusted-host = 127.0.0.1`, guestUser, guestUser, guestUser)
+      index-url = http://%s/pypi/simple/
+      trusted-host = 127.0.0.1`,
+		proxy, proxy, proxy, guestUser, proxy, proxy, guestUser, proxy, guestUser, proxy)
 
 	cmd := fmt.Sprintf("  - [sh, -c, \"mkdir -p /home/%s/.cargo /home/%s/.config/pip && chown -R %s:%s /home/%s/.cargo /home/%s/.npmrc /home/%s/.config 2>/dev/null || true\"]\n",
 		guestUser, guestUser, guestUser, guestUser, guestUser, guestUser, guestUser)
@@ -528,7 +530,7 @@ func run(o runOpts) error {
 			}
 			var mirrors []string
 			if proxyCachePort != 0 {
-				mirrors = append(mirrors, "http://127.0.0.1:5000")
+				mirrors = append(mirrors, "http://"+guest.GuestProxyCacheAddr)
 			}
 			daemonJSON, err := sandbox.GenerateDockerDaemonJSON(dockerSeccompGuestPath, mirrors...)
 			if err != nil {
