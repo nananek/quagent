@@ -106,13 +106,13 @@ rootless Docker コンテナに対しても、`sandbox.Policy` に基づく secc
 この仕組みはホスト側の境界制御を代替するものではなく、VM 内部における攻撃面を最小化するための追加レイヤーです。作業に必要なシステムコールが遮断されてしまう場合は、`"enabled": false` で無効化できます。
 
 ### 6. rootless Docker & 言語パッケージ向け Pull-through Cache（承認制・vsock中継）
-使い捨て VM では終了時にストレージが破棄されるため、ベースイメージや言語パッケージの再取得が頻発します。quagent はホスト側に専用の Pull-through Cache プロキシを配備し、vsock 経由（ゲスト側 `127.0.0.1:5000`）で安全にイメージおよびパッケージを中継・キャッシュします。
+使い捨て VM では終了時にストレージが破棄されるため、ベースイメージや言語パッケージの再取得が頻発します。quagent はホスト側に専用の Pull-through Cache プロキシを配備し、vsock 経由（ゲスト側 `127.0.0.1:51337`）で安全にイメージおよびパッケージを中継・キャッシュします。
 - **マルチエコシステム対応:**
   - **Docker:** `docker.io` は `registry-mirrors` により透過ミラー、`ghcr.io` はプレフィックス形式で取得。
-  - **Go:** `GOPROXY="http://127.0.0.1:5000/go,direct"` による Go モジュールキャッシュ。
-  - **Cargo (Rust):** `sparse+http://127.0.0.1:5000/cargo/index/` による crates.io Sparse Index & Crates キャッシュ（`config.json` の `dl` を自動書き換え）。
-  - **npm (Node.js):** `registry=http://127.0.0.1:5000/npm/` による npm レジストリ & tarball キャッシュ（メタデータ内の tarball URL を自動書き換え）。
-  - **PyPI (Python):** `index-url=http://127.0.0.1:5000/pypi/simple/` による Simple API & Wheel キャッシュ（リンクを自動書き換え）。
+  - **Go:** `GOPROXY="http://127.0.0.1:51337/go,direct"` による Go モジュールキャッシュ。
+  - **Cargo (Rust):** `sparse+http://127.0.0.1:51337/cargo/index/` による crates.io Sparse Index & Crates キャッシュ（`config.json` の `dl` を自動書き換え）。
+  - **npm (Node.js):** `registry=http://127.0.0.1:51337/npm/` による npm レジストリ & tarball キャッシュ（メタデータ内の tarball URL を自動書き換え）。
+  - **PyPI (Python):** `index-url=http://127.0.0.1:51337/pypi/simple/` による Simple API & Wheel キャッシュ（リンクを自動書き換え）。
 - **依存関係事前解決とバッチ集約承認 (連打防止):** 言語パッケージマネージャーに対し、上流メタデータを活用した依存関係ツリーの事前解決（Pre-resolution）およびデバウンスウィンドウ（400ms）による集約キューを配備。依存パッケージ一覧をまとめて承認コンソールで一括確認（`[y]` 承認して取得 / `[n]` 拒否）を求め、依存関係インストール時の承認連打を根本から防止します。
 - **読み取り専用と完全性検証:** キャッシュサーバーは `GET`/`HEAD` のみを許可し、VM からの書き込みは `405 Method Not Allowed` で拒否します。取得したファイルは SHA256 ダイジェスト等を検証した上で保存されます。
 - **保存先と構造:** ホスト側の `~/.cache/quagent/proxy/` 配下に全エコシステムを統一して保存します。Docker は `docker/blobs/sha256/`（レイヤー）と `docker/manifests/`（マニフェスト）、言語パッケージは `go/`, `cargo/`, `npm/`, `pypi/` に格納します。保存先と容量上限は設定ファイルの `cache`（`dir`, `max_size_gib`）で変更できます。

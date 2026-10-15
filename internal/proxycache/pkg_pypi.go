@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/nananek/quagent/internal/guest"
 )
 
 func parsePyPIPackageFilename(fn string) (pkgName, version string) {
@@ -119,8 +121,8 @@ func (s *Server) handlePyPISimple(w http.ResponseWriter, r *http.Request, pkg st
 	}
 
 	// リンク先をローカルプロキシに置換
-	// https://files.pythonhosted.org/packages/ -> http://127.0.0.1:5000/pypi/packages/
-	rewritten := bytes.ReplaceAll(data, []byte("https://files.pythonhosted.org/packages/"), []byte("http://127.0.0.1:5000/pypi/packages/"))
+	// https://files.pythonhosted.org/packages/ -> http://<guest の中継アドレス>/pypi/packages/
+	rewritten := bytes.ReplaceAll(data, []byte("https://files.pythonhosted.org/packages/"), []byte("http://"+guest.GuestProxyCacheAddr+"/pypi/packages/"))
 
 	_, _ = s.storage.SavePkgFile("pypi", cacheKey, bytes.NewReader(rewritten))
 

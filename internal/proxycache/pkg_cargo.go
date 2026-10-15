@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/nananek/quagent/internal/guest"
 )
 
 func parseCargoPath(p string) (action, relPath, crate, version string, ok bool) {
@@ -102,7 +104,7 @@ func (s *Server) handleCargoIndex(w http.ResponseWriter, r *http.Request, relPat
 		// dl URL をローカルプロキシに書き換え
 		var cfg map[string]any
 		if err := json.Unmarshal(data, &cfg); err == nil {
-			cfg["dl"] = "http://127.0.0.1:5000/cargo/crates/{crate}/{crate}-{version}.crate"
+			cfg["dl"] = "http://" + guest.GuestProxyCacheAddr + "/cargo/crates/{crate}/{crate}-{version}.crate"
 			if rewritten, err := json.Marshal(cfg); err == nil {
 				data = rewritten
 			}

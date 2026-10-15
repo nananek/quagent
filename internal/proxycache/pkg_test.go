@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/nananek/quagent/internal/console"
+	"github.com/nananek/quagent/internal/guest"
 )
 
 // roundTripperFunc は http.RoundTripper を関数で実装するヘルパー。
@@ -128,8 +129,8 @@ func TestCargoSparseIndexAndCrates(t *testing.T) {
 		t.Fatal(err)
 	}
 	dl, _ := cfg["dl"].(string)
-	if !strings.HasPrefix(dl, "http://127.0.0.1:5000/cargo/crates/") {
-		t.Fatalf("expected dl rewritten to 127.0.0.1:5000, got %s", dl)
+	if !strings.HasPrefix(dl, "http://"+guest.GuestProxyCacheAddr+"/cargo/crates/") {
+		t.Fatalf("expected dl rewritten to %s, got %s", guest.GuestProxyCacheAddr, dl)
 	}
 
 	// 2. crates ダウンロード & キャッシュ確認
@@ -185,7 +186,7 @@ func TestNPMMetadataAndTarball(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("npm packument expected 200, got %d", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "http://127.0.0.1:5000/npm/express/-/express-4.18.2.tgz") {
+	if !strings.Contains(rec.Body.String(), "http://"+guest.GuestProxyCacheAddr+"/npm/express/-/express-4.18.2.tgz") {
 		t.Fatalf("expected tarball rewritten, got: %s", rec.Body.String())
 	}
 
@@ -242,7 +243,7 @@ func TestPyPISimpleAndPackages(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("pypi simple expected 200, got %d", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "http://127.0.0.1:5000/pypi/packages/ab/cd/requests-2.31.0-py3-none-any.whl") {
+	if !strings.Contains(rec.Body.String(), "http://"+guest.GuestProxyCacheAddr+"/pypi/packages/ab/cd/requests-2.31.0-py3-none-any.whl") {
 		t.Fatalf("expected simple links rewritten, got: %s", rec.Body.String())
 	}
 

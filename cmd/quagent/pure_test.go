@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/nananek/quagent/internal/config"
+	"github.com/nananek/quagent/internal/guest"
 )
 
 func TestCodexConfigTOML(t *testing.T) {
@@ -49,17 +50,18 @@ func TestRefreshSourcesFromConfig(t *testing.T) {
 
 func TestPkgCacheWriteFiles(t *testing.T) {
 	user := "vuser"
+	addr := guest.GuestProxyCacheAddr
 	files, cmd := pkgCacheWriteFiles(user)
 	// ゲスト側のホームは環境依存の値なので、リテラルを避けて組み立てる。
 	home := filepath.Join("/home", user)
 
 	for _, want := range []string{
 		"/etc/profile.d/quagent-pkgcache.sh",
-		`export GOPROXY="http://127.0.0.1:5000/go,direct"`,
-		`export PIP_INDEX_URL="http://127.0.0.1:5000/pypi/simple/"`,
-		`export NPM_CONFIG_REGISTRY="http://127.0.0.1:5000/npm/"`,
+		`export GOPROXY="http://` + addr + `/go,direct"`,
+		`export PIP_INDEX_URL="http://` + addr + `/pypi/simple/"`,
+		`export NPM_CONFIG_REGISTRY="http://` + addr + `/npm/"`,
 		filepath.Join(home, ".cargo", "config.toml"),
-		"sparse+http://127.0.0.1:5000/cargo/index/",
+		"sparse+http://" + addr + "/cargo/index/",
 		filepath.Join(home, ".npmrc"),
 		filepath.Join(home, ".config", "pip", "pip.conf"),
 	} {

@@ -24,13 +24,15 @@ import (
 // Serve が設定ファイルから読み、handle が起動のたびに起動役へ包む。テストでは nil。
 var SandboxPolicy *sandbox.Policy
 
-// GuestProxyCachePort は guest 内でパッケージキャッシュプロキシの中継を待ち受けるポート。
-const GuestProxyCachePort = 5000
+// GuestProxyCacheAddr は guest 内でパッケージキャッシュプロキシの中継を待ち受けるアドレス。
+// Flask (5000) など利用者のワークロードが使う既定ポートと衝突しないよう、動的ポート帯の
+// 値を使う。host 側が cache から書き換える URL もこのアドレスを指すため、変更は必ずここで行う。
+const GuestProxyCacheAddr = "127.0.0.1:51337"
 
 // Serve は VM 内で vsock を待ち受け、host からのコマンドを実行する (`quagent __guest`)。
 // 実行するのはこのプロセスのユーザー (作業用の一般ユーザー) の権限。あわせて
 // 127.0.0.1:relayPort への接続を host の窓口 (vsock の hostPort) へ中継する。
-// hostProxyCachePort が 0 でなければ、127.0.0.1:GuestProxyCachePort への接続を host の
+// hostProxyCachePort が 0 でなければ、GuestProxyCacheAddr への接続を host の
 // パッケージキャッシュ窓口 (vsock の hostProxyCachePort) へ中継する。
 // SandboxPolicy が有効なら、host から来たコマンドを起動役 (`__sandbox`) 経由で起動し、
 // 本人には外せない seccomp / Landlock をかける。
@@ -64,9 +66,9 @@ func Serve(relayPort int, hostPort uint32, hostProxyCachePort uint32) error {
 		go relay(rl, func() (net.Conn, error) { return vsock.Dial(vsock.Host, hostPort, nil) })
 	}
 	if hostProxyCachePort != 0 {
-		dl, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", GuestProxyCachePort))
+		dl, err := net.Listen("tcp", GuestProxyCacheAddr)
 		if err == nil {
-			log.Printf("127.0.0.1:%d -> host のパッケージキャッシュ (vsock :%d) を中継", GuestProxyCachePort, hostProxyCachePort)
+			log.Printf("%s -> host のパッケージキャッシュ (vsock :%d) を中継", GuestProxyCacheAddr, hostProxyCachePort)
 			go relaySimple(dl, func() (net.Conn, error) { return vsock.Dial(vsock.Host, hostProxyCachePort, nil) })
 		} else {
 			log.Printf("パッケージキャッシュ中継の待ち受けに失敗: %v", err)

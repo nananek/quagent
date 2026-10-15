@@ -115,7 +115,7 @@ func TestGenerateDockerDaemonJSON(t *testing.T) {
 	}
 
 	// Test with registry mirrors
-	bWithMirrors, err := GenerateDockerDaemonJSON("/etc/quagent/docker-seccomp.json", "http://127.0.0.1:5000")
+	bWithMirrors, err := GenerateDockerDaemonJSON("/etc/quagent/docker-seccomp.json", "http://127.0.0.1:51337")
 	if err != nil {
 		t.Fatalf("GenerateDockerDaemonJSON with mirrors failed: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestGenerateDockerDaemonJSON(t *testing.T) {
 	if err := json.Unmarshal(bWithMirrors, &cfgWithMirrors); err != nil {
 		t.Fatalf("failed to unmarshal daemon config: %v", err)
 	}
-	if len(cfgWithMirrors.RegistryMirrors) != 1 || cfgWithMirrors.RegistryMirrors[0] != "http://127.0.0.1:5000" {
+	if len(cfgWithMirrors.RegistryMirrors) != 1 || cfgWithMirrors.RegistryMirrors[0] != "http://127.0.0.1:51337" {
 		t.Errorf("unexpected registry-mirrors: %v", cfgWithMirrors.RegistryMirrors)
 	}
 }
