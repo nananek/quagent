@@ -554,3 +554,39 @@ func TestDecideRelaxationSettlesOnApplyError(t *testing.T) {
 		t.Fatalf("status = %s, want denied", res.Status)
 	}
 }
+
+// TestRelaxationSessionScopeIsNotWidened は、このセッション中の承認がホスト単位では
+// なくスコープ単位で効くことを確かめる。狭い承認で広い緩和が無審査に通ってはならない。
+func TestRelaxationSessionScopeIsNotWidened(t *testing.T) {
+	m, _ := newTestManager(t)
+
+	// 「GET だけ」をこのセッション中に許可する。
+	req1, err := m.SubmitRelaxation(Relaxation{Host: "api.example.com", Methods: []string{"GET"}}, "read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DecideRelaxation(req1.ID, Decision{Status: Approved, Kind: Session}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 承認していない広いスコープは無審査で通ってはいけない (pending のまま)。
+	req2, err := m.SubmitRelaxation(Relaxation{
+		Host: "api.example.com", Headers: []string{"Authorization"},
+		Methods: []string{"POST"}, AllowBody: true,
+	}, "upload")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, settled := m.SettledRelaxation(req2.ID); settled {
+		t.Fatalf("承認していないスコープが無審査で通った: %+v", res)
+	}
+
+	// 承認済みスコープ内 (GET) の再申請はこれまでどおり自動承認。
+	req3, err := m.SubmitRelaxation(Relaxation{Host: "api.example.com", Methods: []string{"GET"}}, "read again")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, settled := m.SettledRelaxation(req3.ID); !settled || !res.Auto {
+		t.Fatalf("承認済みスコープの再申請が自動承認されない: %+v settled=%v", res, settled)
+	}
+}

@@ -51,7 +51,7 @@ func NewServer(storage *Storage, dockerHub, ghcr Upstream) *Server {
 		storage:       storage,
 		dockerHub:     dockerHub,
 		ghcr:          ghcr,
-		client:        &http.Client{Timeout: 30 * time.Minute},
+		client:        &http.Client{Timeout: 30 * time.Minute, CheckRedirect: safeRedirect},
 		approvedRepos: make(map[string]bool),
 	}
 	s.batch = NewBatchManager(func(info console.BatchDownloadInfo) error {

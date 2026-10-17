@@ -139,7 +139,7 @@ type Manager struct {
 
 	relaxations      map[string]headerpolicy.HostRule // host -> HostRule
 	relaxExpirations map[string]int64                 // host -> unix 秒
-	relaxSession     map[string]bool                  // このセッションでは確認しない
+	relaxSession     map[string]headerpolicy.HostRule // host -> このセッションで承認済みのスコープ
 	relaxPending     []*RelaxRequest
 	relaxByID        map[int]*RelaxRequest
 
@@ -195,7 +195,7 @@ func NewManager(apply Applier, alwaysPath string) (*Manager, error) {
 		byID: map[int]*Request{}, denied: map[string]time.Time{}, Notify: make(chan struct{}, 1),
 		relaxations:      map[string]headerpolicy.HostRule{},
 		relaxExpirations: map[string]int64{},
-		relaxSession:     map[string]bool{},
+		relaxSession:     map[string]headerpolicy.HostRule{},
 		relaxByID:        map[int]*RelaxRequest{},
 	}
 	b, err := os.ReadFile(alwaysPath)
@@ -668,8 +668,11 @@ func (m *Manager) SubmitRelaxation(rel Relaxation, reason string) (*RelaxRequest
 	}
 	m.relaxByID[id] = r
 
-	// このセッションですでに許可されているホストなら確認なしで通す
-	if m.relaxSession[rel.Host] {
+	// このセッションで承認済みのスコープに収まる申請だけ確認なしで通す。ホスト名だけで
+	// 通すと、人間が承認したスコープを超えた緩和 (ヘッダ追加・メソッド・本文) が
+	// 無審査で通ってしまう。記憶が無いホスト (ok=false) は必ず確認する。
+	if rule, ok := m.relaxSession[rel.Host]; ok && coveredByRule(rule, rel) {
+		r.claimed = true
 		m.mu.Unlock()
 		res, err := m.approveRelaxation(r, Session, true)
 		if err != nil {
@@ -774,15 +777,6 @@ func (m *Manager) DecideRelaxation(id int, d Decision) error {
 func (m *Manager) approveRelaxation(r *RelaxRequest, kind Kind, auto bool) (Result, error) {
 	var expires int64
 	host := r.Relaxation.Host
-	switch kind {
-	case Once:
-		expires = m.now().Add(OnceTTL).Unix()
-	case Session, Always:
-		m.mu.Lock()
-		m.relaxSession[host] = true
-		m.mu.Unlock()
-	}
-
 	rule := headerpolicy.HostRule{
 		Allow:            r.Relaxation.Headers,
 		AllowedMethods:   r.Relaxation.Methods,
@@ -790,7 +784,15 @@ func (m *Manager) approveRelaxation(r *RelaxRequest, kind Kind, auto bool) (Resu
 	}
 
 	m.mu.Lock()
-	m.relaxations[host] = rule
+	switch kind {
+	case Once:
+		expires = m.now().Add(OnceTTL).Unix()
+		m.relaxations[host] = rule
+	default: // Session / Always
+		// 承認済みスコープは広げる方向にだけ足す (狭い申請で既存の緩和を失わせない)。
+		m.relaxSession[host] = mergeRule(m.relaxSession[host], rule)
+		m.relaxations[host] = mergeRule(m.relaxations[host], rule)
+	}
 	if expires != 0 {
 		m.relaxExpirations[host] = expires
 	} else {
@@ -813,6 +815,73 @@ func (m *Manager) approveRelaxation(r *RelaxRequest, kind Kind, auto bool) (Resu
 		res.ExpiresAt = time.Unix(expires, 0).Format(time.RFC3339)
 	}
 	return res, nil
+}
+
+// coveredByRule は rel の要求が承認済みスコープ rule に収まるかを返す。無審査で
+// 通してよいのは、この部分集合のときだけ。
+func coveredByRule(rule headerpolicy.HostRule, rel Relaxation) bool {
+	for _, h := range rel.Headers {
+		if !allowListCovers(rule.Allow, h) {
+			return false
+		}
+	}
+	for _, m := range rel.Methods {
+		if !methodListCovers(rule.AllowedMethods, m) {
+			return false
+		}
+	}
+	if rel.AllowBody && !rule.AllowRequestBody {
+		return false
+	}
+	return true
+}
+
+// allowListCovers は許可リストが name を含むか (末尾 "*" は前方一致) を返す。
+func allowListCovers(allow []string, name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	for _, a := range allow {
+		a = strings.ToLower(strings.TrimSpace(a))
+		if prefix, ok := strings.CutSuffix(a, "*"); ok {
+			if name != "" && strings.HasPrefix(name, prefix) {
+				return true
+			}
+			continue
+		}
+		if a == name {
+			return true
+		}
+	}
+	return false
+}
+
+func methodListCovers(methods []string, m string) bool {
+	m = strings.ToUpper(strings.TrimSpace(m))
+	for _, x := range methods {
+		if strings.ToUpper(strings.TrimSpace(x)) == m {
+			return true
+		}
+	}
+	return false
+}
+
+// mergeRule は 2 つの緩和規則を足し合わせる (和集合。広げる方向にだけ働く)。
+func mergeRule(a, b headerpolicy.HostRule) headerpolicy.HostRule {
+	out := headerpolicy.HostRule{
+		Allow:            append([]string(nil), a.Allow...),
+		AllowedMethods:   append([]string(nil), a.AllowedMethods...),
+		AllowRequestBody: a.AllowRequestBody || b.AllowRequestBody,
+	}
+	for _, h := range b.Allow {
+		if !allowListCovers(a.Allow, h) {
+			out.Allow = append(out.Allow, h)
+		}
+	}
+	for _, m := range b.AllowedMethods {
+		if !methodListCovers(a.AllowedMethods, m) {
+			out.AllowedMethods = append(out.AllowedMethods, m)
+		}
+	}
+	return out
 }
 
 func (m *Manager) syncRelaxations() error {
