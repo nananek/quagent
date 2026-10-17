@@ -163,7 +163,7 @@ func (s *Server) handleConsole(w http.ResponseWriter, r *http.Request) {
 			if json.Unmarshal(data, &m) != nil {
 				continue
 			}
-			if !allowedConsoleInput(m.Type) {
+			if !isDecision(m.Type) {
 				continue
 			}
 			if err := bridge.Send(m); err != nil {
@@ -206,12 +206,11 @@ func (s *Server) handleSessionInfo(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// allowedConsoleInput はブラウザから受け付ける入力かを返す。承認コンソールの
-// プロトコルのうち、判断と URL 再発行だけを通す (ui / clipboard / quit は通さない)。
-func allowedConsoleInput(t string) bool {
+// isDecision はブラウザから受け付ける判断メッセージかを返す。承認コンソールの
+// プロトコルのうち、判断に関わる種別だけを通す (ui / clipboard / quit は通さない)。
+func isDecision(t string) bool {
 	switch t {
-	case "decide", "relaxdecide", "prdecide", "dockerdecide", "batchdecide", "clipdecide",
-		"hubreissue":
+	case "decide", "relaxdecide", "prdecide", "dockerdecide", "batchdecide", "clipdecide":
 		return true
 	}
 	return false

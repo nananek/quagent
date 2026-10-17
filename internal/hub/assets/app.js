@@ -193,18 +193,6 @@
     consoleWS.send(JSON.stringify(body));
   }
 
-  // --- アクセス URL の再発行 ---
-  const reissueBtn = document.getElementById("reissue-btn");
-  const reissueResult = document.getElementById("reissue-result");
-  if (reissueBtn) {
-    reissueBtn.addEventListener("click", () => {
-      if (consoleWS && consoleWS.readyState === WebSocket.OPEN) {
-        reissueBtn.disabled = true;
-        consoleWS.send(JSON.stringify({ type: "hubreissue" }));
-      }
-    });
-  }
-
   // --- 履歴 ---
   function targetOf(m) {
     switch (m.type) {
@@ -373,17 +361,6 @@
       case "log":
         appendLog(m.text);
         break;
-      // URL 再発行
-      case "hubreissued": {
-        if (reissueBtn) reissueBtn.disabled = false;
-        if (reissueResult) {
-          reissueResult.hidden = false;
-          reissueResult.textContent = m.error
-            ? "再発行できません: " + m.error
-            : "新しい URL: " + m.url;
-        }
-        break;
-      }
     }
   }
 
@@ -396,7 +373,6 @@
     };
     ws.onclose = () => {
       consoleWS = null;
-      if (reissueBtn) reissueBtn.disabled = false;
       setTimeout(connectConsole, 1500);
     };
     ws.onerror = () => ws.close();

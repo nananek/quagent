@@ -1566,6 +1566,7 @@ func (m model) renderFooter() string {
 	} else {
 		leftParts = append(leftParts, styleFooter.Render(tabText))
 	}
+	leftParts = append(leftParts, styleFooter.Render("[r] URL再発行"))
 
 	if m.activeTab == tabPending && len(m.pending) > 0 {
 		leftParts = append(leftParts, styleFooter.Render("[1/2/3/d/q/y/n] 判定"))

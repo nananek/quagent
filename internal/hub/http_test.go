@@ -117,14 +117,14 @@ func TestExchangeAndAuth(t *testing.T) {
 	}
 }
 
-func TestAllowedConsoleInput(t *testing.T) {
-	for _, t2 := range []string{"decide", "relaxdecide", "prdecide", "dockerdecide", "batchdecide", "clipdecide", "hubreissue"} {
-		if !allowedConsoleInput(t2) {
-			t.Errorf("%s は通すべき", t2)
+func TestIsDecision(t *testing.T) {
+	for _, t2 := range []string{"decide", "relaxdecide", "prdecide", "dockerdecide", "batchdecide", "clipdecide"} {
+		if !isDecision(t2) {
+			t.Errorf("%s は判断として通すべき", t2)
 		}
 	}
-	for _, t2 := range []string{"ui", "quit", "clipboard", "log", ""} {
-		if allowedConsoleInput(t2) {
+	for _, t2 := range []string{"ui", "quit", "clipboard", "log", "hubreissue", ""} {
+		if isDecision(t2) {
 			t.Errorf("%s は通してはいけない", t2)
 		}
 	}
