@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -125,6 +126,101 @@ func TestIsDecision(t *testing.T) {
 	for _, t2 := range []string{"ui", "quit", "clipboard", "log", ""} {
 		if isDecision(t2) {
 			t.Errorf("%s は通してはいけない", t2)
+		}
+	}
+}
+
+// TestSecurityHeaders は CSP などの防御ヘッダが全応答に付き、CSP が
+// eval を許していないことを確認する。
+func TestSecurityHeaders(t *testing.T) {
+	s := newTestServer()
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/") // Cookie 無しで 401 でもヘッダは付く
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	csp := resp.Header.Get("Content-Security-Policy")
+	if csp == "" {
+		t.Fatal("CSP が無い")
+	}
+	for _, want := range []string{"script-src 'self'", "default-src 'none'", "frame-ancestors 'none'", "object-src 'none'"} {
+		if !strings.Contains(csp, want) {
+			t.Errorf("CSP に %q が無い: %s", want, csp)
+		}
+	}
+	if strings.Contains(csp, "'unsafe-eval'") {
+		t.Errorf("CSP が unsafe-eval を許している: %s", csp)
+	}
+	if got := resp.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("X-Content-Type-Options: %q", got)
+	}
+	if got := resp.Header.Get("Referrer-Policy"); got != "no-referrer" {
+		t.Errorf("Referrer-Policy: %q", got)
+	}
+}
+
+// TestAssetsHaveNoInlineCode は同梱 HTML にインラインの script/style が無いことを
+// 確認する (CSP を緩めないための回帰ガード)。
+func TestAssetsHaveNoInlineCode(t *testing.T) {
+	b, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(b)
+	if strings.Contains(html, "<style") {
+		t.Error("index.html にインラインの <style> がある (style-src を緩める必要が出る)")
+	}
+	if strings.Contains(html, "<script>") || strings.Contains(html, "<script type") {
+		t.Error("index.html にインラインの <script> がある (script-src 'self' で動かない)")
+	}
+}
+
+// TestAssetServing は同梱資産が正しいパスで配信されることを確認する
+// (FileServer のプレフィックス取り違えの回帰ガード)。
+func TestAssetServing(t *testing.T) {
+	s := newTestServer()
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+
+	for _, tc := range []struct{ path, ctype string }{
+		{"/assets/app.css", "text/css"},
+		{"/assets/app.js", "javascript"},
+		{"/assets/xterm.js", "javascript"},
+		{"/assets/xterm.css", "text/css"},
+		{"/assets/addon-fit.js", "javascript"},
+	} {
+		resp, err := http.Get(ts.URL + tc.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		got := resp.Header.Get("Content-Type")
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("%s -> %d", tc.path, resp.StatusCode)
+			continue
+		}
+		if !strings.Contains(got, tc.ctype) {
+			t.Errorf("%s Content-Type = %q", tc.path, got)
+		}
+		if len(body) < 10 {
+			t.Errorf("%s が小さすぎる: %d", tc.path, len(body))
+		}
+	}
+
+	// 許可リストに無いもの (テンプレート・README) は配信しない。
+	for _, p := range []string{"/assets/index.html", "/assets/README.md", "/assets/", "/assets/../go.mod"} {
+		resp, err := http.Get(ts.URL + p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			t.Errorf("%s が配信されている: %d", p, resp.StatusCode)
 		}
 	}
 }

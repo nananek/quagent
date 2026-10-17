@@ -8,7 +8,6 @@ package hub
 import (
 	"errors"
 	"fmt"
-	"io/fs"
 	"net"
 	"net/http"
 	"strconv"
@@ -140,14 +139,66 @@ func (s *Server) Close() {
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/s/", s.handleExchange)
-	if sub, err := fs.Sub(assetsFS, "assets"); err == nil {
-		mux.Handle("/assets/", http.FileServer(http.FS(sub)))
-	}
+	mux.HandleFunc("/assets/", s.handleAsset)
 	mux.HandleFunc("/api/session", s.handleSessionInfo)
 	mux.HandleFunc("/api/terminal", s.handleTerminal)
 	mux.HandleFunc("/api/console", s.handleConsole)
 	mux.HandleFunc("/", s.handleIndex)
-	return s.checkHost(mux)
+	return s.securityHeaders(s.checkHost(mux))
+}
+
+// assetContentType は配信を許す同梱資産と、その Content-Type。
+// 許可リストにすることで、テンプレートや README が /assets/ から漏れないようにする。
+var assetContentType = map[string]string{
+	"app.css":      "text/css; charset=utf-8",
+	"app.js":       "text/javascript; charset=utf-8",
+	"xterm.js":     "text/javascript; charset=utf-8",
+	"xterm.css":    "text/css; charset=utf-8",
+	"addon-fit.js": "text/javascript; charset=utf-8",
+}
+
+// handleAsset は同梱資産のうち許可したものだけを返す。
+func (s *Server) handleAsset(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/assets/")
+	ct, ok := assetContentType[name]
+	if !ok || strings.ContainsRune(name, '/') {
+		http.NotFound(w, r)
+		return
+	}
+	b, err := assetsFS.ReadFile("assets/" + name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", ct)
+	_, _ = w.Write(b)
+}
+
+// csp は hub のページに適用する Content Security Policy。
+//
+// script は自前の /assets/*.js だけを許し、eval も inline も許さない。style は
+// 自前の CSS に加えて 'unsafe-inline' を許す: 端末表示の xterm.js はターミナル
+// ごとに <style> を注入するため、これが無いと端末が描画されない (自前の CSS は
+// assets/app.css に外出ししてあるので、'unsafe-inline' が要るのは xterm.js の
+// 注入するスタイルだけ)。connect-src の 'self' は同じ origin の WebSocket を含む。
+const csp = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+	"img-src 'self' data:; font-src 'self'; connect-src 'self'; " +
+	"base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'"
+
+// securityHeaders は CSP と周辺の防御ヘッダを付ける。
+func (s *Server) securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Content-Security-Policy", csp)
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("X-Frame-Options", "DENY")
+		// ワンタイム URL やセッション情報をブラウザに残さない (資産は静的なので除く)。
+		if !strings.HasPrefix(r.URL.Path, "/assets/") {
+			h.Set("Cache-Control", "no-store")
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // checkHost は Host ヘッダを許可リストと照合する (DNS リバインディング対策)。

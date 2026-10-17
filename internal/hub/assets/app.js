@@ -8,9 +8,9 @@
   // xterm.js が同梱されていない場合は端末ビューだけを諦め、承認パネルは動かす。
   if (typeof Terminal === "undefined" || typeof FitAddon === "undefined") {
     document.getElementById("terminal").innerHTML =
-      '<p style="padding:1rem;color:#f87171">端末表示ライブラリ (xterm.js) が同梱されていません。' +
-      'internal/hub/assets に xterm.js / addon-fit.js / xterm.css を配置してください ' +
-      '(Makefile の hub-assets を参照)。承認パネルは利用できます。</p>';
+      '<p class="notice">端末表示ライブラリ (xterm.js) が同梱されていません。' +
+      "internal/hub/assets に xterm.js / addon-fit.js / xterm.css を配置してください " +
+      "(Makefile の hub-assets を参照)。承認パネルは利用できます。</p>";
     connectConsole();
     return;
   }

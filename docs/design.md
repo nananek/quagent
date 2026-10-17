@@ -392,6 +392,9 @@ hub はセッションの `console.sock` へ `{"type":"ui"}` として接続し�
 | シークレット交換の試行 | レート制限（総当たり防止）、失敗応答は一律 |
 | Webhook 送信 | タイムアウト・レート制限付き、失敗は無視 |
 | 待ち受け | Tailscale IP のみ（既定）、`Host` ヘッダ許可リスト |
+| ブラウザの CSP | `default-src 'none'`、`script-src 'self'`（eval・inline 不可）、`style-src 'self' 'unsafe-inline'`（後述） |
+
+- **CSP とヘッダ:** 配信するページには `default-src 'none'` を土台にした CSP を付け、`script-src 'self'` で自前のスクリプトだけを許します（`eval` もインライン `<script>` も使いません）。`style-src` だけは `'unsafe-inline'` を許します。端末表示の xterm.js はターミナルごとに `<style>` を注入するため、これが無いと描画できないためです（xterm.js は `eval` / `new Function` を使わないことを同梱物で確認済み）。自前の CSS は外部ファイルに置き、`'unsafe-inline'` が要る理由を xterm.js だけに限定しています。ほかに `X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`（ワンタイム URL の Referer 漏洩防止）、`X-Frame-Options: DENY` を付けます。
 
 - **ブラウザの権限 = そのセッションの操作権:** 認証された閲覧者は、そのセッションの承認判断と端末入力を行えます（ローカルの承認コンソールと同等）。したがって URL/Cookie の漏洩はセッションの乗っ取りに等しく、Tailscale のネットワーク境界とワンタイム URL が主要な防御です。
 - **VM の攻撃面は増えない:** hub はホスト側で完結し、VM からの新しい経路や権限を追加しません。既存の `console.sock` と tmux を読むだけです。
