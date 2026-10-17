@@ -62,6 +62,15 @@
     if (term) term.options.theme = TERM_THEMES[resolvedTheme()] || TERM_THEMES.dark;
   }
 
+  // エージェントの TUI は端末の配色を色問い合わせ (OSC 11) で決める。quagent run が
+  // 起動端末の配色を判定できなかったとき、hub がここで送った配色をファイル経由で
+  // __attach に渡す (色が tmux クライアントの接続状況で揺れるのを防ぐ)。
+  function sendTermTheme() {
+    if (termWS && termWS.readyState === WebSocket.OPEN) {
+      termWS.send(JSON.stringify({ type: "theme", scheme: resolvedTheme() }));
+    }
+  }
+
   function renderThemeButton() {
     if (!themeBtn || !theme) return;
     const ui = THEME_UI[theme.read()] || THEME_UI.auto;
@@ -79,11 +88,16 @@
       theme.apply(next);
       renderThemeButton();
       applyTermTheme();
+      sendTermTheme();
     });
     // 自動のときは OS の設定変更に追従して端末の配色も切り替える (ページは CSS が追従)。
     if (window.matchMedia) {
       const mq = window.matchMedia("(prefers-color-scheme: light)");
-      const onChange = () => { if (theme.read() === "auto") applyTermTheme(); };
+      const onChange = () => {
+        if (theme.read() !== "auto") return;
+        applyTermTheme();
+        sendTermTheme();
+      };
       if (mq.addEventListener) mq.addEventListener("change", onChange);
       else if (mq.addListener) mq.addListener(onChange);
     }
@@ -135,7 +149,7 @@
       const ws = new WebSocket(proto + "//" + location.host + "/api/terminal");
       ws.binaryType = "arraybuffer";
       termWS = ws;
-      ws.onopen = () => { setConn(true, "接続済み"); termFit(); };
+      ws.onopen = () => { setConn(true, "接続済み"); termFit(); sendTermTheme(); };
       ws.onmessage = (ev) => {
         if (typeof ev.data === "string") term.write(ev.data);
         else term.write(new Uint8Array(ev.data));
@@ -156,6 +170,15 @@
 
     window.addEventListener("resize", termFit);
     window.addEventListener("orientationchange", () => setTimeout(termFit, 200));
+    // 読み込み直後はレイアウト (CSS) やフォントの確定前に fit してしまい、端末の
+    // 大きさが 0 に近いままで表示されないことがある (リロードで直るのは資産が
+    // キャッシュされて確定が早いため)。確定した時点と要素の大きさの変化で fit し直す。
+    if (window.ResizeObserver) {
+      const ro = new ResizeObserver(() => termFit());
+      ro.observe(document.getElementById("terminal"));
+    }
+    window.addEventListener("load", termFit);
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(termFit);
     connectTerminal();
     setTimeout(termFit, 100);
   }

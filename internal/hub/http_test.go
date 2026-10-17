@@ -243,6 +243,20 @@ func readAsset(t *testing.T, name string) string {
 	return string(b)
 }
 
+// TestAppJSSendsBrowserTheme はブラウザの配色を hub へ送る往復があることを確かめる。
+// run が端末の配色を判定できなかったとき、送った配色が __attach の色問い合わせの
+// 答えになる (デタッチで黒く転ぶのを防ぐ)。
+func TestAppJSSendsBrowserTheme(t *testing.T) {
+	appJS := readAsset(t, "assets/app.js")
+	if !strings.Contains(appJS, `type: "theme"`) || !strings.Contains(appJS, "scheme: resolvedTheme()") {
+		t.Error("app.js がブラウザの配色を送っていない")
+	}
+	// 定義 (1) + 接続時・切り替え時・OS 設定変更時 (3) で呼ばれる。
+	if n := strings.Count(appJS, "sendTermTheme()"); n < 4 {
+		t.Errorf("sendTermTheme() の呼び出しが足りない: %d", n)
+	}
+}
+
 // TestAppJSInitializesAfterState は端末の初期化が状態変数の宣言より前に走らないことを
 // 確かめる (let の TDZ で端末が表示されなくなった回帰ガード)。
 func TestAppJSInitializesAfterState(t *testing.T) {

@@ -1,9 +1,47 @@
 package hub
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestSessionSetTheme(t *testing.T) {
+	s, err := newSession("id", "n", "", "opencode", "s", "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ThemeFile が空 (run が配色を判定済み、または未登録) なら何もしない。
+	if err := s.SetTheme("light"); err != nil {
+		t.Errorf("ThemeFile が空でもエラーにしない: %v", err)
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "theme")
+	s.ThemeFile = path
+	if err := s.SetTheme("light"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(b)) != "light" {
+		t.Fatalf("theme = %q, want light", b)
+	}
+	// 一時ファイルを残さない (読み手が途中の状態を見ないよう置き換える)。
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 1 || entries[0].Name() != "theme" {
+		t.Errorf("作業ディレクトリに余計なファイルが残っている: %v (%v)", entries, err)
+	}
+	// 不正な配色は書かない。
+	if err := s.SetTheme("bogus"); err == nil {
+		t.Error("不正な配色を受け付けた")
+	}
+	if b, _ := os.ReadFile(path); strings.TrimSpace(string(b)) != "light" {
+		t.Errorf("不正な値で上書きされた: %q", b)
+	}
+}
 
 func TestSessionExchangeOnce(t *testing.T) {
 	s, err := newSession("id1", "name", "/repo", "opencode", "quagent-x", "/tmp/c.sock")

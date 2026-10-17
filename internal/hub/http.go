@@ -22,10 +22,13 @@ const terminalQueue = 256
 
 // termInput はブラウザから端末へ送るメッセージ。
 type termInput struct {
-	Type string `json:"type"`           // "input" / "resize"
+	Type string `json:"type"`           // "input" / "resize" / "theme"
 	Data string `json:"data,omitempty"` // base64 の入力バイト
 	Cols int    `json:"cols,omitempty"`
 	Rows int    `json:"rows,omitempty"`
+	// Scheme はブラウザの配色 (light / dark)。run が端末の配色を判定できな
+	// かったときにエージェントへ伝えるため、テーマファイルへ書く。
+	Scheme string `json:"scheme,omitempty"`
 }
 
 // handleTerminal はエージェントの端末を WebSocket で中継する。
@@ -88,6 +91,10 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 				}
 			case "resize":
 				_ = cc.Resize(m.Cols, m.Rows)
+			case "theme":
+				if err := sess.SetTheme(m.Scheme); err != nil {
+					s.logf("端末の配色を記録できない (%s): %v", sess.Name, err)
+				}
 			}
 		}
 	}()

@@ -852,9 +852,13 @@ runcmd:
 	}
 
 	session := "quagent-" + filepath.Base(work)
+	// ブラウザの配色を hub が書き込むファイル。run が端末の配色を判定できなかった
+	// (--theme が空の) ときだけ __attach が読み、色問い合わせに直接答える。これで
+	// tmux クライアントの接続状況で配色が揺れない (デタッチで黒く転ぶのを防ぐ)。
+	themeFile := filepath.Join(work, "theme")
 	// Web 遠隔操作 (hub) への登録。登録はオプトインで、hub が居なくても run は続ける。
 	if o.Hub {
-		reg, err := hubRegister(session, work, repo, o.Agent)
+		reg, err := hubRegister(session, work, repo, o.Agent, themeFile)
 		if err != nil {
 			logf("hub に登録できない: %v (quagent hub を起動してから再実行すると遠隔操作できる)", err)
 		} else {
@@ -867,13 +871,18 @@ runcmd:
 	// 端末の配色を決めてエージェントに伝える。tmux のクライアント接続状況で答えが
 	// 揺れないよう、色問い合わせには __attach が直接答える (internal/guest/osc.go)。
 	termTheme := resolveTermTheme(o.TermTheme)
-	if termTheme != "" {
+	switch {
+	case termTheme != "":
 		logf("端末の配色: %s (エージェントの色問い合わせに直接答える)", termTheme)
+	case o.Hub:
+		logf("端末の配色を判定できない。ブラウザの配色を %s に記録し、接続中はそれで答える", themeFile)
+	default:
+		logf("端末の配色を判定できない。必要なら --term-theme light|dark で固定できる")
 	}
 
 	cur := o.Agent
 	for {
-		agent := g.interactiveArgv(paneCommand, termTheme)
+		agent := g.interactiveArgv(paneCommand, termTheme, themeFile)
 		if err := runTmux(session, agent, []string{self, consoleCommand, filepath.Join(work, "console.sock")}, con.Quit); err != nil {
 			return err
 		}
@@ -1297,18 +1306,19 @@ func holdWindowName(pane string) func() {
 
 // hubRegister は Web 遠隔操作 (hub) にセッションを登録する。hub の socket が無ければ
 // エラーを返す (呼び出し側は警告して続行する)。
-func hubRegister(session, work, repo, agent string) (*hub.Registration, error) {
+func hubRegister(session, work, repo, agent, themeFile string) (*hub.Registration, error) {
 	sock := paths.HubSocket()
 	if _, err := os.Stat(sock); err != nil {
 		return nil, fmt.Errorf("hub の socket が無い (%s)", sock)
 	}
 	req := hub.Request{
-		ID:      filepath.Base(work),
-		Name:    filepath.Base(repo),
-		Repo:    repo,
-		Agent:   agent,
-		Session: session,
-		Console: filepath.Join(work, "console.sock"),
+		ID:        filepath.Base(work),
+		Name:      filepath.Base(repo),
+		Repo:      repo,
+		Agent:     agent,
+		Session:   session,
+		Console:   filepath.Join(work, "console.sock"),
+		ThemeFile: themeFile,
 	}
 	return hub.Register(sock, req, 5*time.Second)
 }
