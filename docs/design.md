@@ -14,7 +14,7 @@ quagent は境界制御と内部制限を組み合わせた多層防御を採用
 | **第2層: ゲストOS & サンドボックス** | ・非特権 `agent` ユーザーと rootless Docker<br>・カーネル硬化（Lockdown、モジュール署名、32bit ABI 廃止）<br>・VM 内コマンドの seccomp / Landlock 制限<br>・プロセス間権限分離（窓口 PID 検証、設定ファイル不可視化） |
 | **第3層: ネットワーク & Egress 遮断** | ・ホスト側 nftables による Default Deny と IPv6 遮断<br>・自前 DNS による名前解決制御と内部向け IP 遮断<br>・Web 透過プロキシによる SNI / Host 検証<br>・Content Guard / DLP による機密情報漏洩遮断と動的緩和 |
 | **第4層: 機密情報の非保持** | ・LLM API キー、GitHub トークン、GPG 鍵を VM に置かない<br>・ホスト側 LLM 認証プロキシ（推論・モデル一覧のみ転送）<br>・OpenAPI ツールサーバーのホスト側プロキシ<br>・使い捨て鍵とホスト正規鍵による二重署名 Git PR<br>・rootless Docker 向け OCI Pull-through Cache（vsock 経由・読み取り専用） |
-| **第5層: コントロール & 承認** | ・承認コンソールによる対話確認（通信申請、動的緩和、Docker イメージ取得、PR 作成）<br>・Git オブジェクト取り込み時の `transfer.fsckObjects` 検査<br>・画面偽装防止（制御文字・Bidi エスケープ）<br>・各種リソース上限と改変不能なホスト監査ログ (`host.log`) |
+| **第5層: コントロール & 承認** | ・承認コンソールによる対話確認（通信申請、動的緩和、Docker イメージ取得、PR 作成）<br>・Web 遠隔操作 (hub) のワンタイム URL 認証と Tailscale バインド<br>・Git オブジェクト取り込み時の `transfer.fsckObjects` 検査<br>・画面偽装防止（制御文字・Bidi エスケープ）<br>・各種リソース上限と改変不能なホスト監査ログ (`host.log`) |
 
 | **第6層: ビルド & サプライチェーン** | ・静的リンクバイナリ (`CGO_ENABLED=0`)<br>・ベースイメージの GPG 署名検証 (Arch, Gentoo)<br>・Dependabot 更新の 7 日間遅延適用 |
 
@@ -294,6 +294,108 @@ PR 作成は既定で承認制（`--pr-approval`、TUI の起動設定「PR を�
 - `n` が入力された場合や 10 分間応答がない場合は、push および PR 作成は中止されます。
 - 自動 push に戻す場合は `--pr-approval=false` を指定します。
 - 承認フローを有効にした場合でも、PR 作成後に GitHub 上で内容を最終確認することを推奨します。
+
+## Web 遠隔操作 (hub): ワンタイム URL と tmux control mode で Tailscale 越しに操作する
+
+`quagent hub` はホスト側に常駐するデーモンで、登録された run セッションの**端末 (エージェント TUI)** と**承認コンソール**をブラウザへ中継します。スマートフォンからの利用を想定し、Tailscale 越しのアクセスを前提とします。VM 側には新しい通信経路を追加せず、ホスト側の既存の制御点（`console.sock` と tmux）を再利用します。
+
+```
+[スマホ / ブラウザ]
+      │  HTTP / WebSocket (Tailscale が WireGuard で暗号化)
+      ▼
+[quagent hub (ホスト常駐)]
+      ├── unix socket: hub.sock        … run からの登録 (生存確認を兼ねる)
+      ├── unix socket: console.sock    … 承認コンソール (既存プロトコルの ui クライアント)
+      └── tmux -C attach-session       … 端末の中継 (control mode)
+               │
+               ▼
+      [quagent run / tmux セッション] ── vsock ──► [VM (エージェント)]
+```
+
+### 1. セッションの登録 (hub.sock)
+
+`quagent hub` は `~/.local/state/quagent/hub.sock`（パーミッション 0600）で待ち受けます。`quagent run` で「hub に登録する」を有効にすると、run プロセスがこの socket へ新行区切り JSON でセッション情報（run の ID、表示名、リポジトリ、エージェント、tmux セッション名、`console.sock` のパス）を送り、**接続を保持**します。
+
+- **生存確認:** 登録は接続そのものが生存の根拠です。接続が切れると hub は登録を破棄します（ハートビート用の別メッセージは不要）。
+- **応答:** hub は登録に対してワンタイム URL（後述）を返し、run はログに表示します。
+- **信頼境界:** socket は 0600 のため、登録できるのは同一ユーザーのプロセスだけです。登録の有無は run ごとのオプトインです。
+- **上限:** 同時登録数（既定 32）を超える登録は拒否します。
+
+### 2. 認証: ワンタイム URL を Cookie に交換する
+
+登録時に hub は 32 バイトの乱数シークレットを発行し、`{base_url}/s/{secret}` を run へ返します。
+
+1. ブラウザが `GET /s/{secret}` を開くと、hub は生存するセッションに一致し、かつ**未交換**の場合に限り、セッション束縛の別トークンを持つ `HttpOnly` / `SameSite=Lax` の Cookie を発行し、`/` へリダイレクトします。
+2. 交換に使った URL のシークレットは消費され、以降その URL は無効になります（再アクセスには再発行が必要）。URL を共有しても、最初に開いた者だけが入れます。
+3. Cookie のトークンは hub のメモリにのみ保持し、セッション終了または hub の再起動で失効します。
+
+- **総当たり対策:** シークレットは定数時間比較し、交換試行はレート制限します。不一致時は一律同じ応答を返し、シークレットをログに残しません。
+- **DNS リバインディング対策:** 許可したホスト名（`base_url` のホスト）以外の `Host` ヘッダのリクエストは拒否します。
+- **待ち受け:** 既定では Tailscale の IP にだけバインドし、`0.0.0.0` にはバインドしません。トランスポートは Tailscale (WireGuard) が暗号化します。`tailscale serve` で HTTPS を前置する構成も可能で、その場合は `base_url` を `https://…` にし、Cookie に `Secure` を付けます。
+
+### 3. 端末の中継: tmux control mode
+
+run の tmux セッションは、ペイン 0 がエージェント（`quagent __attach` → vsock → ゲスト PTY）、ペイン 1 が承認コンソールです（`runTmux`）。hub は `tmux -C attach-session -t <session>` を子プロセスとして起動し、control mode の制御行を解釈して、エージェントのペイン分だけをブラウザへ送ります。
+
+control mode のワイヤ仕様は実機（tmux 3.5）で確認済みです。
+
+- **出力:** `%output %<pane-id> <data>` の形で全ペイン分が届きます。hub は `tmux list-panes -t <session> -F '#{pane_index} #{pane_id}'` で解決したペイン 0 の ID（例 `%0`）に一致する行だけを抽出します。
+- **エスケープ:** `<data>` は非可印バイトと `\` を 3 桁八進 `\ooo`（例: `\033`、`\007`、`\134`）でエスケープします。UTF-8 の高位バイトはそのまま流れます。デコーダは `\ooo` のみを戻し、それ以外は素通しします。
+- **入力:** ブラウザの打鍵（xterm.js が生成するエスケープシーケンスを含む）を、`send-keys -t <pane> -H <hex...>` で生バイトのまま送ります。
+- **リサイズ:** `refresh-client -C <cols>x<rows>` で control クライアントのサイズを伝えます。`window-size` の既定は `latest` で、最後にサイズを変えたクライアントが共有ウィンドウを決めてしまうため、セッションに `window-size largest` を設定し、スマートフォンの接続でデスクトップ側の表示が縮まないようにします。
+- **フロー制御:** 出力が追いつかないと tmux は `%pause` を送ります。hub は上限付きのキューで滞留させ、溢れたら `refresh-client -A` で `%pause`/`%continue` を制御します。ブラウザが遅い間も run 本体はブロックしません。
+- **画面偽装と OSC 52:** エージェントのペインは `__attach` が OSC 52 を除去してから tmux に渡しているため、ブラウザへは流れません。xterm.js にはクリップボード連携を付けません。
+
+### 4. 承認コンソールの中継
+
+hub はセッションの `console.sock` へ `{"type":"ui"}` として接続し、既存プロトコル（`request`/`settled`、`relaxrequest`、`prrequest`、`dockerrequest`、`batchrequest`、`clip`）を受信してブラウザへ配信します。ブラウザからの判断は `decide` / `relaxdecide` / `prdecide` / `dockerdecide` / `batchdecide` / `clipdecide` として返します。プロトコル自体の変更は不要です（複数 UI クライアントを前提に設計済み）。
+
+- 端末側の承認コンソール TUI と hub は**並立**します。申請の決着はどちらからでも行え、二重決着は冪等に処理されます（既存の `claim`/settle 実装）。
+- `console.sock` が切れた場合は hub が再接続します（既存の UI クライアントと同じ挙動）。
+
+### 5. Discord Webhook 通知
+
+セッションの開始と、承認ダイアログの発生を Discord Webhook へ通知します。Webhook は一方向のため、通知メッセージにセッション URL を添え、タップしてブラウザの承認パネルで承認する導線とします。
+
+- **秘密の取り出し方:** 他の秘密情報と同じく `discord_webhook_command` / `_env` / `_file` のいずれかで取得し、設定ファイルに生の Webhook URL を書かなくても済むようにします。
+- **通知内容:** セッション開始（表示名・リポジトリ・URL）、承認リクエスト（種別・対象ドメイン・理由・URL）。理由やドメインは制御文字・Bidi を無害化してから載せます。
+- **非ブロック:** 通知の失敗や遅延が承認処理を妨げてはいけません。送信はタイムアウト付き・レート制限付きのバックグラウンド送信とし、本文にシークレットを含めません。
+
+### 6. 設定と起動
+
+```json
+"hub": {
+  "enabled": false,
+  "listen": "tailscale",
+  "port": 8787,
+  "base_url": "",
+  "notify": {
+    "discord_webhook_command": ["pass", "show", "quagent/discord-webhook"],
+    "on_session_start": true,
+    "on_approval": true
+  }
+}
+```
+
+- `enabled` は既定 false（オプトイン）。`quagent hub` で起動します。
+- `listen` は `"tailscale"`（既定。`tailscale ip -4` の IP にバインド）または `"127.0.0.1:PORT"` のような明示アドレス。`tailscale serve` で HTTPS を前置する場合は `127.0.0.1` を使います。
+- `base_url` は通知や URL 生成に使う外部からの基点。未指定なら `http://<tailscale-ip>:<port>`。
+- run 側は `quagent run --hub` または TUI の「hub に登録する」でオプトインします。hub が起動していない場合は警告して登録せずに続行します（run を失敗させません）。
+
+### 7. 上限と脅威モデル
+
+| 項目 | 上限 / 方針 |
+| --- | --- |
+| 登録セッション数 | 既定 32 |
+| セッションあたりの閲覧クライアント | 既定 4 |
+| WebSocket フレーム / バッファ | 1 MiB、溢れたら停止（`%pause`） |
+| シークレット交換の試行 | レート制限（総当たり防止）、失敗応答は一律 |
+| Webhook 送信 | タイムアウト・レート制限付き、失敗は無視 |
+| 待ち受け | Tailscale IP のみ（既定）、`Host` ヘッダ許可リスト |
+
+- **ブラウザの権限 = そのセッションの操作権:** 認証された閲覧者は、そのセッションの承認判断と端末入力を行えます（ローカルの承認コンソールと同等）。したがって URL/Cookie の漏洩はセッションの乗っ取りに等しく、Tailscale のネットワーク境界とワンタイム URL が主要な防御です。
+- **VM の攻撃面は増えない:** hub はホスト側で完結し、VM からの新しい経路や権限を追加しません。既存の `console.sock` と tmux を読むだけです。
+- **非特権:** hub も他のホスト側処理と同様に非 root で動作します。
 
 ## 環境構築手順のコード化: レシピディレクトリによるベースイメージ管理
 
