@@ -27,9 +27,17 @@ type ClipboardEvent struct {
 // それ以外の出力はそのまま (OSC 52 以外の OSC も) out に流す。tmux や host の
 // 端末に OSC 52 が届かないので、VM が勝手にクリップボードを書き換えたり読み出したり
 // できない。
+//
+// colors が nil でなければ、端末の色問い合わせ (OSC 10/11/12) にも自分で答える。
+// tmux はクライアントの接続状況によって問い合わせの転送先を変える (実端末が付いて
+// いればその端末、離れればハブのクライアント) ため、答える主体が揺れて配色が
+// 変わってしまう。ここで一元的に答えて、明暗を安定させる。応答は端末ではなく
+// inject (エージェントの入力) へ流す。
 type oscFilter struct {
 	out    io.Writer
 	onClip func(ClipboardEvent)
+	colors *TerminalColors
+	inject func([]byte)
 
 	state    int
 	osc      []byte
@@ -112,6 +120,14 @@ func (f *oscFilter) finish(pass []byte, term []byte) []byte {
 	if strings.HasPrefix(body, "52;") {
 		f.clipboard(body)
 		return pass
+	}
+	if f.colors != nil {
+		if reply, ok := f.colors.replyColorQuery(body); ok {
+			if f.inject != nil {
+				f.inject(reply)
+			}
+			return pass // 色問い合わせは端末へ流さず、ここで答える
+		}
 	}
 	if f.overflow {
 		return pass // 途中を捨てたものは流さない

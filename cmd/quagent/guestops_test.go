@@ -14,6 +14,7 @@ func TestParseGuestArgs(t *testing.T) {
 		args        []string
 		wantCID     uint32
 		wantConsole string
+		wantTheme   string
 		wantArgv    []string
 		wantErr     bool
 	}{
@@ -32,6 +33,25 @@ func TestParseGuestArgs(t *testing.T) {
 			wantConsole: "/tmp/c.sock",
 			wantArgv:    []string{"ls", "-la"},
 			wantErr:     false,
+		},
+		{
+			name:        "with console and theme",
+			args:        []string{"7", "--console", "/tmp/c.sock", "--theme", "light", "--", "bash", "-lc", "x"},
+			wantCID:     7,
+			wantConsole: "/tmp/c.sock",
+			wantTheme:   "light",
+			wantArgv:    []string{"bash", "-lc", "x"},
+			wantErr:     false,
+		},
+		{
+			name:    "theme without value",
+			args:    []string{"7", "--theme"},
+			wantErr: true,
+		},
+		{
+			name:    "unknown flag",
+			args:    []string{"7", "--bogus", "--", "echo"},
+			wantErr: true,
 		},
 		{
 			name:    "empty args",
@@ -57,7 +77,7 @@ func TestParseGuestArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cid, con, argv, err := parseGuestArgs(tt.args)
+			cid, con, theme, argv, err := parseGuestArgs(tt.args)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("parseGuestArgs() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -67,6 +87,9 @@ func TestParseGuestArgs(t *testing.T) {
 				}
 				if con != tt.wantConsole {
 					t.Errorf("console = %q, want %q", con, tt.wantConsole)
+				}
+				if theme != tt.wantTheme {
+					t.Errorf("theme = %q, want %q", theme, tt.wantTheme)
 				}
 				if !reflect.DeepEqual(argv, tt.wantArgv) {
 					t.Errorf("argv = %v, want %v", argv, tt.wantArgv)
@@ -82,7 +105,7 @@ func TestVMGuestInteractiveArgv(t *testing.T) {
 		self:        "/usr/local/bin/quagent",
 		consoleSock: "/run/user/1000/console.sock",
 	}
-	got := g.interactiveArgv("echo test")
+	got := g.interactiveArgv("echo test", "")
 	want := []string{
 		"/usr/local/bin/quagent",
 		attachCommand,
@@ -96,6 +119,25 @@ func TestVMGuestInteractiveArgv(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("interactiveArgv = %v, want %v", got, want)
+	}
+
+	// 配色が決まっていれば --theme を付ける。
+	got = g.interactiveArgv("echo test", "light")
+	want = []string{
+		"/usr/local/bin/quagent",
+		attachCommand,
+		"10",
+		"--console",
+		"/run/user/1000/console.sock",
+		"--theme",
+		"light",
+		"--",
+		"bash",
+		"-lc",
+		"echo test",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("interactiveArgv(light) = %v, want %v", got, want)
 	}
 }
 

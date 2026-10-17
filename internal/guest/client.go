@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -118,8 +119,9 @@ func doExec(c net.Conn, h Header, stdin io.Reader, stdout, stderr io.Writer, fw 
 
 // Interactive は端末を raw にして VM の端末つきコマンドにつなぐ (tmux のペイン用)。
 // onClip が nil でなければ、VM の出力から OSC 52 (クリップボード操作) を抜き取って渡す
-// (tmux や端末には届かない)。
-func Interactive(cid uint32, argv []string, dir string, onClip func(ClipboardEvent)) error {
+// (tmux や端末には届かない)。colors が nil でなければ、端末の色問い合わせ (OSC 10/11/12)
+// にもここで答え、応答をコマンドの入力へ流す (oscFilter を参照)。
+func Interactive(cid uint32, argv []string, dir string, colors *TerminalColors, onClip func(ClipboardEvent)) error {
 	c, err := Dial(cid)
 	if err != nil {
 		return err
@@ -151,13 +153,57 @@ func Interactive(cid uint32, argv []string, dir string, onClip func(ClipboardEve
 			}
 		}
 	}()
+	// 端末の入力と、色問い合わせへの応答を 1 本にまとめてコマンドの stdin へ流す。
+	stdin, inject := mergeInput(os.Stdin)
 	// onClip が無くても OSC 52 は抜き取って捨てる (host の端末に届かせない)
-	err = doExec(c, h, os.Stdin, newOSCFilter(os.Stdout, onClip), nil, fw)
+	filter := newOSCFilter(os.Stdout, onClip)
+	filter.colors = colors
+	filter.inject = inject
+	err = doExec(c, h, stdin, filter, nil, fw)
 	var ee *ExitError
 	if errors.As(err, &ee) {
 		return nil // 端末の中身として終了コードは見せ終わっている
 	}
 	return err
+}
+
+// mergeInput は r の入力をそのまま流しつつ、別の経路から追加のバイト列を差し込める
+// ようにする。差し込み用の関数を第 2 の戻り値で返す。差し込みはキューに積むだけで
+// 待たない (読み手が詰まっていても端末の出力処理を止めない)。複数の書き手がいても
+// 1 バイト単位で混ざらないよう排他する。
+func mergeInput(r io.Reader) (io.Reader, func([]byte)) {
+	pr, pw := io.Pipe()
+	w := &syncWriter{w: pw}
+	go func() { _, _ = io.Copy(w, r) }()
+	ch := make(chan []byte, 16)
+	go func() {
+		for b := range ch {
+			if _, err := w.Write(b); err != nil {
+				return
+			}
+		}
+	}()
+	return pr, func(b []byte) {
+		if len(b) == 0 {
+			return
+		}
+		select {
+		case ch <- b:
+		default: // 溢れたら捨てる (問い合わせはまた来る)
+		}
+	}
+}
+
+// syncWriter は複数の goroutine からの Write を直列化する。
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
 }
 
 // WaitReady は VM の受け口に接続できるまで待つ。fail が non-nil を返したら中断する。

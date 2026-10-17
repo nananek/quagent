@@ -65,6 +65,9 @@ type runOpts struct {
 	AfterSession func(current string, choices []string) (next string, discardLogs bool)
 	// Hub は Web 遠隔操作 (quagent hub) にこのセッションを登録する。
 	Hub bool
+	// TermTheme はエージェントに伝える端末の配色 (auto / light / dark)。auto は
+	// 起動した端末の背景色から判定する。空も auto と同じ。
+	TermTheme string
 }
 
 func logf(format string, a ...any) {
@@ -860,9 +863,16 @@ runcmd:
 		}
 	}
 
+	// 端末の配色を決めてエージェントに伝える。tmux のクライアント接続状況で答えが
+	// 揺れないよう、色問い合わせには __attach が直接答える (internal/guest/osc.go)。
+	termTheme := resolveTermTheme(o.TermTheme)
+	if termTheme != "" {
+		logf("端末の配色: %s (エージェントの色問い合わせに直接答える)", termTheme)
+	}
+
 	cur := o.Agent
 	for {
-		agent := g.interactiveArgv(paneCommand)
+		agent := g.interactiveArgv(paneCommand, termTheme)
 		if err := runTmux(session, agent, []string{self, consoleCommand, filepath.Join(work, "console.sock")}, con.Quit); err != nil {
 			return err
 		}
