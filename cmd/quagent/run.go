@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -1364,9 +1365,9 @@ func runTmux(session string, agent, consoleArgv []string, quit <-chan struct{}) 
 	_ = tmux("select-pane", "-t", session+":.0")
 
 	logf("tmux セッション %s に接続 (エージェントを終了すると VM を破棄)", session)
-	attached := make(chan struct{})
+	// $TMUX の中から使った場合は、その場の窓を switch-client で切り替える。デタッチしても
+	// 利用者の端末は元に戻るので、再アタッチは促さない (同じシェルから戻れる)。
 	if os.Getenv("TMUX") != "" {
-		close(attached)
 		// 起動した窓では quagent が前面のコマンドになるので、automatic-rename で窓の
 		// 名前が quagent に変わらないよう、終わるまでその窓だけ止める
 		if restore := holdWindowName(os.Getenv("TMUX_PANE")); restore != nil {
@@ -1375,40 +1376,102 @@ func runTmux(session string, agent, consoleArgv []string, quit <-chan struct{}) 
 		if err := tmux("switch-client", "-t", session); err != nil {
 			return err
 		}
-	} else {
-		att := exec.Command("tmux", "attach-session", "-t", session)
-		att.Stdin, att.Stdout, att.Stderr = os.Stdin, os.Stdout, os.Stderr
-		if err := att.Start(); err != nil {
+		waitSession(session, nil, quit)
+		return nil
+	}
+
+	// 通常の端末からは attach する。Ctrl-b d でデタッチされても、戻るためだけに別に
+	// SSH を張らなくて済むよう、同じ端末のここで再アタッチを促す。
+	for {
+		att, err := attachSession(session)
+		if err != nil {
 			return err
 		}
-		go func() { _ = att.Wait(); close(attached) }()
+		if waitSession(session, att, quit) {
+			return nil
+		}
+		if exec.Command("tmux", "has-session", "-t", session).Run() != nil {
+			return nil // デタッチと同時にセッションも終わっていた
+		}
+		if !askReattach(session) {
+			return nil
+		}
 	}
-	// 終わるまで待つ。デタッチされてもセッションが続くあいだは VM を生かしておく
+}
+
+// attachSession は tmux セッションへ端末つきで接続し、クライアントが終了したら閉じる
+// channel を返す。
+func attachSession(session string) (<-chan struct{}, error) {
+	att := exec.Command("tmux", "attach-session", "-t", session)
+	att.Stdin, att.Stdout, att.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := att.Start(); err != nil {
+		return nil, err
+	}
+	done := make(chan struct{})
+	go func() { _ = att.Wait(); close(done) }()
+	return done, nil
+}
+
+// waitSession はセッションが終わるか quit されるまで見張る。attach クライアント (att) が
+// あれば、それが戻った (デタッチ) ときだけ false を返す。セッションが終わった (quit を
+// 含む) ときは true を返す。att が nil のときはセッションが終わるまで待ち、常に true を返す。
+func waitSession(session string, att <-chan struct{}, quit <-chan struct{}) bool {
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
-	notified := false
 	for {
 		select {
 		case <-quit:
 			// セッションを閉じれば attach も戻る。端末を返してから後始末に進む
 			_ = exec.Command("tmux", "kill-session", "-t", session).Run()
-			<-attached
-			return nil
+			if att != nil {
+				<-att
+			}
+			return true
 		case <-tick.C:
 		}
 		if exec.Command("tmux", "has-session", "-t", session).Run() != nil {
-			<-attached
-			return nil
+			if att != nil {
+				<-att
+			}
+			return true
+		}
+		if att == nil {
+			continue
 		}
 		select {
-		case <-attached:
-			if !notified && os.Getenv("TMUX") == "" {
-				logf("デタッチ中。戻るには: tmux attach -t %s", session)
-				notified = true
-			}
+		case <-att:
+			return false
 		default:
 		}
 	}
+}
+
+// reattachPrompt はデタッチしたときに出す案内。別の端末から戻るコマンドも残す。
+func reattachPrompt(session string) string {
+	return fmt.Sprintf("デタッチ中。Enter で再アタッチ、q + Enter で終了 "+
+		"(別の端末からは: tmux attach -t %s)", session)
+}
+
+// askReattach はデタッチ後に、その場で再アタッチするかを尋ねる。再アタッチするなら true。
+// 端末から使っていないときは入力を待たず、案内だけ出して false を返す。
+func askReattach(session string) bool {
+	if !isTerminal(os.Stdin) {
+		logf("%s", reattachPrompt(session))
+		return false
+	}
+	fmt.Fprint(os.Stderr, reattachPrompt(session)+": ")
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil {
+		return false
+	}
+	return reattachAnswer(line)
+}
+
+// reattachAnswer は入力行が「再アタッチする」を意味するかを返す (Enter などの空行や
+// q / Q 以外は再アタッチ)。
+func reattachAnswer(line string) bool {
+	s := strings.TrimSpace(line)
+	return s != "q" && s != "Q"
 }
 
 func shellJoin(argv []string) string {
