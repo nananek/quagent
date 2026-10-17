@@ -6,12 +6,25 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/nananek/quagent/internal/guest"
 )
+
+// safePkgRelPath は上流 URL のパスに埋め込む相対パスとして安全かを返す
+// (絶対パス・親参照・エスケープ・バックスラッシュ・NUL を拒否)。
+func safePkgRelPath(p string) bool {
+	if p == "" || strings.HasPrefix(p, "/") || strings.ContainsAny(p, "\\%\x00") {
+		return false
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "." || seg == ".." {
+			return false
+		}
+	}
+	return true
+}
 
 func parseNPMPath(p string) (action, relPath, pkgName, version string, ok bool) {
 	p = strings.TrimPrefix(p, "/npm/")
@@ -21,9 +34,11 @@ func parseNPMPath(p string) (action, relPath, pkgName, version string, ok bool) 
 		return "", "", "", "", false
 	}
 
-	unescaped, err := url.PathUnescape(p)
-	if err == nil {
-		p = unescaped
+	// r.URL.Path は net/http が既に 1 回 percent-decode 済み。ここでさらに unescape
+	// すると %252e%252e が .. になり、検証をすり抜けて上流 URL やキャッシュキーに
+	// 注入される。上流へ渡す相対パスとして安全なものだけ通す。
+	if !safePkgRelPath(p) {
+		return "", "", "", "", false
 	}
 
 	// tarball: <pkg...>/-/<pkg>-<version>.tgz

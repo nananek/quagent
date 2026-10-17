@@ -113,7 +113,15 @@ func (s *DLPScanner) InspectRequest(req *http.Request) (detected bool, patternNa
 		}
 	}
 
-	// 3. リクエストボディの検査
+	// 3. 符号化された本文は平文に戻さないと検査できない。検査できないものを通すと
+	// そのまま持ち出し経路になるので拒否する (Content-Encoding: identity は除く)。
+	if req.Header != nil {
+		if ce := strings.TrimSpace(req.Header.Get("Content-Encoding")); ce != "" && !strings.EqualFold(ce, "identity") {
+			return true, "Content-Encoding: " + ce, "(符号化された本文は検査できないため遮断)", nil
+		}
+	}
+
+	// 4. リクエストボディの検査
 	if req.Body != nil {
 		orig := req.Body
 		// 上限まで読む (+1 バイトで上限超過を検知する)。上限を超えた場合は、読んだ分と

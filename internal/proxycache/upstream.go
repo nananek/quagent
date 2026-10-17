@@ -3,14 +3,50 @@ package proxycache
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
 )
+
+// safeRedirect はリダイレクト先が内部・loopback・link-local などなら拒否する。
+// upstream が 3xx で内部アドレスへ飛ばし、host がその応答を取得してしまう
+// (SSRF) のを防ぐ。許可レジストリが CDN へ 307 する経路は公開ホストなので通る。
+func safeRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("リダイレクトが多すぎる")
+	}
+	host := req.URL.Hostname()
+	if host == "" {
+		return errors.New("リダイレクト先のホストが空")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if isInternalAddr(ip) {
+			return fmt.Errorf("内部アドレスへのリダイレクトを拒否: %s", host)
+		}
+		return nil
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return fmt.Errorf("リダイレクト先を解決できない: %w", err)
+	}
+	for _, ip := range ips {
+		if isInternalAddr(ip) {
+			return fmt.Errorf("内部アドレスへのリダイレクトを拒否: %s", host)
+		}
+	}
+	return nil
+}
+
+func isInternalAddr(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast()
+}
 
 // Upstream はリモート OCI レジストリと対話するインターフェース。
 type Upstream interface {
@@ -48,7 +84,8 @@ type BaseUpstream struct {
 func NewBaseUpstream(name, registryURL, tokenURL, service string, client *http.Client) *BaseUpstream {
 	if client == nil {
 		client = &http.Client{
-			Timeout: 30 * time.Minute, // 大きなレイヤーのダウンロードを考慮
+			Timeout:       30 * time.Minute, // 大きなレイヤーのダウンロードを考慮
+			CheckRedirect: safeRedirect,
 		}
 	}
 	return &BaseUpstream{
