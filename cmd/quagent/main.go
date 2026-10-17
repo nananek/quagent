@@ -204,6 +204,7 @@ func cmdRun(args []string) error {
 	prApproval := fs.Bool("pr-approval", true, "PR の作成を承認コンソールで確認してから push する (既定: true)")
 	allow := fs.String("allow", "", "egress を許すドメイン (空白区切り)。LLM API は認証プロキシ経由なので不要")
 	hubReg := fs.Bool("hub", false, "Web 遠隔操作 (quagent hub) にこのセッションを登録する")
+	termTheme := fs.String("term-theme", "auto", "端末の配色 (auto / light / dark)。auto は起動した端末の背景色から判定し、エージェントの色問い合わせに直接答える")
 	_ = fs.Parse(args)
 	interactive := isTerminal(os.Stdin)
 	o := runOpts{
@@ -219,6 +220,7 @@ func cmdRun(args []string) error {
 		Agent:       *agent,
 		PRApproval:  *prApproval,
 		Hub:         *hubReg,
+		TermTheme:   *termTheme,
 	}
 	if interactive {
 		o.AfterSession = afterSession

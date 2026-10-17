@@ -78,9 +78,14 @@ func (g vmGuest) writeFile(path string, data []byte) error {
 }
 
 // interactiveArgv は VM の script に端末つきでつなぐ host 側のコマンドを返す。
-func (g vmGuest) interactiveArgv(script string) []string {
-	return []string{g.self, attachCommand, strconv.FormatUint(uint64(g.cid), 10),
-		"--console", g.consoleSock, "--", "bash", "-lc", script}
+// termTheme は端末の配色 (light / dark)。空なら色問い合わせは素通しする。
+func (g vmGuest) interactiveArgv(script, termTheme string) []string {
+	argv := []string{g.self, attachCommand, strconv.FormatUint(uint64(g.cid), 10),
+		"--console", g.consoleSock}
+	if termTheme != "" {
+		argv = append(argv, "--theme", termTheme)
+	}
+	return append(argv, "--", "bash", "-lc", script)
 }
 
 // gitURL は VM の /work を git で取り込むための URL (ext:: 転送で vsock を通す)。
@@ -90,27 +95,41 @@ func (g vmGuest) gitURL() string {
 	return fmt.Sprintf("ext::%s %s %d -- %%S /work", esc(g.self), execCommand, g.cid)
 }
 
-// cmdExec / cmdAttach は `quagent __exec|__attach CID [--console SOCK] -- argv...`。
-func parseGuestArgs(args []string) (cid uint32, console string, argv []string, err error) {
+// cmdExec / cmdAttach は `quagent __exec|__attach CID [--console SOCK] [--theme T] -- argv...`。
+func parseGuestArgs(args []string) (cid uint32, console, theme string, argv []string, err error) {
+	const usage = "usage: CID [--console SOCK] [--theme light|dark] -- argv..."
 	if len(args) < 1 {
-		return 0, "", nil, fmt.Errorf("usage: CID [--console SOCK] -- argv...")
+		return 0, "", "", nil, fmt.Errorf("%s", usage)
 	}
 	n, err := strconv.ParseUint(args[0], 10, 32)
 	if err != nil {
-		return 0, "", nil, fmt.Errorf("CID が不正: %q", args[0])
+		return 0, "", "", nil, fmt.Errorf("CID が不正: %q", args[0])
 	}
 	rest := args[1:]
-	if len(rest) >= 2 && rest[0] == "--console" {
-		console, rest = rest[1], rest[2:]
+	for len(rest) > 0 && rest[0] != "--" {
+		switch rest[0] {
+		case "--console":
+			if len(rest) < 2 {
+				return 0, "", "", nil, fmt.Errorf("%s", usage)
+			}
+			console, rest = rest[1], rest[2:]
+		case "--theme":
+			if len(rest) < 2 {
+				return 0, "", "", nil, fmt.Errorf("%s", usage)
+			}
+			theme, rest = rest[1], rest[2:]
+		default:
+			return 0, "", "", nil, fmt.Errorf("%s", usage)
+		}
 	}
 	if len(rest) < 2 || rest[0] != "--" {
-		return 0, "", nil, fmt.Errorf("usage: CID [--console SOCK] -- argv...")
+		return 0, "", "", nil, fmt.Errorf("%s", usage)
 	}
-	return uint32(n), console, rest[1:], nil
+	return uint32(n), console, theme, rest[1:], nil
 }
 
 func cmdExec(args []string) error {
-	cid, _, argv, err := parseGuestArgs(args)
+	cid, _, _, argv, err := parseGuestArgs(args)
 	if err != nil {
 		return err
 	}
@@ -123,7 +142,7 @@ func cmdExec(args []string) error {
 }
 
 func cmdAttach(args []string) error {
-	cid, sock, argv, err := parseGuestArgs(args)
+	cid, sock, theme, argv, err := parseGuestArgs(args)
 	if err != nil {
 		return err
 	}
@@ -131,7 +150,7 @@ func cmdAttach(args []string) error {
 	if sock != "" {
 		onClip = clipboardRelay(sock)
 	}
-	return guest.Interactive(cid, argv, "/work", onClip)
+	return guest.Interactive(cid, argv, "/work", guest.TerminalColorsForScheme(theme), onClip)
 }
 
 // clipboardRelay は VM が出した OSC 52 を承認コンソールに渡す。出力を止めないよう
