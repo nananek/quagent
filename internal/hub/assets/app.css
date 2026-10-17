@@ -44,18 +44,38 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: row; }
   flex: 0 0 22rem;
   max-width: 45%;
   min-height: 0;
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
   border-left: 1px solid var(--line);
   background: #0e1016;
   padding: .5rem .6rem;
 }
-#approvals h2 {
-  font-size: .8rem;
+#tabs { display: flex; gap: .25rem; margin-bottom: .5rem; }
+#tabs .tab {
+  flex: 1;
+  font: inherit;
+  font-size: .78rem;
+  padding: .35rem .3rem;
+  border-radius: .45rem;
+  border: 1px solid var(--line);
+  background: #161a24;
   color: var(--muted);
-  margin: .2rem 0 .5rem;
-  font-weight: 600;
-  letter-spacing: .05em;
 }
+#tabs .tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+#tabs .badge { margin-left: .3rem; font-size: .7rem; }
+.panel { flex: 1 1 auto; min-height: 0; overflow: auto; }
+#log-list .logline {
+  font-family: Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  font-size: .74rem;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: .1rem 0;
+}
+.histrow { display: flex; flex-direction: column; gap: .1rem; padding: .4rem .2rem; border-bottom: 1px solid var(--line); font-size: .76rem; }
+.histrow .histtime { color: var(--muted); font-size: .7rem; }
+.histrow .histtarget { word-break: break-word; }
+.histrow .histresult { color: var(--muted); }
 .card {
   background: var(--card);
   border: 1px solid var(--line);
