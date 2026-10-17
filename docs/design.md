@@ -318,6 +318,7 @@ PR 作成は既定で承認制（`--pr-approval`、TUI の起動設定「PR を�
 
 - **生存確認:** 登録は接続そのものが生存の根拠です。接続が切れると hub は登録を破棄します（ハートビート用の別メッセージは不要）。
 - **応答:** hub は登録に対してワンタイム URL（後述）を返し、run はログに表示します。
+- **再発行:** 登録の接続は生存確認と制御を兼ねます。run は同じ接続で URL の再発行（`reissue`）を要求でき、hub は新しいワンタイム URL（`reissued`）を返します。起動は承認コンソール TUI の `r` キー、または Web 承認パネルの「アクセス URL を再発行」から行います。
 - **信頼境界:** socket は 0600 のため、登録できるのは同一ユーザーのプロセスだけです。登録の有無は run ごとのオプトインです。
 - **上限:** 同時登録数（既定 32）を超える登録は拒否します。
 
@@ -329,6 +330,7 @@ PR 作成は既定で承認制（`--pr-approval`、TUI の起動設定「PR を�
 2. 交換に使った URL のシークレットは消費され、以降その URL は無効になります（再アクセスには再発行が必要）。URL を共有しても、最初に開いた者だけが入れます。
 3. Cookie のトークンは hub のメモリにのみ保持し、セッション終了または hub の再起動で失効します。
 
+- **再発行:** 承認コンソールから URL を再発行すると新しいシークレットが発行され、以前の URL は使えなくなります。一方、発行済みの Cookie（1 セッションあたり最大 8 個）は有効なまま残るため、接続済みの端末は切れず、新しい端末を追加できます。
 - **総当たり対策:** シークレットは定数時間比較し、交換試行はレート制限します。不一致時は一律同じ応答を返し、シークレットをログに残しません。
 - **DNS リバインディング対策:** 許可したホスト名（`base_url` のホスト）以外の `Host` ヘッダのリクエストは拒否します。
 - **待ち受け:** 既定では Tailscale の IP にだけバインドし、`0.0.0.0` にはバインドしません。トランスポートは Tailscale (WireGuard) が暗号化します。`tailscale serve` で HTTPS を前置する構成も可能で、その場合は `base_url` を `https://…` にし、Cookie に `Secure` を付けます。
@@ -348,7 +350,7 @@ control mode のワイヤ仕様は実機（tmux 3.5）で確認済みです。
 
 ### 4. 承認コンソールの中継
 
-hub はセッションの `console.sock` へ `{"type":"ui"}` として接続し、既存プロトコル（`request`/`settled`、`relaxrequest`、`prrequest`、`dockerrequest`、`batchrequest`、`clip`）を受信してブラウザへ配信します。ブラウザからの判断は `decide` / `relaxdecide` / `prdecide` / `dockerdecide` / `batchdecide` / `clipdecide` として返します。プロトコル自体の変更は不要です（複数 UI クライアントを前提に設計済み）。
+hub はセッションの `console.sock` へ `{"type":"ui"}` として接続し、既存プロトコル（`request`/`settled`、`relaxrequest`、`prrequest`、`dockerrequest`、`batchrequest`、`clip`）を受信してブラウザへ配信します。ブラウザからの判断は `decide` / `relaxdecide` / `prdecide` / `dockerdecide` / `batchdecide` / `clipdecide` として返します。TUI と Web の両方から使える操作として、URL 再発行の `hubreissue` / `hubreissued` を追加しています（それ以外のプロトコル変更は不要です）。
 
 - 端末側の承認コンソール TUI と hub は**並立**します。申請の決着はどちらからでも行え、二重決着は冪等に処理されます（既存の `claim`/settle 実装）。
 - `console.sock` が切れた場合は hub が再接続します（既存の UI クライアントと同じ挙動）。

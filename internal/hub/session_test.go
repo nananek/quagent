@@ -52,6 +52,56 @@ func TestSessionNoExchangeWithoutMatch(t *testing.T) {
 	}
 }
 
+// TestSessionReissue は URL の再発行でシークレットが替わり、既存の Cookie は残ることを
+// 確かめる。
+func TestSessionReissue(t *testing.T) {
+	s, err := newSession("id", "n", "", "opencode", "s", "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSecret := s.secret
+	tok, ok := s.Exchange(oldSecret)
+	if !ok {
+		t.Fatal("交換に失敗した")
+	}
+
+	url, err := s.Reissue("http://h:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newSecret := strings.TrimPrefix(url, "http://h:1/s/")
+	if !strings.HasPrefix(url, "http://h:1/s/") || newSecret == oldSecret {
+		t.Fatalf("再発行した URL が不正: %q", url)
+	}
+	// 再発行後は新しいシークレットを案内する。
+	if got := s.LinkURL("http://h:1"); got != url {
+		t.Errorf("再発行後の LinkURL = %q, want %q", got, url)
+	}
+	// 以前のシークレットは使えない。
+	if _, ok := s.Exchange(oldSecret); ok {
+		t.Error("再発行で古いシークレットが無効になっていない")
+	}
+	// 既存の Cookie は有効なまま。
+	if !s.Authorize(tok) {
+		t.Error("再発行で既存の Cookie が失効した")
+	}
+	// 新しいシークレットは交換でき、別の Cookie が発行される。
+	tok2, ok := s.Exchange(newSecret)
+	if !ok || tok2 == "" {
+		t.Fatal("再発行後のシークレットで交換できない")
+	}
+	if tok2 == tok {
+		t.Error("交換のたびに同じトークンが発行されている")
+	}
+	if !s.Authorize(tok) || !s.Authorize(tok2) {
+		t.Error("複数の端末の Cookie が同時に有効でない")
+	}
+	// 交換後は基点を案内する。
+	if strings.Contains(s.LinkURL("http://h:1"), "/s/") {
+		t.Errorf("交換後の LinkURL にシークレットが残っている: %q", s.LinkURL("http://h:1"))
+	}
+}
+
 func TestRegistryLimitsAndLookup(t *testing.T) {
 	r := newRegistry(2)
 	mk := func(id string) *Session {

@@ -38,6 +38,10 @@ type Msg struct {
 	Data []byte `json:"data,omitempty"` // クリップボードに入れたい中身
 	Size int    `json:"size,omitempty"`
 
+	// Web 遠隔操作 (hub) のアクセス URL 再発行 (hubreissue / hubreissued)。
+	URL   string `json:"url,omitempty"`
+	Error string `json:"error,omitempty"`
+
 	// PR の作成承認 (prrequest / prsettled) の内容。
 	Branch string `json:"branch,omitempty"`
 	Base   string `json:"base,omitempty"`
@@ -94,6 +98,10 @@ type Server struct {
 	quitOnce sync.Once
 	// Clipboard は承認されたクリップボードの中身を host に入れる (nil なら TmuxClipboard)。
 	Clipboard func([]byte) error
+
+	// hubReissue は Web 遠隔操作 (hub) のアクセス URL を再発行する。run が hub に
+	// 登録したときに設定する (nil なら hub 未登録)。s.mu で保護する。
+	hubReissue func() (string, error)
 
 	mu         sync.Mutex
 	clients    map[*client]bool
@@ -257,6 +265,8 @@ func (s *Server) serve(c net.Conn) {
 			s.settleDocker(msg.ID, msg.Status)
 		case "batchdecide":
 			s.settleBatch(msg.ID, msg.Status)
+		case "hubreissue":
+			s.reissueHubURL()
 		case "quit":
 			s.TriggerQuit()
 		}
@@ -266,6 +276,33 @@ func (s *Server) serve(c net.Conn) {
 // TriggerQuit はコンソールの終了シグナルを発火する。
 func (s *Server) TriggerQuit() {
 	s.quitOnce.Do(func() { close(s.Quit) })
+}
+
+// SetHubReissue は hub のアクセス URL を再発行する関数を設定する (run が hub に
+// 登録したときに呼ぶ)。nil なら hub 未登録として扱う。
+func (s *Server) SetHubReissue(f func() (string, error)) {
+	s.mu.Lock()
+	s.hubReissue = f
+	s.mu.Unlock()
+}
+
+// reissueHubURL は UI からの要求で hub のアクセス URL を再発行し、結果を全 UI に配る。
+func (s *Server) reissueHubURL() {
+	s.mu.Lock()
+	f := s.hubReissue
+	s.mu.Unlock()
+	if f == nil {
+		s.broadcast(Msg{Type: "hubreissued", Error: "hub に登録されていない"})
+		return
+	}
+	url, err := f()
+	if err != nil {
+		s.Log("hub のアクセス URL を再発行できない: " + err.Error())
+		s.broadcast(Msg{Type: "hubreissued", Error: err.Error()})
+		return
+	}
+	s.Log("hub のアクセス URL を再発行した: " + url)
+	s.broadcast(Msg{Type: "hubreissued", URL: url})
 }
 
 // register は UI として名乗った接続に、溜めたログと承認待ちを送り、以後の通知先にする。

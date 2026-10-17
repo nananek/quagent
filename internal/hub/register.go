@@ -4,12 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -18,8 +18,9 @@ import (
 
 // 登録の接続でやり取りするメッセージ (新行区切り JSON)。run が登録を送り、
 // hub が URL を返す。接続を保持している間だけ登録が有効 (切断 = 解除)。
+// 登録後も同じ接続で URL の再発行を要求できる。
 type registerMsg struct {
-	Type    string `json:"type"` // "register"
+	Type    string `json:"type"` // "register" / "reissue"
 	ID      string `json:"id"`
 	Name    string `json:"name"`
 	Repo    string `json:"repo"`
@@ -29,7 +30,7 @@ type registerMsg struct {
 }
 
 type registerReply struct {
-	Type  string `json:"type"` // "registered" / "error"
+	Type  string `json:"type"` // "registered" / "reissued" / "error"
 	URL   string `json:"url,omitempty"`
 	Error string `json:"error,omitempty"`
 }
@@ -47,14 +48,49 @@ type Request struct {
 // Registration は run から hub への登録。Close するまで (接続を保持する間) 有効。
 type Registration struct {
 	conn net.Conn
-	url  string
+	enc  *json.Encoder
+	dec  *json.Decoder
+
+	mu  sync.Mutex
+	url string
 }
 
 // URL は hub が発行したアクセス URL を返す。
-func (r *Registration) URL() string { return r.url }
+func (r *Registration) URL() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.url
+}
 
 // Close は登録を解除する。
 func (r *Registration) Close() error { return r.conn.Close() }
+
+// reissueTimeout は URL 再発行の往復を待つ上限。
+const reissueTimeout = 5 * time.Second
+
+// Reissue は hub に新しいアクセス URL を発行させる。登録の接続を保持している間だけ
+// 使える。発行済みの端末はそのまま使え、新しい端末を追加するための URL が返る。
+func (r *Registration) Reissue() (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.enc.Encode(registerMsg{Type: "reissue"}); err != nil {
+		return "", fmt.Errorf("hub に再発行を要求できない: %w", err)
+	}
+	_ = r.conn.SetReadDeadline(time.Now().Add(reissueTimeout))
+	var rep registerReply
+	if err := r.dec.Decode(&rep); err != nil {
+		return "", fmt.Errorf("hub の応答を読めない: %w", err)
+	}
+	_ = r.conn.SetReadDeadline(time.Time{})
+	if rep.Type != "reissued" {
+		if rep.Error != "" {
+			return "", errors.New(rep.Error)
+		}
+		return "", errors.New("hub が再発行を拒否した")
+	}
+	r.url = rep.URL
+	return rep.URL, nil
+}
 
 // Register は hub の socket へ登録する (run 側)。hub が居なければエラー。
 func Register(sock string, req Request, timeout time.Duration) (*Registration, error) {
@@ -62,17 +98,19 @@ func Register(sock string, req Request, timeout time.Duration) (*Registration, e
 	if err != nil {
 		return nil, err
 	}
+	enc := json.NewEncoder(c)
+	dec := json.NewDecoder(c)
 	msg := registerMsg{
 		Type: "register", ID: req.ID, Name: req.Name, Repo: req.Repo,
 		Agent: req.Agent, Session: req.Session, Console: req.Console,
 	}
-	if err := json.NewEncoder(c).Encode(msg); err != nil {
+	if err := enc.Encode(msg); err != nil {
 		c.Close()
 		return nil, err
 	}
 	_ = c.SetReadDeadline(time.Now().Add(timeout))
 	var rep registerReply
-	if err := json.NewDecoder(c).Decode(&rep); err != nil {
+	if err := dec.Decode(&rep); err != nil {
 		c.Close()
 		return nil, fmt.Errorf("hub の応答を読めない: %w", err)
 	}
@@ -84,7 +122,7 @@ func Register(sock string, req Request, timeout time.Duration) (*Registration, e
 		}
 		return nil, errors.New("hub が登録を拒否した")
 	}
-	return &Registration{conn: c, url: rep.URL}, nil
+	return &Registration{conn: c, enc: enc, dec: dec, url: rep.URL}, nil
 }
 
 // listenRegister は sock (0600) で run からの登録を待ち受ける。
@@ -115,17 +153,20 @@ func (s *Server) listenRegister(sock string) (net.Listener, error) {
 	return l, nil
 }
 
-// handleRegister は 1 件の登録を処理し、接続が切れるまで保持する。
+// handleRegister は 1 件の登録を処理し、接続が切れるまで保持する。接続中の再発行要求
+// (URL の再発行) にも応える。
 func (s *Server) handleRegister(c net.Conn) {
 	defer c.Close()
+	enc := json.NewEncoder(c)
+	dec := json.NewDecoder(c)
 	_ = c.SetReadDeadline(time.Now().Add(registerTimeout))
 	var m registerMsg
-	if err := json.NewDecoder(c).Decode(&m); err != nil {
+	if err := dec.Decode(&m); err != nil {
 		return
 	}
 	_ = c.SetReadDeadline(time.Time{})
 	reject := func(reason string) {
-		_ = json.NewEncoder(c).Encode(registerReply{Type: "error", Error: reason})
+		_ = enc.Encode(registerReply{Type: "error", Error: reason})
 	}
 	if m.Type != "register" {
 		reject("登録の種類が不正")
@@ -156,17 +197,41 @@ func (s *Server) handleRegister(c net.Conn) {
 		return
 	}
 	url := sess.URL(s.baseURL)
-	if err := json.NewEncoder(c).Encode(registerReply{Type: "registered", URL: url}); err != nil {
+	if err := enc.Encode(registerReply{Type: "registered", URL: url}); err != nil {
 		s.reg.remove(sess.ID)
 		return
 	}
 	s.logf("セッションを登録: %s (%s)", sess.Name, sess.Agent)
 	s.notifySessionStart(sess, url)
 
-	// 接続が切れるまで保持する (切断 = 解除)。run からのデータは使わない。
-	_, _ = io.Copy(io.Discard, c)
+	// 接続が切れるまで保持する (切断 = 解除)。run からのデータは再発行要求だけ。
+	for {
+		var req registerMsg
+		if err := dec.Decode(&req); err != nil {
+			break
+		}
+		if req.Type != "reissue" {
+			continue
+		}
+		newURL, err := s.reissue(sess)
+		if err != nil {
+			_ = enc.Encode(registerReply{Type: "error", Error: err.Error()})
+			continue
+		}
+		_ = enc.Encode(registerReply{Type: "reissued", URL: newURL})
+	}
 	s.reg.remove(sess.ID)
 	s.logf("セッションの登録が切れた: %s", sess.Name)
+}
+
+// reissue はセッションの URL を再発行する (登録中の run からの要求で呼ぶ)。
+func (s *Server) reissue(sess *Session) (string, error) {
+	url, err := sess.Reissue(s.baseURL)
+	if err != nil {
+		return "", err
+	}
+	s.logf("セッションのアクセス URL を再発行: %s", sess.Name)
+	return url, nil
 }
 
 // validConsolePath は console.sock のパスが run の作業ディレクトリ配下の
