@@ -32,7 +32,7 @@ func TestServeRegisterAndExchange(t *testing.T) {
 
 	reg, err := Register(sock, Request{
 		ID: "r1", Name: "repo", Repo: "/repo", Agent: "opencode",
-		Session: "quagent-r1", Console: "/tmp/c.sock",
+		Session: "quagent-r1", Console: testConsolePath(t, "r1"),
 	}, 2*time.Second)
 	if err != nil {
 		t.Fatalf("Register: %v", err)

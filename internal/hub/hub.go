@@ -54,9 +54,7 @@ type Server struct {
 	mu      sync.Mutex
 	viewers map[string]int
 
-	limMu    sync.Mutex
-	limStart time.Time
-	limCount int
+	limits *rateLimiter
 
 	notifyMu sync.Mutex
 	notified map[string]time.Time
@@ -73,6 +71,7 @@ func New(cfg Config) *Server {
 		reg:          newRegistry(maxSessions),
 		baseURL:      base,
 		viewers:      map[string]int{},
+		limits:       newRateLimiter(),
 		notified:     map[string]time.Time{},
 		allowedHosts: map[string]bool{},
 	}

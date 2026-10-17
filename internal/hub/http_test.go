@@ -224,3 +224,91 @@ func TestAssetServing(t *testing.T) {
 		}
 	}
 }
+
+// TestExchangeMethodAndOracle は交換が GET 限定で、失敗応答が一律であることを確認する。
+func TestExchangeMethodAndOracle(t *testing.T) {
+	s := newTestServer()
+	sess, err := newSession("r1", "n", "/repo", "opencode", "quagent-r1", "/tmp/c.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.reg.add(sess); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+
+	// HEAD は安全メソッドなのでシークレットを消費しない。
+	resp, err := http.Head(ts.URL + "/s/" + sess.secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("HEAD は 405 のはず: %d", resp.StatusCode)
+	}
+
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err = client.Get(ts.URL + "/s/" + sess.secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("HEAD の後に正規の GET ができない: %d", resp.StatusCode)
+	}
+
+	// 使用済みと未知の応答は区別できない。
+	used := getBody(t, client, ts.URL+"/s/"+sess.secret)
+	unknown := getBody(t, client, ts.URL+"/s/"+strings.Repeat("Z", 43))
+	if used != unknown {
+		t.Errorf("使用済みと未知で応答が異なる: %q vs %q", used, unknown)
+	}
+}
+
+// TestExchangeFailuresDoNotBlockValid は失敗の連投が有効な交換を止めないことを確認する。
+func TestExchangeFailuresDoNotBlockValid(t *testing.T) {
+	s := newTestServer()
+	sess, err := newSession("r1", "n", "/repo", "opencode", "quagent-r1", "/tmp/c.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.reg.add(sess); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+
+	for i := 0; i < 100; i++ {
+		resp, err := http.Get(ts.URL + "/s/" + strings.Repeat("Y", 43))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Get(ts.URL + "/s/" + sess.secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("失敗の連投後に有効な交換が拒否された: %d", resp.StatusCode)
+	}
+}
+
+func getBody(t *testing.T, c *http.Client, url string) string {
+	t.Helper()
+	resp, err := c.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return string(b)
+}

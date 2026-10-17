@@ -251,24 +251,35 @@ func (s *Server) unauthorized(w http.ResponseWriter) {
 }
 
 // handleExchange はワンタイム URL のシークレットを Cookie に交換する。
+//
+// 交換は GET に限定する。HEAD は安全メソッドで、リンクチェッカやプレビューが
+// 先に叩いてシークレットを消費してしまうため受け付けない。
 func (s *Server) handleExchange(w http.ResponseWriter, r *http.Request) {
-	if !s.allowExchange() {
-		http.Error(w, "試行が多すぎます。しばらくしてからどうぞ。", http.StatusTooManyRequests)
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		s.exchangeFail(w, http.StatusMethodNotAllowed)
 		return
 	}
 	secret := strings.TrimPrefix(r.URL.Path, "/s/")
 	if secret == "" || strings.ContainsRune(secret, '/') {
-		http.NotFound(w, r)
+		s.exchangeFail(w, http.StatusNotFound)
 		return
 	}
 	sess := s.reg.bySecret(secret)
 	if sess == nil {
-		http.Error(w, "この URL は無効です。", http.StatusNotFound)
+		// 総当たり対策は「シークレットが一致しなかった試行」だけを数える。
+		// 有効なシークレットの交換まで他人の失敗で止めない (認証導線の DoS 防止)。
+		if !s.limits.Allow(hostOnly(r.RemoteAddr)) {
+			http.Error(w, "試行が多すぎます。しばらくしてからどうぞ。", http.StatusTooManyRequests)
+			return
+		}
+		s.exchangeFail(w, http.StatusNotFound)
 		return
 	}
 	token, ok := sess.Exchange(secret)
 	if !ok {
-		http.Error(w, "この URL は使用済みです。新しい URL の発行を受けてください。", http.StatusNotFound)
+		// 使用済みかどうかは応答で区別させない (存在と状態を推測させない)。
+		s.exchangeFail(w, http.StatusNotFound)
 		return
 	}
 	http.SetCookie(w, &http.Cookie{
@@ -276,6 +287,12 @@ func (s *Server) handleExchange(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.secure,
 	})
 	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// exchangeFail は交換に失敗したときの一律の応答を返す。「未知」と「使用済み」で
+// 本文を変えると、シークレットの存在と使用状態を判定できてしまう。
+func (s *Server) exchangeFail(w http.ResponseWriter, status int) {
+	http.Error(w, "この URL は使えません。", status)
 }
 
 // handleIndex はアプリの HTML を返す。
@@ -293,14 +310,53 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	_ = indexTemplate.Execute(w, map[string]string{"Name": sess.Name})
 }
 
-// allowExchange は短時間の交換試行を制限する (総当たり対策)。
-func (s *Server) allowExchange() bool {
-	s.limMu.Lock()
-	defer s.limMu.Unlock()
-	now := time.Now()
-	if now.Sub(s.limStart) > 10*time.Second {
-		s.limStart, s.limCount = now, 0
+// 交換試行の制限。送信元ごとに窓あたりの失敗回数を数える。
+const (
+	exchangeWindow   = 10 * time.Second
+	exchangeMaxFails = 30
+	exchangeMaxKeys  = 1024
+)
+
+type rateWindow struct {
+	start time.Time
+	count int
+}
+
+type rateLimiter struct {
+	mu    sync.Mutex
+	byKey map[string]*rateWindow
+}
+
+func newRateLimiter() *rateLimiter {
+	return &rateLimiter{byKey: map[string]*rateWindow{}}
+}
+
+// Allow は key の試行が上限内なら true を返す。key が空なら共有バケットを使う。
+func (l *rateLimiter) Allow(key string) bool {
+	if key == "" {
+		key = "-"
 	}
-	s.limCount++
-	return s.limCount <= 30
+	now := time.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.byKey) > exchangeMaxKeys {
+		for k, w := range l.byKey {
+			if now.Sub(w.start) > exchangeWindow {
+				delete(l.byKey, k)
+			}
+		}
+		for len(l.byKey) > exchangeMaxKeys { // 溢れたら 1 つ捨てる
+			for k := range l.byKey {
+				delete(l.byKey, k)
+				break
+			}
+		}
+	}
+	w := l.byKey[key]
+	if w == nil || now.Sub(w.start) > exchangeWindow {
+		l.byKey[key] = &rateWindow{start: now, count: 1}
+		return true
+	}
+	w.count++
+	return w.count <= exchangeMaxFails
 }
