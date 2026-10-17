@@ -32,7 +32,8 @@ const usage = `usage:
   quagent image rm IMAGE                       ベースイメージを消す
   quagent always ls | rm DOMAIN...              「以後確認しない」ドメインの一覧・取り消し
   quagent cache ls | clean [docker|go|cargo|npm|pypi|all]  ローカルキャッシュの一覧・削除
-  quagent run [--repo DIR] [--image RECIPE] [--cpus N] [--mem MiB] [--agent opencode|claude|agy|codex] [--allow "d1 d2"] [--mount-tmp] [--nested-virt] [--local-head] [--pr-approval[=false]]
+  quagent hub                                    Web 遠隔操作モードを起動 (Tailscale 越しにブラウザから操作)
+  quagent run [--repo DIR] [--image RECIPE] [--cpus N] [--mem MiB] [--agent opencode|claude|agy|codex] [--allow "d1 d2"] [--mount-tmp] [--nested-virt] [--local-head] [--pr-approval[=false]] [--hub]
                                                VM を起動し、tmux でエージェントと承認コンソールを開く
 `
 
@@ -57,7 +58,7 @@ func dispatch(args []string) error {
 			return err
 		}
 		return run(runOpts{Repo: l.Repo, Recipe: l.Recipe, CPUs: l.CPUs, MemMiB: l.MemMiB,
-			MountTmp: l.MountTmp, NestedVirt: l.NestedVirt, LocalHead: l.LocalHead, Agent: l.Agent, PRApproval: l.PRApproval, Interactive: true,
+			MountTmp: l.MountTmp, NestedVirt: l.NestedVirt, LocalHead: l.LocalHead, Agent: l.Agent, PRApproval: l.PRApproval, Interactive: true, Hub: l.Hub,
 			AfterSession: afterSession})
 	}
 	switch args[0] {
@@ -112,6 +113,8 @@ func dispatch(args []string) error {
 		return cmdImage(args[1:])
 	case "run":
 		return cmdRun(args[1:])
+	case "hub":
+		return cmdHub(args[1:])
 	case "always":
 		return cmdAlways(args[1:])
 	default:
@@ -200,6 +203,7 @@ func cmdRun(args []string) error {
 	nested := fs.Bool("nested-virt", false, "VM の中で KVM を使えるようにする (VM の中で VM を動かすとき)")
 	prApproval := fs.Bool("pr-approval", true, "PR の作成を承認コンソールで確認してから push する (既定: true)")
 	allow := fs.String("allow", "", "egress を許すドメイン (空白区切り)。LLM API は認証プロキシ経由なので不要")
+	hubReg := fs.Bool("hub", false, "Web 遠隔操作 (quagent hub) にこのセッションを登録する")
 	_ = fs.Parse(args)
 	interactive := isTerminal(os.Stdin)
 	o := runOpts{
@@ -214,6 +218,7 @@ func cmdRun(args []string) error {
 		LocalHead:   *localHead,
 		Agent:       *agent,
 		PRApproval:  *prApproval,
+		Hub:         *hubReg,
 	}
 	if interactive {
 		o.AfterSession = afterSession

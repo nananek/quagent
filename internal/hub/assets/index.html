@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>quagent</title>
+<link rel="stylesheet" href="/assets/xterm.css">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<header>
+  <h1 id="session-name">{{.Name}}</h1>
+  <span id="conn" class="conn">接続中…</span>
+</header>
+<main>
+  <section id="terminal-wrap"><div id="terminal" aria-label="エージェントの端末"></div></section>
+  <aside id="approvals">
+    <h2>承認</h2>
+    <div id="approval-list"><p class="reason">承認待ちはありません。</p></div>
+  </aside>
+</main>
+<script src="/assets/xterm.js"></script>
+<script src="/assets/addon-fit.js"></script>
+<script src="/assets/app.js"></script>
+</body>
+</html>

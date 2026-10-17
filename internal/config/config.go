@@ -54,6 +54,8 @@ type Config struct {
 	// Cache は Docker および言語パッケージ向けの Pull-through キャッシュ設定。
 	// 未指定なら既定で有効。
 	Cache *CachePolicy `json:"cache,omitempty"`
+	// Hub は Web 遠隔操作 (hub) の設定。未指定なら無効。
+	Hub *HubPolicy `json:"hub,omitempty"`
 	// SkillsDir はユーザー共通スキルの置き場 (ホスト側)。未指定なら paths.SkillsDir()。
 	SkillsDir string `json:"skills_dir,omitempty"`
 }
@@ -176,6 +178,78 @@ func (p *CachePolicy) DirResolved() string {
 		return p.Dir
 	}
 	return paths.ProxyCacheDir()
+}
+
+// DefaultHubPort は hub の待ち受けポート (listen が "tailscale" のとき)。
+const DefaultHubPort = 8787
+
+// HubPolicy は Web 遠隔操作 (hub) の設定。
+type HubPolicy struct {
+	// Enabled が true のときだけ hub を起動する (既定: 無効)。
+	Enabled *bool `json:"enabled,omitempty"`
+	// Listen は待ち受けるアドレス。"tailscale" (既定) なら Tailscale の IPv4 アドレスに
+	// だけバインドする。"127.0.0.1:8787" のような明示アドレスも指定できる。
+	Listen string `json:"listen,omitempty"`
+	// Port は Listen が "tailscale" のときのポート (既定: DefaultHubPort)。
+	Port int `json:"port,omitempty"`
+	// BaseURL は外部から見た基点 (通知の URL と Host 検査に使う)。未指定なら
+	// "http://<bind host>:<port>"。tailscale serve 等で HTTPS を前置する場合は指定する。
+	BaseURL string `json:"base_url,omitempty"`
+	// Notify は Discord Webhook 通知の設定。
+	Notify HubNotify `json:"notify,omitempty"`
+}
+
+// IsEnabled は hub を起動するかどうかを返す (既定: false)。
+func (p *HubPolicy) IsEnabled() bool { return p != nil && boolDefault(p.Enabled, false) }
+
+// PortResolved は待ち受けポートを返す (既定: DefaultHubPort)。
+func (p *HubPolicy) PortResolved() int {
+	if p == nil || p.Port <= 0 {
+		return DefaultHubPort
+	}
+	return p.Port
+}
+
+// ListenResolved は待ち受けアドレスの指定を返す (既定: "tailscale")。
+func (p *HubPolicy) ListenResolved() string {
+	if p == nil || p.Listen == "" {
+		return "tailscale"
+	}
+	return p.Listen
+}
+
+// HubNotify は Discord Webhook 通知の設定。
+type HubNotify struct {
+	// Webhook の取り出し方。どれか 1 つを指定する (providers の秘密と同じ書式)。
+	DiscordWebhookEnv     string   `json:"discord_webhook_env,omitempty"`
+	DiscordWebhookFile    string   `json:"discord_webhook_file,omitempty"`
+	DiscordWebhookCommand []string `json:"discord_webhook_command,omitempty"`
+	// OnSessionStart はセッション開始を通知する (既定: true)。
+	OnSessionStart *bool `json:"on_session_start,omitempty"`
+	// OnApproval は承認ダイアログの発生を通知する (既定: true)。
+	OnApproval *bool `json:"on_approval,omitempty"`
+}
+
+// Webhook は Discord Webhook の URL を取り出す。未設定なら空文字列を返す。
+func (n HubNotify) Webhook() (string, error) {
+	if n.DiscordWebhookEnv == "" && n.DiscordWebhookFile == "" && len(n.DiscordWebhookCommand) == 0 {
+		return "", nil
+	}
+	p := Provider{SecretEnv: n.DiscordWebhookEnv, SecretFile: n.DiscordWebhookFile, SecretCommand: n.DiscordWebhookCommand}
+	return p.Secret()
+}
+
+// NotifyOnSessionStart はセッション開始通知が有効かを返す (既定: true)。
+func (n HubNotify) NotifyOnSessionStart() bool { return boolDefault(n.OnSessionStart, true) }
+
+// NotifyOnApproval は承認通知が有効かを返す (既定: true)。
+func (n HubNotify) NotifyOnApproval() bool { return boolDefault(n.OnApproval, true) }
+
+func boolDefault(p *bool, def bool) bool {
+	if p == nil {
+		return def
+	}
+	return *p
 }
 
 // ResourcePolicyOrDefault は設定が存在すれば既定値を補完して返し、

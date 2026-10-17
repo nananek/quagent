@@ -32,6 +32,9 @@ func RunsDir() string { return filepath.Join(StateDir(), "runs") }
 // LogsDir は run 終了後も残す host 側ログの置き場。
 func LogsDir() string { return filepath.Join(StateDir(), "logs") }
 
+// HubSocket は Web 遠隔操作 (hub) が run からの登録を待ち受ける socket。
+func HubSocket() string { return filepath.Join(StateDir(), "hub.sock") }
+
 // ConfigFile はユーザー設定ファイル (~/.config/quagent/config.json)。
 func ConfigFile() string { return filepath.Join(xdg("XDG_CONFIG_HOME", ".config"), "config.json") }
 

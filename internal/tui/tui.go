@@ -38,6 +38,8 @@ type Launch struct {
 	Agent     string `json:"agent"`
 	// PRApproval は PR の作成を承認コンソールで確認してから push する。
 	PRApproval bool `json:"pr_approval"`
+	// Hub は Web 遠隔操作 (quagent hub) にこのセッションを登録する。
+	Hub bool `json:"hub"`
 }
 
 // ErrQuit は TUI で終了を選んだ (または中断した)。
@@ -350,6 +352,9 @@ func startForm(agents []string) (Launch, error) {
 	if l.LocalHead {
 		extras = append(extras, "local")
 	}
+	if l.Hub {
+		extras = append(extras, "hub")
+	}
 	var prApproval []string
 	if l.PRApproval {
 		prApproval = append(prApproval, "pr")
@@ -375,9 +380,9 @@ func startForm(agents []string) (Launch, error) {
 			huh.NewOption("repo の .tmp と VM の /work/.tmp を受け渡す (終了時に回収)", "tmp"),
 			huh.NewOption("VM の中で KVM を使えるようにする (入れ子の仮想化)", "nested"),
 			huh.NewOption("ブランチをローカルの先頭で渡す (未 push のコミットも渡る)", "local"),
+			huh.NewOption("Web 遠隔操作 (quagent hub) に登録する", "hub"),
 		).Value(&extras),
-		huh.NewConfirm().Title("この設定で起動する?").Affirmative("起動").Negative("戻る").Value(&ok),
-	)).Run()
+		huh.NewConfirm().Title("この設定で起動する?").Affirmative("起動").Negative("戻る").Value(&ok))).Run()
 	if err != nil {
 		return Launch{}, ErrQuit
 	}
@@ -389,6 +394,7 @@ func startForm(agents []string) (Launch, error) {
 	l.NestedVirt = slices.Contains(extras, "nested")
 	l.LocalHead = slices.Contains(extras, "local")
 	l.PRApproval = slices.Contains(prApproval, "pr")
+	l.Hub = slices.Contains(extras, "hub")
 	l.CPUs, _ = strconv.Atoi(cpus)
 	l.MemMiB, _ = strconv.Atoi(mem)
 	saveLast(l)

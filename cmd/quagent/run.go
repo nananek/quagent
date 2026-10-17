@@ -25,6 +25,7 @@ import (
 	"github.com/nananek/quagent/internal/console"
 	"github.com/nananek/quagent/internal/guest"
 	"github.com/nananek/quagent/internal/hostsvc"
+	"github.com/nananek/quagent/internal/hub"
 	"github.com/nananek/quagent/internal/image"
 	"github.com/nananek/quagent/internal/mcpsrv"
 	"github.com/nananek/quagent/internal/netns"
@@ -62,6 +63,8 @@ type runOpts struct {
 	// 空なら終了で、discardLogs が true ならこの VM の host 側のログを残さない
 	// (discardLogs は終了のときだけ意味を持つ)。nil なら何も尋ねない。
 	AfterSession func(current string, choices []string) (next string, discardLogs bool)
+	// Hub は Web 遠隔操作 (quagent hub) にこのセッションを登録する。
+	Hub bool
 }
 
 func logf(format string, a ...any) {
@@ -844,10 +847,21 @@ runcmd:
 		return nil
 	}
 
+	session := "quagent-" + filepath.Base(work)
+	// Web 遠隔操作 (hub) への登録。登録はオプトインで、hub が居なくても run は続ける。
+	if o.Hub {
+		reg, err := hubRegister(session, work, repo, o.Agent)
+		if err != nil {
+			logf("hub に登録できない: %v (quagent hub を起動してから再実行すると遠隔操作できる)", err)
+		} else {
+			defer reg.Close()
+			logf("hub に登録した。スマホから開く: %s", reg.URL())
+		}
+	}
+
 	cur := o.Agent
 	for {
 		agent := g.interactiveArgv(paneCommand)
-		session := "quagent-" + filepath.Base(work)
 		if err := runTmux(session, agent, []string{self, consoleCommand, filepath.Join(work, "console.sock")}, con.Quit); err != nil {
 			return err
 		}
@@ -1269,6 +1283,24 @@ func holdWindowName(pane string) func() {
 	}
 }
 
+// hubRegister は Web 遠隔操作 (hub) にセッションを登録する。hub の socket が無ければ
+// エラーを返す (呼び出し側は警告して続行する)。
+func hubRegister(session, work, repo, agent string) (*hub.Registration, error) {
+	sock := paths.HubSocket()
+	if _, err := os.Stat(sock); err != nil {
+		return nil, fmt.Errorf("hub の socket が無い (%s)", sock)
+	}
+	req := hub.Request{
+		ID:      filepath.Base(work),
+		Name:    filepath.Base(repo),
+		Repo:    repo,
+		Agent:   agent,
+		Session: session,
+		Console: filepath.Join(work, "console.sock"),
+	}
+	return hub.Register(sock, req, 5*time.Second)
+}
+
 // runTmux は上にエージェント、下に承認コンソールを置いた tmux セッションを作り、
 // 終わるまで待つ。エージェントのペインが終わるとセッションごと閉じる。
 func runTmux(session string, agent, consoleArgv []string, quit <-chan struct{}) error {
@@ -1308,6 +1340,11 @@ func runTmux(session string, agent, consoleArgv []string, quit <-chan struct{}) 
 	}
 	// マウス操作を有効にして、承認コンソールのボタンクリックやスクロール、ペイン操作を行えるようにする
 	if err := tmux("set-option", "-t", session, "mouse", "on"); err != nil {
+		logf("%v", err)
+	}
+	// 複数のクライアント (ブラウザの hub など) が同時に見ても、小さい方に合わせて
+	// 共有ウィンドウが縮まないようにする。
+	if err := tmux("set-option", "-t", session, "window-size", "largest"); err != nil {
 		logf("%v", err)
 	}
 	if err := tmux(append([]string{"split-window", "-v", "-l", "30%", "-t", session + ":"}, consoleArgv...)...); err != nil {

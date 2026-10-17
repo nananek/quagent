@@ -56,6 +56,7 @@ quagent image build arch       # ベースイメージのビルド (--refresh / 
 quagent image ls / rm IMAGE    # ビルド済みイメージの一覧表示・削除
 quagent cache ls / clean       # キャッシュの一覧表示・全削除
 quagent run --image arch       # VM を起動 (--mount-tmp: .tmp をホスト・ゲスト間で同期)
+quagent hub                    # Web 遠隔操作モードを起動 (Tailscale 越しにブラウザから操作)
 
 ```
 
@@ -277,6 +278,57 @@ VM 内のエージェントが端末経由でクリップボードへ書き込�
 - **ディレクトリ変更 (任意):** `config.json` の `"skills_dir": "/path/to/skills"` で任意の場所を指定可能
 - **対応エージェント:** `opencode`、`claude`、`agy` のすべてに自動でシンボリックリンクが展開されます。セッション中のエージェント再起動・切り替え時にもそのまま利用可能です。
 - **転送と安全設計:** 合計 16 MiB を上限として通常ファイルとディレクトリのみを vsock 経由で安全にコピーします（VM 側からホストのファイルは変更されません）。
+
+---
+
+## Web 遠隔操作 (hub): Tailscale 越しにスマホからセッションを操作する
+
+`quagent hub` を起動しておくと、登録したセッションの端末（エージェント TUI）と承認パネルを、ブラウザから操作できます。スマートフォンからの利用を想定し、Tailscale 越しのアクセスを前提とします。
+
+```sh
+quagent hub                     # 別の端末/プロセスで常駐させる
+quagent run --hub               # `--hub` を付けた run (または TUI の「hub に登録する」) が hub に登録される
+```
+
+- **アクセス URL:** 登録時に `http://<Tailscale の IP>:8787/s/<シークレット>` が表示されます。**この URL を知っている人だけ**がアクセスでき、初回に開くとシークレットは Cookie に交換されて URL は無効になります（以降は再発行が必要）。
+- **端末と承認:** ブラウザの端末 (xterm.js) でエージェントを操作でき、承認パネルで接続先申請や PR 作成などの判定を行えます。端末側の承認コンソールと並立して使えます。ブラウザ資産は quagent に同梱され、外部 CDN に依存しません。
+- **Discord 通知:** セッションの開始と承認ダイアログを Discord Webhook へ通知します。通知のリンクをタップするとスマホのブラウザで承認できます。
+- **待ち受け:** 既定では Tailscale の IP にだけバインドします（`0.0.0.0` には公開しません）。HTTPS を使いたい場合は `tailscale serve` を併用します。
+
+設定ファイル: `~/.config/quagent/config.json`
+
+```json
+{
+  "hub": {
+    "enabled": true,
+    "listen": "tailscale",
+    "port": 8787,
+    "notify": {
+      "discord_webhook_command": ["pass", "show", "quagent/discord-webhook"],
+      "on_session_start": true,
+      "on_approval": true
+    }
+  }
+}
+```
+
+- `listen` は `"tailscale"`（既定）または `"127.0.0.1:8787"` のような明示アドレスを指定します。`base_url` を指定すると、通知や URL 生成に使う基点を上書きできます。
+- Webhook の URL は `discord_webhook_command` のほか `discord_webhook_env` / `discord_webhook_file` でも指定できます（設定ファイルに生の URL を書かずに済みます）。
+
+### 常駐させる (systemd user unit)
+
+hub は run と同じユーザーで動かす必要があります（`hub.sock` は 0600、tmux サーバーはユーザーごとに 1 つ）。`systemd --user` ならこの条件を満たします。サンプルは [contrib/systemd/quagent-hub.service](contrib/systemd/quagent-hub.service) です。
+
+```sh
+make install            # ~/.local/bin/quagent を配置
+make install-hub-unit   # ~/.config/systemd/user/quagent-hub.service を配置
+systemctl --user daemon-reload
+systemctl --user enable --now quagent-hub
+loginctl enable-linger "$USER"   # ログインしていない間も動かす場合
+```
+
+- Tailscale が上がる前に起動すると待ち受けに失敗しますが、`Restart=on-failure` で再試行します。
+- `tailscale` と `tmux` に PATH が通っている必要があります。通っていない場合は unit の `Environment=PATH=...` を有効にしてください。
 
 ---
 
