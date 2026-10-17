@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -499,5 +500,81 @@ func TestCachePolicyResolved(t *testing.T) {
 	// 0 以下なら既定 10
 	if got := (&CachePolicy{MaxSizeGiB: 0}).MaxSizeGiBResolved(); got != 10 {
 		t.Errorf("MaxSizeGiBResolved(0) = %d, want 10", got)
+	}
+}
+
+func TestHubPolicy(t *testing.T) {
+	// 未設定なら無効。
+	var nilPol *HubPolicy
+	if nilPol.IsEnabled() {
+		t.Error("nil は無効のはず")
+	}
+	if (&Config{}).Hub.IsEnabled() {
+		t.Error("hub セクション未指定は無効のはず")
+	}
+	if nilPol.PortResolved() != DefaultHubPort {
+		t.Errorf("PortResolved(nil) = %d, want %d", nilPol.PortResolved(), DefaultHubPort)
+	}
+	if nilPol.ListenResolved() != "tailscale" {
+		t.Errorf("ListenResolved(nil) = %q", nilPol.ListenResolved())
+	}
+
+	// 明示設定。
+	on := true
+	p := &HubPolicy{Enabled: &on, Port: 9999, Listen: "127.0.0.1:1"}
+	if !p.IsEnabled() {
+		t.Error("Enabled=true が反映されない")
+	}
+	if p.PortResolved() != 9999 {
+		t.Errorf("PortResolved = %d, want 9999", p.PortResolved())
+	}
+	if p.ListenResolved() != "127.0.0.1:1" {
+		t.Errorf("ListenResolved = %q", p.ListenResolved())
+	}
+
+	// 通知の既定は有効。明示的な無効化が効く。
+	if !p.Notify.NotifyOnSessionStart() || !p.Notify.NotifyOnApproval() {
+		t.Error("通知の既定は有効のはず")
+	}
+	off := false
+	n := HubNotify{OnSessionStart: &off, OnApproval: &off}
+	if n.NotifyOnSessionStart() || n.NotifyOnApproval() {
+		t.Error("明示的な無効化が効いていない")
+	}
+}
+
+func TestHubWebhookSecret(t *testing.T) {
+	// 未設定なら空。
+	if v, err := (HubNotify{}).Webhook(); err != nil || v != "" {
+		t.Errorf("未設定: %q, %v", v, err)
+	}
+	// 環境変数から取得。
+	t.Setenv("QUAGENT_TEST_WEBHOOK", "https://example/hook")
+	v, err := (HubNotify{DiscordWebhookEnv: "QUAGENT_TEST_WEBHOOK"}).Webhook()
+	if err != nil || v != "https://example/hook" {
+		t.Errorf("env: %q, %v", v, err)
+	}
+	// 環境変数が無ければエラー。
+	if _, err := (HubNotify{DiscordWebhookEnv: "QUAGENT_TEST_MISSING"}).Webhook(); err == nil {
+		t.Error("未設定の環境変数でエラーにならない")
+	}
+}
+
+func TestHubSectionRoundTrip(t *testing.T) {
+	// JSON から読み込めること。
+	doc := `{"hub":{"enabled":true,"listen":"tailscale","port":1234,
+		"notify":{"discord_webhook_env":"X","on_approval":false}}}`
+	var c Config
+	if err := json.Unmarshal([]byte(doc), &c); err != nil {
+		t.Fatal(err)
+	}
+	if !c.Hub.IsEnabled() || c.Hub.PortResolved() != 1234 {
+		t.Errorf("読み込み: %+v", c.Hub)
+	}
+	if c.Hub.Notify.NotifyOnApproval() {
+		t.Error("on_approval=false が反映されていない")
+	}
+	if c.Hub.BaseURL != "" {
+		t.Error("BaseURL が不正")
 	}
 }
