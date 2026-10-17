@@ -72,9 +72,20 @@ type Conn struct {
 	done      chan struct{}
 }
 
-// Accept は HTTP リクエストを WebSocket に昇格する。Origin があれば同一ホストで
-// あることを確認する (cross-site WebSocket hijacking 対策)。
+// Accept は HTTP リクエストを WebSocket に昇格する。Origin があれば、リクエスト
+// 自身の scheme://host:port と一致することを確認する (cross-site WebSocket
+// hijacking 対策)。リバースプロキシ越しなど、基点が異なる場合は AcceptOrigins を使う。
 func Accept(w http.ResponseWriter, r *http.Request) (*Conn, error) {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	return AcceptOrigins(w, r, scheme+"://"+r.Host)
+}
+
+// AcceptOrigins は許可する Origin (scheme://host[:port] の形) を明示して昇格する。
+// Origin ヘッダが無い接続 (ブラウザ以外) はここでは判定せず通す。
+func AcceptOrigins(w http.ResponseWriter, r *http.Request, origins ...string) (*Conn, error) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "websocket: GET が必要", http.StatusMethodNotAllowed)
 		return nil, errors.New("websocket: メソッドが不正")
@@ -94,12 +105,9 @@ func Accept(w http.ResponseWriter, r *http.Request) (*Conn, error) {
 		http.Error(w, "websocket: key が無い", http.StatusBadRequest)
 		return nil, errors.New("websocket: Sec-WebSocket-Key が無い")
 	}
-	if o := r.Header.Get("Origin"); o != "" {
-		u, err := url.Parse(o)
-		if err != nil || !strings.EqualFold(hostOf(u.Host), hostOf(r.Host)) {
-			http.Error(w, "websocket: origin が不正", http.StatusForbidden)
-			return nil, errors.New("websocket: Origin が一致しない")
-		}
+	if o := r.Header.Get("Origin"); o != "" && !originAllowed(o, origins) {
+		http.Error(w, "websocket: origin が不正", http.StatusForbidden)
+		return nil, errors.New("websocket: Origin が一致しない")
 	}
 
 	hj, ok := w.(http.Hijacker)
@@ -371,12 +379,44 @@ func headerHasToken(v, token string) bool {
 	return false
 }
 
-func hostOf(h string) string {
-	if h == "" {
-		return ""
+// originAllowed は origin が許可リストのいずれかと同じ Origin かを返す。
+// scheme・ホスト・ポートを正規化して比較する (ポートを無視すると、同一ホストの
+// 別ポートのページから Cookie 付きで接続できてしまう)。
+func originAllowed(origin string, allowed []string) bool {
+	got, ok := originKey(origin)
+	if !ok {
+		return false
 	}
-	if i := strings.LastIndexByte(h, ':'); i >= 0 && !strings.Contains(h[i:], "]") {
-		return h[:i]
+	for _, a := range allowed {
+		if want, ok := originKey(a); ok && got == want {
+			return true
+		}
 	}
-	return h
+	return false
+}
+
+// originKey は "scheme://host[:port]" を scheme://host:port に正規化する。
+// 既定ポートを補い、ホストは小文字にする。パスや userinfo は無視しない。
+func originKey(s string) (string, bool) {
+	u, err := url.Parse(s)
+	if err != nil || u.User != nil || u.Path != "" {
+		return "", false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return "", false
+	}
+	port := u.Port()
+	if port == "" {
+		if scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return scheme + "://" + net.JoinHostPort(host, port), true
 }

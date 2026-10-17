@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/nananek/quagent/internal/console"
 )
 
 // TestExchangeAndAuth はワンタイム URL の交換と Cookie 認可、Host 検査を検証する。
@@ -114,6 +116,18 @@ func TestExchangeAndAuth(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("不正な Cookie は 401 のはず: %d", resp.StatusCode)
+	}
+}
+
+// TestBrowserVisible は再発行 URL をブラウザへ中継しないことを確かめる。
+func TestBrowserVisible(t *testing.T) {
+	if browserVisible(console.Msg{Type: "hubreissued", URL: "http://host/s/x"}) {
+		t.Error("hubreissued がブラウザに見えている")
+	}
+	for _, typ := range []string{"request", "settled", "log", "clip", "prrequest"} {
+		if !browserVisible(console.Msg{Type: typ}) {
+			t.Errorf("%s は中継すべき", typ)
+		}
 	}
 }
 

@@ -301,7 +301,8 @@ func (s *Server) reissueHubURL() {
 		s.broadcast(Msg{Type: "hubreissued", Error: err.Error()})
 		return
 	}
-	s.Log("hub のアクセス URL を再発行した: " + url)
+	// URL 自体はログに残さない (ログは hub 経由でブラウザにも届くため)。
+	s.Log("hub のアクセス URL を再発行した")
 	s.broadcast(Msg{Type: "hubreissued", URL: url})
 }
 

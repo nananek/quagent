@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -199,6 +200,29 @@ func TestOriginMismatch(t *testing.T) {
 	defer c.conn.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("Origin 不一致は 403 のはず: %d", resp.StatusCode)
+	}
+}
+
+func TestOriginSameOriginAllowed(t *testing.T) {
+	ts := echoServer(t, 0)
+	c, resp := dial(t, ts, ts.URL)
+	defer c.conn.Close()
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("同一 Origin は 101 のはず: %d", resp.StatusCode)
+	}
+}
+
+func TestOriginPortMismatch(t *testing.T) {
+	ts := echoServer(t, 0)
+	u, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Cookie はポートに紐づかないため、ホストだけ合っていても別ポートは拒否する。
+	c, resp := dial(t, ts, "http://"+net.JoinHostPort(u.Hostname(), "1"))
+	defer c.conn.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("別ポートの Origin は 403 のはず: %d", resp.StatusCode)
 	}
 }
 

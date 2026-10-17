@@ -143,6 +143,9 @@ func (s *Server) handleConsole(w http.ResponseWriter, r *http.Request) {
 	var overflowOnce sync.Once
 	overflow := make(chan struct{})
 	bridge := newConsoleBridge(sess.Console, func(m console.Msg) {
+		if !browserVisible(m) {
+			return
+		}
 		s.maybeNotifyApproval(sess, m)
 		select {
 		case send <- m:
@@ -216,16 +219,38 @@ func isDecision(t string) bool {
 	return false
 }
 
+// browserVisible は console から受けたメッセージをブラウザへ中継してよいかを返す。
+// hubreissued は再発行したワンタイム URL を運ぶ。Web 承認パネルは URL 再発行を
+// 扱わないため、これをブラウザへ流さない (TUI だけが受け取る)。
+func browserVisible(m console.Msg) bool {
+	return m.Type != "hubreissued"
+}
+
 func writeBinary(ctx context.Context, c *ws.Conn, b []byte) error {
 	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	return c.Write(wctx, ws.MessageBinary, b)
 }
 
-// acceptWS は WebSocket を確立する。Cookie (SameSite=Lax) と Host 検査で守るため、
-// Origin は既定の同一オリジン検査に任せる (ブラウザ以外で Origin が無い接続は通す)。
+// acceptWS は WebSocket を確立する。Cookie と Host 検査で守るため、Origin は
+// 設定した基点 (と実際の待ち受け) の scheme://host:port と一致するものだけを許す。
 func (s *Server) acceptWS(w http.ResponseWriter, r *http.Request) (*ws.Conn, error) {
-	return ws.Accept(w, r)
+	return ws.AcceptOrigins(w, r, s.allowedOrigins()...)
+}
+
+// allowedOrigins は WebSocket の Origin 検査で許可する基点を返す。設定した基点 URL と、
+// 実際に待ち受けているアドレスを許す (後者は、基点を名前で設定して IP で直接開く場合や、
+// ポート 0 で待ち受けるテストのため)。ポートまで比べるので、同一ホストの別ポートからは
+// 接続できない。
+func (s *Server) allowedOrigins() []string {
+	out := make([]string, 0, 2)
+	if s.baseURL != "" {
+		out = append(out, s.baseURL)
+	}
+	if s.httpLn != nil {
+		out = append(out, "http://"+s.httpLn.Addr().String())
+	}
+	return out
 }
 
 // authSession は Cookie からセッションを引く。無効なら応答を書いて false を返す。

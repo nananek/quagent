@@ -70,6 +70,50 @@ func TestRegisterRoundTrip(t *testing.T) {
 	t.Fatal("切断後も登録が残っている")
 }
 
+// TestRegisterDuplicateIDRejected は同じ ID の 2 件目を拒否し、1 件目が切れた
+// あとには登録できることを確かめる。
+func TestRegisterDuplicateIDRejected(t *testing.T) {
+	console := testConsolePath(t, "r1")
+	sock := filepath.Join(t.TempDir(), "hub.sock")
+	s := newTestServer()
+	ln, err := s.listenRegister(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	req := Request{
+		ID: "r1", Name: "repo", Repo: "/repo", Agent: "opencode",
+		Session: "quagent-r1", Console: console,
+	}
+	reg1, err := Register(sock, req, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if _, err := Register(sock, req, 2*time.Second); err == nil {
+		t.Fatal("同じ ID の 2 件目を登録できてしまう")
+	}
+	if _, ok := s.reg.get("r1"); !ok {
+		t.Error("拒否したときに 1 件目まで消えている")
+	}
+
+	if err := reg1.Close(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := s.reg.get("r1"); !ok {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	reg2, err := Register(sock, req, 2*time.Second)
+	if err != nil {
+		t.Fatalf("1 件目を切ったあとの登録: %v", err)
+	}
+	defer reg2.Close()
+}
+
 // TestRegisterReissue は登録中の接続で URL を再発行できることを確かめる。
 func TestRegisterReissue(t *testing.T) {
 	console := testConsolePath(t, "r1")

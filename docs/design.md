@@ -333,6 +333,7 @@ PR 作成は既定で承認制（`--pr-approval`、TUI の起動設定「PR を�
 - **再発行:** 承認コンソール TUI から URL を再発行すると新しいシークレットが発行され、以前の URL は使えなくなります。一方、発行済みの Cookie（1 セッションあたり最大 8 個）は有効なまま残るため、接続済みの端末は切れず、新しい端末を追加できます。
 - **総当たり対策:** シークレットは定数時間比較し、交換試行はレート制限します。不一致時は一律同じ応答を返し、シークレットをログに残しません。
 - **DNS リバインディング対策:** 許可したホスト名（`base_url` のホスト）以外の `Host` ヘッダのリクエストは拒否します。
+- **WebSocket の Origin:** `Origin` があれば、`base_url`（または実際の待ち受け）の `scheme://host:port` と一致するものだけを許します。Cookie はポートに紐づかないため、ホスト名だけで比べると同一ホストの別ポートのページから Cookie 付きで接続できてしまいます。
 - **待ち受け:** 既定では Tailscale の IP にだけバインドし、`0.0.0.0` にはバインドしません。トランスポートは Tailscale (WireGuard) が暗号化します。`tailscale serve` で HTTPS を前置する構成も可能で、その場合は `base_url` を `https://…` にし、Cookie に `Secure` を付けます。
 
 ### 3. 端末の中継: tmux control mode
@@ -350,7 +351,7 @@ control mode のワイヤ仕様は実機（tmux 3.5）で確認済みです。
 
 ### 4. 承認コンソールの中継
 
-hub はセッションの `console.sock` へ `{"type":"ui"}` として接続し、既存プロトコル（`request`/`settled`、`relaxrequest`、`prrequest`、`dockerrequest`、`batchrequest`、`clip`）を受信してブラウザへ配信します。ブラウザからの判断は `decide` / `relaxdecide` / `prdecide` / `dockerdecide` / `batchdecide` / `clipdecide` として返します。URL 再発行（`hubreissue` / `hubreissued`）は承認コンソール TUI だけが使い、hub はブラウザからの `hubreissue` を受け付けません。
+hub はセッションの `console.sock` へ `{"type":"ui"}` として接続し、既存プロトコル（`request`/`settled`、`relaxrequest`、`prrequest`、`dockerrequest`、`batchrequest`、`clip`）を受信してブラウザへ配信します。ブラウザからの判断は `decide` / `relaxdecide` / `prdecide` / `dockerdecide` / `batchdecide` / `clipdecide` として返します。URL 再発行（`hubreissue` / `hubreissued`）は承認コンソール TUI だけが使い、hub はブラウザからの `hubreissue` を受け付けず、`hubreissued`（新しいワンタイム URL）もブラウザへ中継しません。
 
 - 端末側の承認コンソール TUI と hub は**並立**します。申請の決着はどちらからでも行え、二重決着は冪等に処理されます（既存の `claim`/settle 実装）。
 - ブラウザの承認パネルは TUI と同じ「承認待ち / ログ / 履歴」の 3 タブを持ちます。進行中の申請は承認待ちに、`log` はログに、決着した申請は履歴に表示します。ログと履歴はブラウザ側で保持し、それぞれ古いものから捨てます（ログ 1000 件、履歴 200 件）。
