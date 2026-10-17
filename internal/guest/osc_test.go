@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/base64"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -92,6 +94,66 @@ func TestOSCFilterColorQueryWithoutSchemePassesThrough(t *testing.T) {
 	out, _ := runFilter("\x1b]11;?\x1b\\")
 	if out != "\x1b]11;?\x1b\\" {
 		t.Fatalf("colors 無しで素通しされない: %q", out)
+	}
+}
+
+func TestOSCFilterUsesThemeFileWhenNoScheme(t *testing.T) {
+	// run が端末の配色を判定できなかったとき (colors が nil) は、hub が書いた
+	// テーマファイルを読んで答える。これで tmux クライアントの接続状況に依存しない。
+	path := filepath.Join(t.TempDir(), "theme")
+	if err := os.WriteFile(path, []byte(ThemeDark+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	var injected []byte
+	f := newOSCFilter(&out, nil)
+	f.themeFile = path
+	f.inject = func(b []byte) { injected = append(injected, b...) }
+	_, _ = f.Write([]byte("a\x1b]11;?\x1b\\b"))
+	if out.String() != "ab" {
+		t.Fatalf("色問い合わせが端末へ流れた: %q", out.String())
+	}
+	want := "\x1b]11;rgb:1111/1313/1a1a\x1b\\"
+	if string(injected) != want {
+		t.Fatalf("injected = %q, want %q", injected, want)
+	}
+}
+
+func TestOSCFilterDetectedSchemeBeatsThemeFile(t *testing.T) {
+	// run が検出した配色 (colors) があれば、テーマファイルより優先する。
+	path := filepath.Join(t.TempDir(), "theme")
+	if err := os.WriteFile(path, []byte(ThemeDark+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	var injected []byte
+	f := newOSCFilter(&out, nil)
+	f.colors = TerminalColorsForScheme(ThemeLight)
+	f.themeFile = path
+	f.inject = func(b []byte) { injected = append(injected, b...) }
+	_, _ = f.Write([]byte("\x1b]11;?\x1b\\"))
+	if want := "\x1b]11;rgb:f9f9/f8f8/f5f5\x1b\\"; string(injected) != want {
+		t.Fatalf("injected = %q, want %q (検出した配色が優先されていない)", injected, want)
+	}
+}
+
+func TestThemeFileScheme(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good")
+	if err := os.WriteFile(good, []byte(" light \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := ThemeFileScheme(good); got != ThemeLight {
+		t.Errorf("ThemeFileScheme = %q, want light", got)
+	}
+	bad := filepath.Join(dir, "bad")
+	if err := os.WriteFile(bad, []byte("bogus\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"", bad, filepath.Join(dir, "missing")} {
+		if got := ThemeFileScheme(p); got != "" {
+			t.Errorf("ThemeFileScheme(%q) = %q, want \"\"", p, got)
+		}
 	}
 }
 

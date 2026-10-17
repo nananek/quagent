@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +28,7 @@ type Session struct {
 	Agent      string
 	Tmux       string // tmux セッション名 (端末の中継に使う)
 	Console    string // console.sock のパス (承認の中継に使う)
+	ThemeFile  string // ブラウザの配色を書くファイル (端末の配色判定が失敗したとき用)
 	Registered time.Time
 
 	mu        sync.Mutex
@@ -206,6 +209,7 @@ func (r *Registry) byCookie(token string) *Session {
 }
 
 // newSession はメタデータからセッションを作り、ワンタイムのシークレットを発行する。
+// ThemeFile は登録側 (handleRegister) が後から設定する。
 func newSession(id, name, repo, agent, tmux, console string) (*Session, error) {
 	secret, err := newSecret()
 	if err != nil {
@@ -218,6 +222,38 @@ func newSession(id, name, repo, agent, tmux, console string) (*Session, error) {
 		ID: id, Name: name, Repo: repo, Agent: agent, Tmux: tmux, Console: console,
 		Registered: time.Now(), secret: secret,
 	}, nil
+}
+
+// SetTheme はブラウザの配色をテーマファイルへ書く。run が端末の配色を判定できな
+// かったときだけ __attach がこれを読み、色問い合わせに直接答える (internal/guest)。
+// 値は light / dark に限定し、一時ファイル経由で置き換えて読み手に途中を見せない。
+func (s *Session) SetTheme(scheme string) error {
+	if s.ThemeFile == "" {
+		return nil // 端末の配色を判定できている (--theme 済み) か、hub 経由を使わない
+	}
+	if scheme != "light" && scheme != "dark" {
+		return fmt.Errorf("配色が不正: %q", scheme)
+	}
+	// 複数のブラウザが同時に書いても衝突しないよう、一時ファイルは毎回別名にする。
+	f, err := os.CreateTemp(filepath.Dir(s.ThemeFile), ".theme-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	if _, err := f.WriteString(scheme + "\n"); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, s.ThemeFile); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func newSecret() (string, error) {

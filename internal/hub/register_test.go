@@ -27,6 +27,7 @@ func testConsolePath(t *testing.T, name string) string {
 
 func TestRegisterRoundTrip(t *testing.T) {
 	console := testConsolePath(t, "r1")
+	themeFile := filepath.Join(filepath.Dir(console), "theme")
 	sock := filepath.Join(t.TempDir(), "hub.sock")
 	s := newTestServer()
 	ln, err := s.listenRegister(sock)
@@ -37,7 +38,7 @@ func TestRegisterRoundTrip(t *testing.T) {
 
 	reg, err := Register(sock, Request{
 		ID: "r1", Name: "repo", Repo: "/repo", Agent: "opencode",
-		Session: "quagent-r1", Console: console,
+		Session: "quagent-r1", Console: console, ThemeFile: themeFile,
 	}, 2*time.Second)
 	if err != nil {
 		t.Fatalf("Register: %v", err)
@@ -52,8 +53,15 @@ func TestRegisterRoundTrip(t *testing.T) {
 	if reg.URL() != sess.URL("http://127.0.0.1:9999") {
 		t.Errorf("URL が一致しない: %q", reg.URL())
 	}
-	if sess.Tmux != "quagent-r1" || sess.Console != console {
+	if sess.Tmux != "quagent-r1" || sess.Console != console || sess.ThemeFile != themeFile {
 		t.Errorf("メタデータ: %+v", sess)
+	}
+	// hub がテーマファイルへブラウザの配色を書ける。
+	if err := sess.SetTheme("dark"); err != nil {
+		t.Fatalf("SetTheme: %v", err)
+	}
+	if b, err := os.ReadFile(themeFile); err != nil || strings.TrimSpace(string(b)) != "dark" {
+		t.Errorf("theme = %q (%v), want dark", b, err)
 	}
 
 	// 接続を切ると登録が解除される。
@@ -235,6 +243,31 @@ func TestValidConsolePath(t *testing.T) {
 		filepath.Join(root, "x", "other.sock"),
 	} {
 		if validConsolePath(p) {
+			t.Errorf("不正なパスを通した: %q", p)
+		}
+	}
+}
+
+func TestValidThemeFile(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := paths.RunsDir()
+	// 未指定は許す (run が配色を判定できていれば不要)。
+	if !validThemeFile("") {
+		t.Error("空のパスを拒否した")
+	}
+	ok := filepath.Join(root, "20260101-000000-1", "theme")
+	if !validThemeFile(ok) {
+		t.Errorf("正しいパスを拒否した: %s", ok)
+	}
+	for _, p := range []string{
+		"/tmp/theme",
+		"/etc/passwd",
+		root,
+		filepath.Join(root, "..", "theme"),
+		filepath.Join(root, "x", "other"),
+		filepath.Join(root, "x", "console.sock"),
+	} {
+		if validThemeFile(p) {
 			t.Errorf("不正なパスを通した: %q", p)
 		}
 	}
