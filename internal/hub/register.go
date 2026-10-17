@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -85,6 +86,11 @@ func Register(sock string, req Request, timeout time.Duration) (*Registration, e
 
 // listenRegister は sock (0600) で run からの登録を待ち受ける。
 func (s *Server) listenRegister(sock string) (net.Listener, error) {
+	if dir := filepath.Dir(sock); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, err
+		}
+	}
 	_ = os.Remove(sock)
 	l, err := net.Listen("unix", sock)
 	if err != nil {
