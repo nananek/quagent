@@ -1,12 +1,80 @@
 /* quagent hub のブラウザ UI。CSP でインライン style を避けるため外部ファイルにする。 */
+
+/* 既定はダーク。`data-theme` 属性が無いときは prefers-color-scheme に追従し、
+   トグルボタンが付ける `data-theme="light|dark"` で明示的に固定する。 */
 :root {
+  color-scheme: dark;
   --bg: #11131a;
   --fg: #e6e6e6;
   --muted: #8b93a7;
   --card: #1b1f2a;
   --line: #2a3040;
   --accent: #5b8cff;
+  --surface: #0e1016;
+  --tab-bg: #161a24;
+  --tab-fg: #8b93a7;
+  --tab-active-bg: #5b8cff;
+  --tab-active-fg: #ffffff;
+  --btn-bg: #232a39;
+  --btn-primary-fg: #ffffff;
+  --code-bg: #000000;
+  --danger-bg: #3a1f24;
+  --danger-line: #5b2a31;
+  --danger-fg: #e6e6e6;
+  --ok: #4ade80;
+  --ng: #f87171;
 }
+
+/* Shirasagi — 白鷺の姫君を思わせるライト配色。白磁色の背景に深い藍・桜色・紅を重ねる。 */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f9f8f5;
+  --fg: #243a58;
+  --muted: #617386;
+  --card: #f9f8f5;
+  --line: #b8ced2;
+  --accent: #31547f;
+  --surface: #eff5f5;
+  --tab-bg: #dcebed;
+  --tab-fg: #41556f;
+  --tab-active-bg: #31547f;
+  --tab-active-fg: #f9f8f5;
+  --btn-bg: #eff5f5;
+  --btn-primary-fg: #f9f8f5;
+  --code-bg: #dcebed;
+  --danger-bg: #f7e7ee;
+  --danger-line: #9d3e68;
+  --danger-fg: #9d3e68;
+  --ok: #28705d;
+  --ng: #9d3e68;
+}
+
+/* システム追従 (auto)。トグルで固定していないときだけ明るい配色にする。 */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    color-scheme: light;
+    --bg: #f9f8f5;
+    --fg: #243a58;
+    --muted: #617386;
+    --card: #f9f8f5;
+    --line: #b8ced2;
+    --accent: #31547f;
+    --surface: #eff5f5;
+    --tab-bg: #dcebed;
+    --tab-fg: #41556f;
+    --tab-active-bg: #31547f;
+    --tab-active-fg: #f9f8f5;
+    --btn-bg: #eff5f5;
+    --btn-primary-fg: #f9f8f5;
+    --code-bg: #dcebed;
+    --danger-bg: #f7e7ee;
+    --danger-line: #9d3e68;
+    --danger-fg: #9d3e68;
+    --ok: #28705d;
+    --ng: #9d3e68;
+  }
+}
+
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
 body {
@@ -24,7 +92,7 @@ header {
   gap: .6rem;
   padding: .5rem .75rem;
   border-bottom: 1px solid var(--line);
-  background: #0e1016;
+  background: var(--surface);
 }
 header h1 {
   font-size: .95rem;
@@ -35,11 +103,19 @@ header h1 {
   white-space: nowrap;
 }
 .conn { margin-left: auto; font-size: .75rem; color: var(--muted); }
-.conn.ok::before { content: "● "; color: #4ade80; }
-.conn.ng::before { content: "● "; color: #f87171; }
+.conn.ok::before { content: "● "; color: var(--ok); }
+.conn.ng::before { content: "● "; color: var(--ng); }
+#theme-toggle {
+  flex: 0 0 auto;
+  padding: .25rem .5rem;
+  font-size: .9rem;
+  line-height: 1.1;
+}
 main { flex: 1; min-height: 0; display: flex; flex-direction: row; }
-#terminal-wrap { flex: 1 1 auto; min-width: 0; min-height: 0; padding: .25rem; }
+#terminal-wrap { flex: 1 1 auto; min-width: 0; min-height: 0; padding: .25rem; background: var(--bg); }
 #terminal { width: 100%; height: 100%; }
+/* xterm.js 同梱の CSS は IME 変換中の表示を黒地に固定している。配色に合わせる。 */
+.xterm .composition-view { background: var(--bg); color: var(--fg); }
 #approvals {
   flex: 0 0 22rem;
   max-width: 45%;
@@ -47,7 +123,7 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: row; }
   display: flex;
   flex-direction: column;
   border-left: 1px solid var(--line);
-  background: #0e1016;
+  background: var(--surface);
   padding: .5rem .6rem;
 }
 #tabs { display: flex; gap: .25rem; margin-bottom: .5rem; }
@@ -58,10 +134,10 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: row; }
   padding: .35rem .3rem;
   border-radius: .45rem;
   border: 1px solid var(--line);
-  background: #161a24;
-  color: var(--muted);
+  background: var(--tab-bg);
+  color: var(--tab-fg);
 }
-#tabs .tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+#tabs .tab.active { background: var(--tab-active-bg); border-color: var(--tab-active-bg); color: var(--tab-active-fg); }
 #tabs .badge { margin-left: .3rem; font-size: .7rem; }
 .panel { flex: 1 1 auto; min-height: 0; overflow: auto; }
 #log-list .logline {
@@ -86,7 +162,7 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: row; }
 .card.settled { opacity: .55; }
 .card h3 { font-size: .85rem; margin: 0 0 .3rem; }
 .card .reason { color: var(--muted); font-size: .8rem; white-space: pre-wrap; word-break: break-word; }
-.card code { background: #000; padding: .05rem .25rem; border-radius: .25rem; font-size: .8rem; }
+.card code { background: var(--code-bg); padding: .05rem .25rem; border-radius: .25rem; font-size: .8rem; }
 .card .row { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .55rem; }
 .card .status { font-size: .75rem; color: var(--muted); margin-top: .4rem; }
 button {
@@ -95,14 +171,14 @@ button {
   padding: .4rem .6rem;
   border-radius: .45rem;
   border: 1px solid var(--line);
-  background: #232a39;
+  background: var(--btn-bg);
   color: var(--fg);
   cursor: pointer;
 }
-button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-button.danger { background: #3a1f24; border-color: #5b2a31; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--btn-primary-fg); }
+button.danger { background: var(--danger-bg); border-color: var(--danger-line); color: var(--danger-fg); }
 button:disabled { opacity: .5; cursor: default; }
-.notice { padding: 1rem; color: #f87171; }
+.notice { padding: 1rem; color: var(--ng); }
 @media (max-width: 720px) {
   main { flex-direction: column; }
   #terminal-wrap { flex: 1 1 55%; }

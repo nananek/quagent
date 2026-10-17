@@ -3,7 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
 <title>quagent</title>
+<script src="/assets/theme.js"></script>
 <link rel="stylesheet" href="/assets/xterm.css">
 <link rel="stylesheet" href="/assets/app.css">
 </head>
@@ -11,6 +13,7 @@
 <header>
   <h1 id="session-name">{{.Name}}</h1>
   <span id="conn" class="conn">接続中…</span>
+  <button type="button" id="theme-toggle" aria-label="テーマを切り替える">◐</button>
 </header>
 <main>
   <section id="terminal-wrap"><div id="terminal" aria-label="エージェントの端末"></div></section>

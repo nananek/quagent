@@ -1,8 +1,10 @@
 # hub のブラウザ資産
 
-`index.html` / `app.css` / `app.js` は quagent 本体に同梱しています
-(`internal/hub/assets.go` の `//go:embed`)。端末表示に使う次のファイルは
-本体の実装とは独立に更新できるよう、`make hub-assets` で取得して同梱しています。
+`index.html` / `app.css` / `app.js` / `theme.js` は quagent 本体に同梱しています
+(`internal/hub/assets.go` の `//go:embed`)。`theme.js` は描画前にテーマを確定する
+ための自前スクリプトです (CSP でインライン script を使えないため外部ファイルに
+しています)。端末表示に使う次のファイルは本体の実装とは独立に更新できるよう、
+`make hub-assets` で取得して同梱しています。
 
 | ファイル | 取得元 | ライセンス |
 | --- | --- | --- |
