@@ -198,7 +198,7 @@ func (s *Server) handleRegister(c net.Conn) {
 	}
 	url := sess.URL(s.baseURL)
 	if err := enc.Encode(registerReply{Type: "registered", URL: url}); err != nil {
-		s.reg.remove(sess.ID)
+		s.reg.removeIf(sess.ID, sess)
 		return
 	}
 	s.logf("セッションを登録: %s (%s)", sess.Name, sess.Agent)
@@ -220,7 +220,7 @@ func (s *Server) handleRegister(c net.Conn) {
 		}
 		_ = enc.Encode(registerReply{Type: "reissued", URL: newURL})
 	}
-	s.reg.remove(sess.ID)
+	s.reg.removeIf(sess.ID, sess)
 	s.logf("セッションの登録が切れた: %s", sess.Name)
 }
 

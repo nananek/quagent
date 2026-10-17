@@ -449,13 +449,32 @@ func TestServerHubReissue(t *testing.T) {
 		t.Fatalf("hub 未登録なのにエラーが無い: %+v", got)
 	}
 
-	// 登録済みなら再発行した URL を返す。
+	// 登録済みなら再発行した URL を返す。URL はログに残さない (ログは hub 経由で
+	// ブラウザにも届くため)。
 	s.SetHubReissue(func() (string, error) { return "http://host:8787/s/newsecret", nil })
 	if err := enc.Encode(Msg{Type: "hubreissue"}); err != nil {
 		t.Fatal(err)
 	}
-	if got := waitForType(t, dec, "hubreissued"); got.URL != "http://host:8787/s/newsecret" {
+	var got Msg
+	leaked := false
+	for i := 0; i < 20; i++ {
+		var m Msg
+		if err := dec.Decode(&m); err != nil {
+			t.Fatal(err)
+		}
+		if m.Type == "log" && strings.Contains(m.Text, "newsecret") {
+			leaked = true
+		}
+		if m.Type == "hubreissued" {
+			got = m
+			break
+		}
+	}
+	if got.URL != "http://host:8787/s/newsecret" {
 		t.Fatalf("hubreissued = %+v", got)
+	}
+	if leaked {
+		t.Error("再発行 URL がログに残っている")
 	}
 }
 

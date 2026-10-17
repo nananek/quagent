@@ -121,15 +121,36 @@ func newRegistry(max int) *Registry {
 
 var errRegistryFull = errors.New("登録できるセッション数の上限に達している")
 
-// add はセッションを登録する。同じ ID は上書きし、上限を超えるならエラー。
+// errIDInUse は同じ ID のセッションが登録中のとき返す。
+var errIDInUse = errors.New("同じ ID のセッションが登録中")
+
+// add はセッションを登録する。同じ ID が登録中なら拒否し、上限を超えるならエラー。
 func (r *Registry) add(s *Session) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.sessions[s.ID]; !ok && len(r.sessions) >= r.max {
+	if cur, ok := r.sessions[s.ID]; ok {
+		if cur == s {
+			return nil
+		}
+		// 作業ディレクトリ名から作る ID は別リポジトリでも衝突する。黙って上書き
+		// すると先のセッションの端末が切れるため、登録中の ID は拒否する。
+		return errIDInUse
+	}
+	if len(r.sessions) >= r.max {
 		return errRegistryFull
 	}
 	r.sessions[s.ID] = s
 	return nil
+}
+
+// removeIf は id の登録が s 自身のときだけ外す。切断処理が古い接続から呼んでも、
+// 同じ ID で後から登録された別のセッションを消さないようにする。
+func (r *Registry) removeIf(id string, s *Session) {
+	r.mu.Lock()
+	if r.sessions[id] == s {
+		delete(r.sessions, id)
+	}
+	r.mu.Unlock()
 }
 
 func (r *Registry) remove(id string) {

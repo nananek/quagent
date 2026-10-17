@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/nananek/quagent/internal/console"
 )
 
 // TestExchangeAndAuth はワンタイム URL の交換と Cookie 認可、Host 検査を検証する。
@@ -117,14 +119,26 @@ func TestExchangeAndAuth(t *testing.T) {
 	}
 }
 
-func TestAllowedConsoleInput(t *testing.T) {
-	for _, t2 := range []string{"decide", "relaxdecide", "prdecide", "dockerdecide", "batchdecide", "clipdecide", "hubreissue"} {
-		if !allowedConsoleInput(t2) {
-			t.Errorf("%s は通すべき", t2)
+// TestBrowserVisible は再発行 URL をブラウザへ中継しないことを確かめる。
+func TestBrowserVisible(t *testing.T) {
+	if browserVisible(console.Msg{Type: "hubreissued", URL: "http://host/s/x"}) {
+		t.Error("hubreissued がブラウザに見えている")
+	}
+	for _, typ := range []string{"request", "settled", "log", "clip", "prrequest"} {
+		if !browserVisible(console.Msg{Type: typ}) {
+			t.Errorf("%s は中継すべき", typ)
 		}
 	}
-	for _, t2 := range []string{"ui", "quit", "clipboard", "log", ""} {
-		if allowedConsoleInput(t2) {
+}
+
+func TestIsDecision(t *testing.T) {
+	for _, t2 := range []string{"decide", "relaxdecide", "prdecide", "dockerdecide", "batchdecide", "clipdecide"} {
+		if !isDecision(t2) {
+			t.Errorf("%s は判断として通すべき", t2)
+		}
+	}
+	for _, t2 := range []string{"ui", "quit", "clipboard", "log", "hubreissue", ""} {
+		if isDecision(t2) {
 			t.Errorf("%s は通してはいけない", t2)
 		}
 	}

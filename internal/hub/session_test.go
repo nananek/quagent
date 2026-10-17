@@ -121,9 +121,20 @@ func TestRegistryLimitsAndLookup(t *testing.T) {
 	if err := r.add(c); err == nil {
 		t.Fatal("上限を超えて登録できてしまう")
 	}
-	// 同じ ID は上書きできる (上限に数えない)。
+	// 同じ ID の別セッションは拒否する (作業ディレクトリ名の衝突で先の端末を
+	// 追い出さないため)。同じポインタの再追加は無害なので通る。
 	if err := r.add(a); err != nil {
-		t.Fatalf("同じ ID の上書き: %v", err)
+		t.Fatalf("同じポインタの再追加: %v", err)
+	}
+	dup, err := newSession("a", "dup", "", "opencode", "s", "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.add(dup); err == nil {
+		t.Error("同じ ID の別セッションを登録できてしまう")
+	}
+	if got, _ := r.get("a"); got != a {
+		t.Error("拒否したのに登録が差し替わっている")
 	}
 	if got := r.bySecret(a.secret); got != a {
 		t.Error("bySecret で引けない")
@@ -141,6 +152,37 @@ func TestRegistryLimitsAndLookup(t *testing.T) {
 	r.remove(a.ID)
 	if _, ok := r.get("a"); ok {
 		t.Error("remove されていない")
+	}
+}
+
+// TestRegistryRemoveIf は、古い接続の切断処理が後から登録されたセッションを
+// 消さないことを確かめる。
+func TestRegistryRemoveIf(t *testing.T) {
+	r := newRegistry(4)
+	old, err := newSession("same", "old", "", "opencode", "s", "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.add(old); err != nil {
+		t.Fatal(err)
+	}
+	// 登録中の ID は拒否されるので、差し替えは removeIf の後に限る。
+	r.removeIf("same", old)
+	newer, err := newSession("same", "newer", "", "opencode", "s", "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.add(newer); err != nil {
+		t.Fatal(err)
+	}
+	// 古い接続の切断が遅れて届いても、新しい登録は残る。
+	r.removeIf("same", old)
+	if got, _ := r.get("same"); got != newer {
+		t.Error("古い接続の removeIf が新しいセッションを消した")
+	}
+	r.removeIf("same", newer)
+	if _, ok := r.get("same"); ok {
+		t.Error("自分自身の removeIf で消えない")
 	}
 }
 
