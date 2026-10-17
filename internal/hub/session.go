@@ -14,6 +14,10 @@ import (
 // secretBytes はワンタイム URL のシークレットと Cookie のトークンの長さ。
 const secretBytes = 32
 
+// maxCookies は 1 セッションで同時に有効な Cookie の上限。URL を再発行するたびに
+// 端末が増えるため、溢れたら古いものから捨てる。
+const maxCookies = 8
+
 // Session は登録された 1 つの run。
 type Session struct {
 	ID         string
@@ -25,30 +29,39 @@ type Session struct {
 	Registered time.Time
 
 	mu        sync.Mutex
-	secret    string // ワンタイム URL のシークレット (交換で消費される)
-	exchanged bool
-	cookie    string // 交換後に発行する Cookie のトークン
+	secret    string   // 現在のワンタイム URL のシークレット (交換で消費される)
+	exchanged bool     // 現在のシークレットを交換済みか
+	cookies   []string // 交換で発行した Cookie のトークン (再発行しても残す)
 }
 
 // URL は base を基点としたアクセス URL を返す。
 func (s *Session) URL(base string) string {
-	return strings.TrimRight(base, "/") + "/s/" + s.secret
+	s.mu.Lock()
+	secret := s.secret
+	s.mu.Unlock()
+	return linkURL(base, secret)
 }
 
-// LinkURL は通知に載せる URL を返す。未交換ならワンタイム URL、交換済みなら基点
-// (既に Cookie を持っているのでシークレットは不要)。
+// linkURL は基点とシークレットからワンタイム URL を組み立てる。
+func linkURL(base, secret string) string {
+	return strings.TrimRight(base, "/") + "/s/" + secret
+}
+
+// LinkURL は通知に載せる URL を返す。未交換のシークレットがあればワンタイム URL、
+// 交換済みなら基点 (既に Cookie を持っているのでシークレットは不要)。
 func (s *Session) LinkURL(base string) string {
 	s.mu.Lock()
-	exchanged := s.exchanged
+	exchanged, secret := s.exchanged, s.secret
 	s.mu.Unlock()
 	if exchanged {
 		return strings.TrimRight(base, "/") + "/"
 	}
-	return s.URL(base)
+	return linkURL(base, secret)
 }
 
 // Exchange はシークレットを Cookie のトークンに交換する。未交換で一致したときだけ
-// 成功し、以降その URL のシークレットは無効になる (ワンタイム)。
+// 成功し、以降その URL のシークレットは無効になる (ワンタイム)。発行済みの Cookie は
+// 有効なまま残す (再発行で複数の端末から使える)。
 func (s *Session) Exchange(secret string) (cookie string, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -56,15 +69,43 @@ func (s *Session) Exchange(secret string) (cookie string, ok bool) {
 		return "", false
 	}
 	s.exchanged = true
-	s.cookie = newToken()
-	return s.cookie, true
+	tok := newToken()
+	if tok != "" {
+		s.cookies = append(s.cookies, tok)
+		if len(s.cookies) > maxCookies {
+			s.cookies = s.cookies[len(s.cookies)-maxCookies:]
+		}
+	}
+	return tok, true
+}
+
+// Reissue は新しいワンタイム URL を発行して返す。以前のシークレットは使えなくなるが、
+// 発行済みの Cookie はそのまま有効で、既存の端末は接続を続けられる。
+func (s *Session) Reissue(base string) (string, error) {
+	secret, err := newSecret()
+	if err != nil {
+		return "", err
+	}
+	s.mu.Lock()
+	s.secret = secret
+	s.exchanged = false
+	s.mu.Unlock()
+	return linkURL(base, secret), nil
 }
 
 // Authorize は Cookie のトークンがこのセッションに有効かを返す。
 func (s *Session) Authorize(token string) bool {
+	if token == "" {
+		return false
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.exchanged && token != "" && secureEqual(s.cookie, token)
+	for _, c := range s.cookies {
+		if secureEqual(c, token) {
+			return true
+		}
+	}
+	return false
 }
 
 // Registry は登録されたセッションを保持する。
@@ -114,10 +155,16 @@ func (r *Registry) list() []*Session {
 	return out
 }
 
-// bySecret はシークレットに一致するセッションを探す (定数時間比較)。
+// bySecret は現在のシークレットに一致するセッションを探す (定数時間比較)。
 func (r *Registry) bySecret(secret string) *Session {
+	if secret == "" {
+		return nil
+	}
 	for _, s := range r.list() {
-		if secureEqual(s.secret, secret) {
+		s.mu.Lock()
+		ok := secureEqual(s.secret, secret)
+		s.mu.Unlock()
+		if ok {
 			return s
 		}
 	}
@@ -130,11 +177,7 @@ func (r *Registry) byCookie(token string) *Session {
 		return nil
 	}
 	for _, s := range r.list() {
-		s.mu.Lock()
-		c := s.cookie
-		ex := s.exchanged
-		s.mu.Unlock()
-		if ex && secureEqual(c, token) {
+		if s.Authorize(token) {
 			return s
 		}
 	}

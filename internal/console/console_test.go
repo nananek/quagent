@@ -419,6 +419,62 @@ func TestConsoleClient(t *testing.T) {
 	}
 }
 
+// TestServerHubReissue は hubreissue 要求で hubreissued が返ることを確かめる。
+func TestServerHubReissue(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "console-hub.sock")
+	m, err := access.NewManager(noApply{}, filepath.Join(t.TempDir(), "always.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(m, sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+
+	// hub に登録していないときはエラーを返す。
+	c, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	enc, dec := json.NewEncoder(c), json.NewDecoder(c)
+	if err := enc.Encode(Msg{Type: "ui"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.Encode(Msg{Type: "hubreissue"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := waitForType(t, dec, "hubreissued"); got.Error == "" {
+		t.Fatalf("hub 未登録なのにエラーが無い: %+v", got)
+	}
+
+	// 登録済みなら再発行した URL を返す。
+	s.SetHubReissue(func() (string, error) { return "http://host:8787/s/newsecret", nil })
+	if err := enc.Encode(Msg{Type: "hubreissue"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := waitForType(t, dec, "hubreissued"); got.URL != "http://host:8787/s/newsecret" {
+		t.Fatalf("hubreissued = %+v", got)
+	}
+}
+
+// waitForType は dec から msgType のメッセージが届くまで読み飛ばす。
+func waitForType(t *testing.T, dec *json.Decoder, msgType string) Msg {
+	t.Helper()
+	for i := 0; i < 20; i++ {
+		var got Msg
+		if err := dec.Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Type == msgType {
+			return got
+		}
+	}
+	t.Fatalf("%s が届かない", msgType)
+	return Msg{}
+}
+
 func TestClipboardSinkFailure(t *testing.T) {
 	sock := filepath.Join(t.TempDir(), "console-clip-fail.sock")
 	m, err := access.NewManager(noApply{}, filepath.Join(t.TempDir(), "always.json"))
@@ -626,6 +682,50 @@ func TestTUIModelOnMsg(t *testing.T) {
 	}
 	if len(m.history) != 1 {
 		t.Fatalf("expected 1 history item, got %d", len(m.history))
+	}
+}
+
+// TestTUIModelHubReissue は r キーで再発行要求を送り、結果を URL モーダルに出すことを
+// 確かめる。
+func TestTUIModelHubReissue(t *testing.T) {
+	m := newModel("test.sock")
+	newM, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	m = newM.(model)
+
+	// r キーで再発行要求が送られる。
+	newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	m = newM.(model)
+	select {
+	case msg := <-m.outChan:
+		if msg.Type != "hubreissue" {
+			t.Fatalf("送ったメッセージ: %+v", msg)
+		}
+	default:
+		t.Fatal("r キーで再発行要求が送られていない")
+	}
+
+	// hubreissued で URL モーダルが開く。
+	newM, _ = m.Update(socketMsg(Msg{Type: "hubreissued", URL: "http://h:1/s/abc"}))
+	m = newM.(model)
+	if !m.showHubURL || m.hubURL != "http://h:1/s/abc" {
+		t.Fatalf("showHubURL=%v hubURL=%q", m.showHubURL, m.hubURL)
+	}
+	if view := m.View(); !strings.Contains(view, "http://h:1/s/abc") {
+		t.Errorf("URL モーダルに URL が出ていない: %q", view)
+	}
+
+	// 任意のキーで閉じる。
+	newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m = newM.(model)
+	if m.showHubURL {
+		t.Error("キーで URL モーダルが閉じない")
+	}
+
+	// エラーはログに出し、モーダルは開かない。
+	newM, _ = m.Update(socketMsg(Msg{Type: "hubreissued", Error: "hub に登録されていない"}))
+	m = newM.(model)
+	if m.showHubURL {
+		t.Error("エラーで URL モーダルが開いた")
 	}
 }
 

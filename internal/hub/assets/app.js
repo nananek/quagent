@@ -136,6 +136,18 @@
     consoleWS.send(JSON.stringify(body));
   }
 
+  // --- アクセス URL の再発行 ---
+  const reissueBtn = document.getElementById("reissue-btn");
+  const reissueResult = document.getElementById("reissue-result");
+  if (reissueBtn) {
+    reissueBtn.addEventListener("click", () => {
+      if (consoleWS && consoleWS.readyState === WebSocket.OPEN) {
+        reissueBtn.disabled = true;
+        consoleWS.send(JSON.stringify({ type: "hubreissue" }));
+      }
+    });
+  }
+
   function domainList(domains) {
     if (!domains || !domains.length) return el("div");
     const d = el("div", "reason");
@@ -230,6 +242,16 @@
       case "log":
         // 承認コンソールのログは端末側で見えるので、ここでは落とす。
         break;
+      case "hubreissued": {
+        if (reissueBtn) reissueBtn.disabled = false;
+        if (reissueResult) {
+          reissueResult.hidden = false;
+          reissueResult.textContent = m.error
+            ? "再発行できません: " + m.error
+            : "新しい URL: " + m.url;
+        }
+        break;
+      }
     }
     showEmpty();
   }
@@ -241,7 +263,11 @@
     ws.onmessage = (ev) => {
       try { renderApproval(JSON.parse(ev.data)); } catch (e) { /* 壊れたメッセージは無視 */ }
     };
-    ws.onclose = () => { consoleWS = null; setTimeout(connectConsole, 1500); };
+    ws.onclose = () => {
+      consoleWS = null;
+      if (reissueBtn) reissueBtn.disabled = false;
+      setTimeout(connectConsole, 1500);
+    };
     ws.onerror = () => ws.close();
   }
   connectConsole();

@@ -855,6 +855,7 @@ runcmd:
 			logf("hub に登録できない: %v (quagent hub を起動してから再実行すると遠隔操作できる)", err)
 		} else {
 			defer reg.Close()
+			con.SetHubReissue(reg.Reissue)
 			logf("hub に登録した。スマホから開く: %s", reg.URL())
 		}
 	}

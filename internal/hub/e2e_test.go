@@ -87,6 +87,34 @@ func TestServeRegisterAndExchange(t *testing.T) {
 		t.Errorf("セッション情報: %v", info)
 	}
 
+	// URL を再発行すると新しいワンタイム URL が交換でき、既存の Cookie も有効なまま。
+	newURL, err := reg.Reissue()
+	if err != nil {
+		t.Fatalf("Reissue: %v", err)
+	}
+	newSecret := newURL[strings.LastIndex(newURL, "/s/")+len("/s/"):]
+	if newSecret == "" || newSecret == secret {
+		t.Fatalf("再発行のシークレットが不正: %q", newSecret)
+	}
+	resp2, err := client.Get(base + "/s/" + newSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusFound {
+		t.Fatalf("再発行した URL の交換は 302 のはず: %d", resp2.StatusCode)
+	}
+	req2, _ := http.NewRequest(http.MethodGet, base+"/api/session", nil)
+	req2.AddCookie(cookie)
+	resp3, err := client.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp3.Body.Close()
+	if resp3.StatusCode != http.StatusOK {
+		t.Fatalf("再発行後も既存 Cookie は 200 のはず: %d", resp3.StatusCode)
+	}
+
 	// 登録が切れると Serve は動き続けたまま登録だけが消える。
 	reg.Close()
 	deadline = time.Now().Add(3 * time.Second)

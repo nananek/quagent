@@ -190,6 +190,10 @@ type model struct {
 	// ヘルプ表示
 	showHelp bool
 
+	// hub のアクセス URL 再発行の結果表示
+	showHubURL bool
+	hubURL     string
+
 	// tmux 連携
 	focused bool
 
@@ -376,6 +380,14 @@ func (m model) handleSocketMsg(msg Msg) model {
 		}
 		return m
 
+	case "hubreissued":
+		if msg.Error != "" {
+			return m.appendLog("hub のアクセス URL を再発行できない: " + msg.Error)
+		}
+		m.hubURL = msg.URL
+		m.showHubURL = true
+		return m.appendLog("hub のアクセス URL を再発行した: " + msg.URL)
+
 	case "settled", "clipsettled", "prsettled", "relaxsettled", "dockersettled", "batchsettled":
 		want := "request"
 		switch msg.Type {
@@ -513,6 +525,12 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// URL 再発行の結果表示中の操作 (任意のキーで閉じる)
+	if m.showHubURL {
+		m.showHubURL = false
+		return m, nil
+	}
+
 	// 質問入力中の操作
 	if m.asking {
 		switch key {
@@ -547,6 +565,10 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "?":
 		m.showHelp = true
+		return m, nil
+	case "r":
+		// hub のアクセス URL を再発行する (hub 未登録なら hubreissued でエラーが返る)。
+		m.decide(Msg{Type: "hubreissue"})
 		return m, nil
 	case "tab":
 		m.activeTab = (m.activeTab + 1) % 3
@@ -782,6 +804,12 @@ func (m model) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// URL 再発行の結果表示中: 任意の場所をクリックで閉じる
+	if m.showHubURL {
+		m.showHubURL = false
+		return m, nil
+	}
+
 	// 質問入力中: 枠外クリックでキャンセル
 	if m.asking {
 		if msg.Y <= 1 || msg.Y >= m.height-2 {
@@ -1005,6 +1033,8 @@ func (m model) View() string {
 		content = m.renderQuitModal(availHeight)
 	case m.showHelp:
 		content = m.renderHelpModal(availHeight)
+	case m.showHubURL:
+		content = m.renderHubURLModal(availHeight)
 	case m.asking:
 		content = m.renderAskingCard(availHeight)
 	case m.activeTab == tabPending:
@@ -1499,10 +1529,26 @@ func (m model) renderHelpModal(availHeight int) string {
 	sb.WriteString("g / G             ログの先頭/末尾(最新)へジャンプ\n")
 	sb.WriteString("1, 2, 3, d, q     承認待ちの判断アクション\n")
 	sb.WriteString("y / n             クリップボード/PRの許可・拒否\n")
+	sb.WriteString("r                 hub のアクセス URL を再発行\n")
 	sb.WriteString("Q / Ctrl+C        VM を破棄して終了確認\n\n")
 	sb.WriteString(styleDim("任意のキーまたは Esc で閉じる"))
 	padV := 0
 	if availHeight >= 12 {
+		padV = 1
+	}
+	modalWidth := max(24, m.width-6)
+	return styleModal.Padding(padV, 2).Width(max(10, modalWidth-6)).Render(sb.String())
+}
+
+// renderHubURLModal は再発行したアクセス URL を表示する。
+func (m model) renderHubURLModal(availHeight int) string {
+	var sb strings.Builder
+	sb.WriteString(styleTitle.Render("hub のアクセス URL を再発行しました") + "\n\n")
+	sb.WriteString("新しい端末のブラウザで次を開いてください:\n")
+	sb.WriteString(lipgloss.NewStyle().Foreground(colCyan).Render(Sanitize(m.hubURL)) + "\n\n")
+	sb.WriteString(styleDim("ワンタイム URL です。既存の端末はそのまま使えます。\n任意のキーまたは Esc で閉じる"))
+	padV := 0
+	if availHeight >= 8 {
 		padV = 1
 	}
 	modalWidth := max(24, m.width-6)

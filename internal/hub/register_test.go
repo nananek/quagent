@@ -70,6 +70,65 @@ func TestRegisterRoundTrip(t *testing.T) {
 	t.Fatal("切断後も登録が残っている")
 }
 
+// TestRegisterReissue は登録中の接続で URL を再発行できることを確かめる。
+func TestRegisterReissue(t *testing.T) {
+	console := testConsolePath(t, "r1")
+	sock := filepath.Join(t.TempDir(), "hub.sock")
+	s := newTestServer()
+	ln, err := s.listenRegister(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	reg, err := Register(sock, Request{
+		ID: "r1", Name: "repo", Repo: "/repo", Agent: "opencode",
+		Session: "quagent-r1", Console: console,
+	}, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	defer reg.Close()
+
+	oldURL := reg.URL()
+	oldSecret := oldURL[strings.LastIndex(oldURL, "/s/")+len("/s/"):]
+
+	newURL, err := reg.Reissue()
+	if err != nil {
+		t.Fatalf("Reissue: %v", err)
+	}
+	if newURL == oldURL {
+		t.Fatal("再発行しても URL が変わっていない")
+	}
+	if reg.URL() != newURL {
+		t.Errorf("Registration.URL() = %q, want %q", reg.URL(), newURL)
+	}
+	if s.reg.bySecret(oldSecret) != nil {
+		t.Error("古いシークレットでセッションを引けてしまう")
+	}
+	newSecret := newURL[strings.LastIndex(newURL, "/s/")+len("/s/"):]
+	sess, ok := s.reg.get("r1")
+	if !ok {
+		t.Fatal("セッションが登録されていない")
+	}
+	if got := s.reg.bySecret(newSecret); got != sess {
+		t.Error("新しいシークレットで同じセッションを引けない")
+	}
+
+	// 再発行しても登録は生きている (接続を切ると解除される)。
+	if err := reg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := s.reg.get("r1"); !ok {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("切断後も登録が残っている")
+}
+
 func TestRegisterRejectsInvalid(t *testing.T) {
 	console := testConsolePath(t, "r")
 	sock := filepath.Join(t.TempDir(), "hub.sock")
