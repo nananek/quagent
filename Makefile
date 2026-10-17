@@ -9,13 +9,18 @@ XTERM_VERSION   := 5.5.0
 XTERM_FIT_VERSION := 0.10.0
 XTERM_CDN       := https://cdn.jsdelivr.net/npm
 
-.PHONY: build install test vet coverage clean docker-test hub-assets
+.PHONY: build install test vet coverage clean docker-test hub-assets install-hub-unit
 
 build:
 	CGO_ENABLED=0 $(GO) build -o $(BIN) ./cmd/quagent
 
 install: build
 	install -Dm755 $(BIN) $(DESTDIR)$(PREFIX)/bin/quagent
+
+# hub の systemd user unit を配置する (有効化は README を参照)。
+install-hub-unit:
+	install -Dm644 contrib/systemd/quagent-hub.service \
+		$(DESTDIR)$(HOME)/.config/systemd/user/quagent-hub.service
 
 test:
 	$(GO) test ./...

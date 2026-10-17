@@ -1,0 +1,44 @@
+# quagent hub (Web 遠隔操作モード) の systemd user unit サンプル。
+#
+# 使い方:
+#   make install            # ~/.local/bin/quagent を配置
+#   make install-hub-unit   # この unit を ~/.config/systemd/user/ へ配置
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now quagent-hub
+#
+# hub は run と同じユーザーで動かす必要がある (hub.sock は 0600、tmux サーバーは
+# ユーザーごとに 1 つ)。systemd --user ならこの条件を満たす。
+#
+# ログインしていない間も動かす場合は lingering を有効にする:
+#   loginctl enable-linger $USER
+
+[Unit]
+Description=quagent hub (Web 遠隔操作モード)
+Documentation=https://github.com/nananek/quagent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/quagent hub
+
+# tailscale (IP の解決) と tmux (端末の中継) に PATH が通っている必要がある。
+# systemd --user の既定 PATH に入っていない場合は明示する。
+#Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+# Tailscale がまだ上がっていないと起動に失敗するため、間隔を空けて再試行する
+# (tailscale が上がると tailscale ip -4 が通り、待ち受けを開始する)。
+Restart=on-failure
+RestartSec=5
+
+# hub が触るのは ~/.config (設定) と ~/.local/state (hub.sock) だけ。
+# tmux の socket (/tmp/tmux-<uid>) を run と共有するため PrivateTmp は使わず、
+# ~/.local/state を書くため ProtectHome も無効のままにする。
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=default.target

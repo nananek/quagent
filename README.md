@@ -315,6 +315,21 @@ quagent run --hub               # `--hub` を付けた run (または TUI の「
 - `listen` は `"tailscale"`（既定）または `"127.0.0.1:8787"` のような明示アドレスを指定します。`base_url` を指定すると、通知や URL 生成に使う基点を上書きできます。
 - Webhook の URL は `discord_webhook_command` のほか `discord_webhook_env` / `discord_webhook_file` でも指定できます（設定ファイルに生の URL を書かずに済みます）。
 
+### 常駐させる (systemd user unit)
+
+hub は run と同じユーザーで動かす必要があります（`hub.sock` は 0600、tmux サーバーはユーザーごとに 1 つ）。`systemd --user` ならこの条件を満たします。サンプルは [contrib/systemd/quagent-hub.service](contrib/systemd/quagent-hub.service) です。
+
+```sh
+make install            # ~/.local/bin/quagent を配置
+make install-hub-unit   # ~/.config/systemd/user/quagent-hub.service を配置
+systemctl --user daemon-reload
+systemctl --user enable --now quagent-hub
+loginctl enable-linger "$USER"   # ログインしていない間も動かす場合
+```
+
+- Tailscale が上がる前に起動すると待ち受けに失敗しますが、`Restart=on-failure` で再試行します。
+- `tailscale` と `tmux` に PATH が通っている必要があります。通っていない場合は unit の `Environment=PATH=...` を有効にしてください。
+
 ---
 
 ## 困ったときは (トラブルシューティング)
