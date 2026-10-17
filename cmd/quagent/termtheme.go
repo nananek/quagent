@@ -109,6 +109,10 @@ func parseBackgroundColor(b []byte) (r, g, bl int, ok bool) {
 		default:
 			return 0, 0, 0, false
 		}
+		// 各チャンネルは 8 bit。int への変換前に上限を確かめる (32 bit 環境で負に化けない)。
+		if v > 0xFF {
+			return 0, 0, 0, false
+		}
 		vals[j] = int(v)
 	}
 	return vals[0], vals[1], vals[2], true
