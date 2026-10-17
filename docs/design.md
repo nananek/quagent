@@ -353,6 +353,7 @@ control mode のワイヤ仕様は実機（tmux 3.5）で確認済みです。
 hub はセッションの `console.sock` へ `{"type":"ui"}` として接続し、既存プロトコル（`request`/`settled`、`relaxrequest`、`prrequest`、`dockerrequest`、`batchrequest`、`clip`）を受信してブラウザへ配信します。ブラウザからの判断は `decide` / `relaxdecide` / `prdecide` / `dockerdecide` / `batchdecide` / `clipdecide` として返します。TUI と Web の両方から使える操作として、URL 再発行の `hubreissue` / `hubreissued` を追加しています（それ以外のプロトコル変更は不要です）。
 
 - 端末側の承認コンソール TUI と hub は**並立**します。申請の決着はどちらからでも行え、二重決着は冪等に処理されます（既存の `claim`/settle 実装）。
+- ブラウザの承認パネルは TUI と同じ「承認待ち / ログ / 履歴」の 3 タブを持ちます。進行中の申請は承認待ちに、`log` はログに、決着した申請は履歴に表示します。ログと履歴はブラウザ側で保持し、それぞれ古いものから捨てます（ログ 1000 件、履歴 200 件）。
 - `console.sock` が切れた場合は hub が再接続します（既存の UI クライアントと同じ挙動）。
 
 ### 5. Discord Webhook 通知
