@@ -6,6 +6,7 @@
   const enc = new TextEncoder();
   let consoleWS = null;
   let termWS = null;
+  let term = null;
 
   // --- 接続状態の表示 ---
   const connEl = document.getElementById("conn");
@@ -13,6 +14,82 @@
     connEl.className = "conn " + (ok ? "ok" : "ng");
     connEl.textContent = text;
   };
+
+  // --- テーマ ---
+  // ライトは Shirasagi (白鷺の姫君) 配色。app.css の変数と同じ値を使う。
+  // 端末 (xterm.js) は CSS の変数を読まないため、テーマごとの配色をここに持つ。
+  const TERM_THEMES = {
+    dark: { background: "#11131a", foreground: "#e6e6e6" },
+    light: {
+      background: "#f9f8f5",
+      foreground: "#243a58",
+      cursor: "#9d3e68",
+      cursorAccent: "#f9f8f5",
+      selectionBackground: "#f0dce5",
+      selectionForeground: "#243a58",
+      black: "#243a58",
+      red: "#9d3e68",
+      green: "#28705d",
+      yellow: "#8c6b25",
+      blue: "#31547f",
+      magenta: "#76527e",
+      cyan: "#3e7580",
+      white: "#eff5f5",
+      brightBlack: "#617386",
+      brightRed: "#b6517b",
+      brightGreen: "#3c8873",
+      brightYellow: "#a88232",
+      brightBlue: "#4b6f9b",
+      brightMagenta: "#91699a",
+      brightCyan: "#59919b",
+      brightWhite: "#f9f8f5",
+    },
+  };
+  const THEME_UI = {
+    auto: { label: "◐", title: "テーマ: システムに合わせる" },
+    light: { label: "☀", title: "テーマ: ライト" },
+    dark: { label: "☾", title: "テーマ: ダーク" },
+  };
+  // テーマ状態は theme.js (描画前に読み込む) が持つ。無い場合はダーク固定で続行する。
+  const theme = window.quagentTheme || null;
+  const themeBtn = document.getElementById("theme-toggle");
+
+  function resolvedTheme() {
+    return theme ? theme.resolved(theme.read()) : "dark";
+  }
+
+  function applyTermTheme() {
+    if (term) term.options.theme = TERM_THEMES[resolvedTheme()] || TERM_THEMES.dark;
+  }
+
+  function renderThemeButton() {
+    if (!themeBtn || !theme) return;
+    const ui = THEME_UI[theme.read()] || THEME_UI.auto;
+    themeBtn.textContent = ui.label;
+    themeBtn.title = ui.title;
+    themeBtn.setAttribute("aria-label", ui.title + " (クリックで切り替え)");
+  }
+
+  function initTheme() {
+    if (!theme || !themeBtn) return;
+    renderThemeButton();
+    themeBtn.addEventListener("click", () => {
+      const next = theme.MODES[(theme.MODES.indexOf(theme.read()) + 1) % theme.MODES.length];
+      try { localStorage.setItem(theme.KEY, next); } catch (e) { /* 保存できない環境では無視 */ }
+      theme.apply(next);
+      renderThemeButton();
+      applyTermTheme();
+    });
+    // 自動のときは OS の設定変更に追従して端末の配色も切り替える (ページは CSS が追従)。
+    if (window.matchMedia) {
+      const mq = window.matchMedia("(prefers-color-scheme: light)");
+      const onChange = () => { if (theme.read() === "auto") applyTermTheme(); };
+      if (mq.addEventListener) mq.addEventListener("change", onChange);
+      else if (mq.addListener) mq.addListener(onChange);
+    }
+  }
+
+  initTheme();
 
   // --- 端末 ---
   // xterm.js が同梱されていない場合は端末ビューだけを諦め、承認パネルは動かす。
@@ -34,13 +111,13 @@
   }
 
   function initTerminal() {
-    const term = new Terminal({
+    term = new Terminal({
       convertEol: false,
       cursorBlink: true,
       scrollback: 5000,
       fontFamily: 'Menlo, Consolas, "DejaVu Sans Mono", monospace',
       fontSize: 13,
-      theme: { background: "#11131a", foreground: "#e6e6e6" },
+      theme: TERM_THEMES[resolvedTheme()] || TERM_THEMES.dark,
     });
     const fit = new FitAddon.FitAddon();
     term.loadAddon(fit);

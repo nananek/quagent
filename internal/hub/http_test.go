@@ -193,6 +193,56 @@ func TestAssetsHaveNoInlineCode(t *testing.T) {
 	}
 }
 
+// TestThemeAssets はテーマ切り替えの資産が揃っていることを確認する。
+// システム追従 (prefers-color-scheme) と明示指定 (data-theme) の両方を保つ回帰ガード。
+func TestThemeAssets(t *testing.T) {
+	html := readAsset(t, "assets/index.html")
+	if !strings.Contains(html, `id="theme-toggle"`) {
+		t.Error("index.html にテーマ切り替えボタンが無い")
+	}
+	if !strings.Contains(html, "/assets/theme.js") {
+		t.Error("index.html が theme.js を読み込んでいない")
+	}
+
+	css := readAsset(t, "assets/app.css")
+	if !strings.Contains(css, "prefers-color-scheme: light") {
+		t.Error("app.css にシステム追従 (prefers-color-scheme: light) が無い")
+	}
+	if !strings.Contains(css, `:root[data-theme="light"]`) {
+		t.Error("app.css に明示ライトテーマ (data-theme=\"light\") が無い")
+	}
+	// Shirasagi 配色の代表色 (背景・本文・カーソル・アクセント) が入っていること。
+	for _, c := range []string{"#f9f8f5", "#243a58", "#9d3e68", "#31547f"} {
+		if !strings.Contains(css, c) {
+			t.Errorf("app.css のライト配色に %s が無い", c)
+		}
+	}
+
+	themeJS := readAsset(t, "assets/theme.js")
+	for _, want := range []string{`"auto"`, `"light"`, `"dark"`, "quagentTheme"} {
+		if !strings.Contains(themeJS, want) {
+			t.Errorf("theme.js に %s が無い", want)
+		}
+	}
+
+	// 端末 (xterm.js) のライト配色が CSS と同じ値で定義されていること。
+	appJS := readAsset(t, "assets/app.js")
+	for _, want := range []string{"brightWhite", "#9d3e68", "selectionBackground", "TERM_THEMES"} {
+		if !strings.Contains(appJS, want) {
+			t.Errorf("app.js の端末テーマに %s が無い", want)
+		}
+	}
+}
+
+func readAsset(t *testing.T, name string) string {
+	t.Helper()
+	b, err := assetsFS.ReadFile(name)
+	if err != nil {
+		t.Fatalf("%s を読めない: %v", name, err)
+	}
+	return string(b)
+}
+
 // TestAppJSInitializesAfterState は端末の初期化が状態変数の宣言より前に走らないことを
 // 確かめる (let の TDZ で端末が表示されなくなった回帰ガード)。
 func TestAppJSInitializesAfterState(t *testing.T) {
@@ -224,6 +274,7 @@ func TestAssetServing(t *testing.T) {
 	for _, tc := range []struct{ path, ctype string }{
 		{"/assets/app.css", "text/css"},
 		{"/assets/app.js", "javascript"},
+		{"/assets/theme.js", "javascript"},
 		{"/assets/xterm.js", "javascript"},
 		{"/assets/xterm.css", "text/css"},
 		{"/assets/addon-fit.js", "javascript"},

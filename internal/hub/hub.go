@@ -151,6 +151,7 @@ func (s *Server) routes() http.Handler {
 var assetContentType = map[string]string{
 	"app.css":      "text/css; charset=utf-8",
 	"app.js":       "text/javascript; charset=utf-8",
+	"theme.js":     "text/javascript; charset=utf-8",
 	"xterm.js":     "text/javascript; charset=utf-8",
 	"xterm.css":    "text/css; charset=utf-8",
 	"addon-fit.js": "text/javascript; charset=utf-8",
