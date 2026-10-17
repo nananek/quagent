@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/nananek/quagent/internal/access"
 	"github.com/nananek/quagent/internal/config"
 	"github.com/nananek/quagent/internal/console"
@@ -440,5 +441,102 @@ func TestResourcePolicyIntegration(t *testing.T) {
 	tmp := t.TempDir()
 	if err := resourcemon.CheckHostFreeSpace(tmp, policy.MinFreeDiskGiB); err != nil {
 		t.Fatalf("unexpected CheckHostFreeSpace error: %v", err)
+	}
+}
+
+func TestReattachAnswer(t *testing.T) {
+	// Enter (空行) や q 以外は再アタッチ。
+	for _, line := range []string{"\n", "", " \n", "y\n", "yes\n", "attach\n"} {
+		if !reattachAnswer(line) {
+			t.Errorf("reattachAnswer(%q) = false, want true", line)
+		}
+	}
+	// q / Q は終了。
+	for _, line := range []string{"q", "q\n", "Q\n", " q \n"} {
+		if reattachAnswer(line) {
+			t.Errorf("reattachAnswer(%q) = true, want false", line)
+		}
+	}
+}
+
+func TestReattachPromptKeepsAttachCommand(t *testing.T) {
+	msg := reattachPrompt("quagent-run1")
+	if !strings.Contains(msg, "Enter") {
+		t.Errorf("その場で再アタッチする案内が無い: %q", msg)
+	}
+	if !strings.Contains(msg, "tmux attach -t quagent-run1") {
+		t.Errorf("別の端末から戻るコマンドが無い: %q", msg)
+	}
+}
+
+// TestAskReattachFromTerminal は対話端末では入力で再アタッチ / 終了を選べることを確かめる。
+func TestAskReattachFromTerminal(t *testing.T) {
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty を開けない: %v", err)
+	}
+	defer ptmx.Close()
+	defer tty.Close()
+
+	oldIn, oldErr := os.Stdin, os.Stderr
+	os.Stdin, os.Stderr = tty, tty
+	defer func() { os.Stdin, os.Stderr = oldIn, oldErr }()
+
+	if _, err := ptmx.WriteString("\n"); err != nil {
+		t.Fatal(err)
+	}
+	if !askReattach("sess") {
+		t.Error("Enter は再アタッチのはず")
+	}
+	if _, err := ptmx.WriteString("q\n"); err != nil {
+		t.Fatal(err)
+	}
+	if askReattach("sess") {
+		t.Error("q は終了のはず")
+	}
+}
+
+// TestRunTmuxDetachPromptsAndReturns は、デタッチされたときに runTmux がその場で
+// 再アタッチを促し (案内で止まったままにせず) 戻ることを確かめる。tmux は偽物を使う。
+func TestRunTmuxDetachPromptsAndReturns(t *testing.T) {
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	// attach-session は即座に戻る (デタッチ)。has-session は常に成功 (セッションは生存)。
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + calls + "\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	t.Setenv("TMUX", "") // $TMUX の外 (SSH 経由) を再現する
+
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty を開けない: %v", err)
+	}
+	defer ptmx.Close()
+	defer tty.Close()
+	oldIn, oldErr := os.Stdin, os.Stderr
+	os.Stdin, os.Stderr = tty, tty
+	defer func() { os.Stdin, os.Stderr = oldIn, oldErr }()
+
+	// すぐに q を入れて終了させる (pty にバッファされるので取りこぼさない)。
+	if _, err := ptmx.WriteString("q\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- runTmux("sess-test", []string{"true"}, []string{"true"}, make(chan struct{})) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runTmux: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("デタッチ後に runTmux が戻らない (再アタッチの案内で止まっている)")
+	}
+
+	b, _ := os.ReadFile(calls)
+	if !strings.Contains(string(b), "attach-session -t sess-test") {
+		t.Errorf("attach-session が呼ばれていない:\n%s", b)
 	}
 }
