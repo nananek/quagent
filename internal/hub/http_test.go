@@ -193,6 +193,27 @@ func TestAssetsHaveNoInlineCode(t *testing.T) {
 	}
 }
 
+// TestAppJSInitializesAfterState は端末の初期化が状態変数の宣言より前に走らないことを
+// 確かめる (let の TDZ で端末が表示されなくなった回帰ガード)。
+func TestAppJSInitializesAfterState(t *testing.T) {
+	b, err := assetsFS.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	decl := strings.Index(s, "let termWS = null;")
+	call := strings.Index(s, "initTerminal();")
+	if decl < 0 {
+		t.Fatal("app.js に termWS の宣言が無い")
+	}
+	if call < 0 {
+		t.Fatal("app.js に initTerminal() の呼び出しが無い")
+	}
+	if decl > call {
+		t.Error("initTerminal() が termWS の宣言より前に呼ばれている (TDZ で ReferenceError になる)")
+	}
+}
+
 // TestAssetServing は同梱資産が正しいパスで配信されることを確認する
 // (FileServer のプレフィックス取り違えの回帰ガード)。
 func TestAssetServing(t *testing.T) {

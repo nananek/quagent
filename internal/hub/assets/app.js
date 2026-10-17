@@ -5,6 +5,7 @@
 (function () {
   const enc = new TextEncoder();
   let consoleWS = null;
+  let termWS = null;
 
   // --- 接続状態の表示 ---
   const connEl = document.getElementById("conn");
@@ -31,8 +32,6 @@
     for (const b of bytes) bin += String.fromCharCode(b);
     return btoa(bin);
   }
-
-  let termWS = null;
 
   function initTerminal() {
     const term = new Terminal({
