@@ -2,6 +2,7 @@ package hub
 
 import (
 	"bytes"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -46,6 +47,10 @@ func TestControlClient(t *testing.T) {
 	}
 	// 専用の tmux サーバーを使う (利用者のセッションに触らない)。
 	t.Setenv("TMUX_TMPDIR", t.TempDir())
+	// TERM が無い環境 (CI など) でも tmux が動くようにしておく。
+	if os.Getenv("TERM") == "" {
+		t.Setenv("TERM", "xterm-256color")
+	}
 	session := "quagent-hubtest"
 
 	if out, err := exec.Command(tmuxBinary, "new-session", "-d", "-s", session, "-x", "80", "-y", "24",
