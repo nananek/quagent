@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"runtime"
 	"strconv"
 	"strings"
@@ -222,6 +223,17 @@ func (p *webProxy) block(reason string) {
 	if p.blocked != nil {
 		p.blocked(reason)
 	}
+}
+
+// bodyViolation はリクエスト本文の転送中に DLP が検知した違反を返す。検査上限を
+// 超える本文は転送しながら走査するため、検知は InspectRequest の戻り値ではなく
+// 転送 (req.Write / RoundTrip) の失敗として現れる。
+func bodyViolation(req *http.Request) (pattern, preview string, hit bool) {
+	v, ok := req.Body.(contentguard.BodyViolation)
+	if !ok {
+		return "", "", false
+	}
+	return v.Violation()
 }
 
 // originalDst は nft の redirect で書き換えられる前の宛先 (SO_ORIGINAL_DST) を返す。

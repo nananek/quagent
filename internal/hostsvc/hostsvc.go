@@ -85,14 +85,21 @@ func New(cid uint32) (*Server, error) {
 	return &Server{Mux: mux, Token: "qa-" + hex.EncodeToString(b), cid: cid}, nil
 }
 
-// authorized はリクエストが合言葉を持っているかを返す。
+// authorized はリクエストが合言葉を持っているかを返す。空の合言葉は一致とみなさない
+// (ConstantTimeCompare は空どうしで 1 を返すため、素通しにしない)。
 func (s *Server) authorized(r *http.Request) bool {
 	wants := append([]string{s.Token}, s.ExtraTokens...)
 	for _, got := range []string{
 		strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "),
 		r.Header.Get("X-Api-Key"),
 	} {
+		if got == "" {
+			continue
+		}
 		for _, want := range wants {
+			if want == "" {
+				continue
+			}
 			if subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1 {
 				return true
 			}

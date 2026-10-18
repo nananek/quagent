@@ -15,6 +15,9 @@ func parseGoPath(p string) (relPath, module, version string, ok bool) {
 	if p == "" {
 		return "", "", "", false
 	}
+	if !safePkgRelPath(p) {
+		return "", "", "", false
+	}
 
 	relPath = p
 	if idx := strings.Index(p, "/@v/"); idx != -1 {
