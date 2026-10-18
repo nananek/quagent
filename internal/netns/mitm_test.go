@@ -1177,3 +1177,51 @@ func TestProxyDLPLargeBodyForwarded(t *testing.T) {
 		t.Fatalf("上流が受けた本文長 = %d, want %d (DLP 検査で切り詰められた)", n, len(payload))
 	}
 }
+
+// TestProxyDLPDetectsSecretBeyondCap は、検査上限を超えた位置の秘密でも転送中の
+// 走査で検知し、上流へ全量を届けずに遮断することを確かめる。
+func TestProxyDLPDetectsSecretBeyondCap(t *testing.T) {
+	upCA, _ := tlsmitm.NewCA()
+	proxyCA, _ := tlsmitm.NewCA()
+	var mu sync.Mutex
+	gotLen := -1
+	upstreamAddr, roots := testUpstream(t, upCA, "allowed.example", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		gotLen = len(b)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	var rec reasonRecorder
+	proxyAddr := dlpTestProxy(t, proxyCA, upstreamAddr, roots, rec.set)
+
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: poolFor(t, proxyCA), ServerName: "allowed.example"},
+			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+				return net.Dial("tcp", proxyAddr)
+			},
+		},
+	}
+
+	payload := append(bytes.Repeat([]byte("-"), contentguard.MaxInspectBodySize+4096), []byte("AK"+"IAIOSFODNN7EXAMPLE")...)
+	req, _ := http.NewRequest("POST", "https://allowed.example/big", bytes.NewReader(payload))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+	if got := rec.get(); !strings.Contains(got, "DLP") {
+		t.Fatalf("blocked = %q, want DLP", got)
+	}
+	mu.Lock()
+	n := gotLen
+	mu.Unlock()
+	if n == len(payload) {
+		t.Fatalf("上流が本文全体 (%d バイト) を受けた", n)
+	}
+}

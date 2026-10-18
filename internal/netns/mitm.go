@@ -93,6 +93,11 @@ func (p *webProxy) serveH2Stream(w http.ResponseWriter, r *http.Request, tr *htt
 	p.filter(r, name)
 	out, err := tr.RoundTrip(r)
 	if err != nil {
+		if pattern, preview, hit := bodyViolation(r); hit {
+			p.block(fmt.Sprintf("DLP %s %s (%s: %s)", r.Method, name, pattern, preview))
+			http.Error(w, fmt.Sprintf("quagent: DLP violation (%s)", pattern), http.StatusForbidden)
+			return
+		}
 		log.Printf("web: %s へ h2 で中継できない: %v", name, err)
 		http.Error(w, "quagent: upstream error", http.StatusBadGateway)
 		return
@@ -198,6 +203,11 @@ func (p *webProxy) serveHTTP1(client net.Conn, br *bufio.Reader, dst, name strin
 			return
 		}
 		if err := req.Write(up); err != nil {
+			// 転送中に DLP が本文の秘密を検知すると、ここで転送が失敗する。
+			if pattern, preview, hit := bodyViolation(req); hit {
+				p.block(fmt.Sprintf("DLP %s %s (%s: %s)", req.Method, host, pattern, preview))
+				_ = writeHTTP1Error(client, http.StatusForbidden, fmt.Sprintf("quagent: DLP violation (%s)", pattern))
+			}
 			return
 		}
 		// 1xx の中間応答 (100 Continue など) は読み飛ばして最終応答を待つ。

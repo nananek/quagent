@@ -58,7 +58,8 @@ var defaultPatterns = []Pattern{
 	},
 }
 
-// MaxInspectBodySize はリクエストボディを検査する上限サイズ (1 MiB)。
+// MaxInspectBodySize はリクエストボディを「今すぐ」検査する上限サイズ (1 MiB)。
+// これを超える本文は切り詰めずに通しつつ、転送しながら走査する (stream.go)。
 const MaxInspectBodySize = 1 << 20
 
 // DLPScanner は機密情報パターンの検査器。
@@ -121,26 +122,32 @@ func (s *DLPScanner) InspectRequest(req *http.Request) (detected bool, patternNa
 		}
 	}
 
-	// 4. リクエストボディの検査
+	// 4. リクエストボディの検査。上限 (MaxInspectBodySize) までは今すぐ検査し、
+	// 超えた分は転送しながら走査する (検知したら転送を中断する)。検査の都合で本文を
+	// 切り詰めると Content-Length と実体が食い違うため、本文は全量そのまま流す。
 	if req.Body != nil {
 		orig := req.Body
-		// 上限まで読む (+1 バイトで上限超過を検知する)。上限を超えた場合は、読んだ分と
-		// 続きを繋いで転送する。検査の都合で本文を切り詰めると、Content-Length と
-		// 実体が食い違い、上流が待ち続けてしまう。
 		bodyBytes, err := io.ReadAll(io.LimitReader(orig, MaxInspectBodySize+1))
 		if err != nil {
 			return false, "", "", err
 		}
 		if len(bodyBytes) > MaxInspectBodySize {
-			req.Body = &prefixReadCloser{
+			rest := &prefixReadCloser{
 				r: io.MultiReader(bytes.NewReader(bodyBytes), orig),
 				c: orig,
 			}
-		} else {
-			_ = orig.Close()
-			req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			// 先頭の上限までは今すぐ検査する (早期に遮断できる分は遮断する)。
+			if matched, name, preview := s.InspectText(string(bodyBytes)); matched {
+				req.Body = rest
+				return true, fmt.Sprintf("%s in request body", name), preview, nil
+			}
+			// 続き (というより全量) を転送しながら走査する。検知すれば Read が
+			// エラーを返し、転送が中断される。呼び出し側は BodyViolation で確かめる。
+			req.Body = guardBody(rest, s.patterns)
+			return false, "", "", nil
 		}
-
+		_ = orig.Close()
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		if matched, name, preview := s.InspectText(string(bodyBytes)); matched {
 			return true, fmt.Sprintf("%s in request body", name), preview, nil
 		}
