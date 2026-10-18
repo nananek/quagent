@@ -278,6 +278,18 @@ func TestAppJSInitializesAfterState(t *testing.T) {
 	}
 }
 
+// TestAppJSChunksTerminalInput は端末入力を WebSocket の読み込み上限以下に分割して
+// 送ることを確かめる (大きな貼り付けで接続が切れる回帰ガード)。
+func TestAppJSChunksTerminalInput(t *testing.T) {
+	appJS := readAsset(t, "assets/app.js")
+	if !strings.Contains(appJS, "term.onData(sendInput)") {
+		t.Error("app.js が端末入力を sendInput に渡していない")
+	}
+	if !strings.Contains(appJS, "INPUT_CHUNK") || !strings.Contains(appJS, "bytes.subarray") {
+		t.Error("app.js が端末入力を分割していない")
+	}
+}
+
 // TestAssetServing は同梱資産が正しいパスで配信されることを確認する
 // (FileServer のプレフィックス取り違えの回帰ガード)。
 func TestAssetServing(t *testing.T) {
