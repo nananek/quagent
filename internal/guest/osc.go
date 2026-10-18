@@ -33,11 +33,18 @@ type ClipboardEvent struct {
 // いればその端末、離れればハブのクライアント) ため、答える主体が揺れて配色が
 // 変わってしまう。ここで一元的に答えて、明暗を安定させる。応答は端末ではなく
 // inject (エージェントの入力) へ流す。
+//
+// colors が無い (run が端末の配色を判定できなかった) ときは themeFile を読む。
+// hub がブラウザの配色を書き込むので、素通しして tmux の答えに委ねるより安定する。
 type oscFilter struct {
 	out    io.Writer
 	onClip func(ClipboardEvent)
 	colors *TerminalColors
-	inject func([]byte)
+	// themeFile は hub がブラウザの配色を書き込むファイル。colors (run が検出した
+	// 配色) が無いときだけ読む。これで run 側の検出が失敗しても、答える主体が tmux
+	// クライアントの接続状況で揺れない (デタッチで黒く転ぶのを防ぐ)。
+	themeFile string
+	inject    func([]byte)
 
 	state    int
 	osc      []byte
@@ -105,6 +112,15 @@ func (f *oscFilter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// colorScheme は色問い合わせに答える配色を返す。run が検出した配色 (colors) を優先し、
+// 無ければテーマファイル (hub が書くブラウザの配色) を使う。どちらも無ければ nil。
+func (f *oscFilter) colorScheme() *TerminalColors {
+	if f.colors != nil {
+		return f.colors
+	}
+	return TerminalColorsForScheme(ThemeFileScheme(f.themeFile))
+}
+
 func (f *oscFilter) add(b byte) {
 	if len(f.osc) >= maxOSC {
 		f.overflow = true
@@ -121,8 +137,8 @@ func (f *oscFilter) finish(pass []byte, term []byte) []byte {
 		f.clipboard(body)
 		return pass
 	}
-	if f.colors != nil {
-		if reply, ok := f.colors.replyColorQuery(body); ok {
+	if colors := f.colorScheme(); colors != nil {
+		if reply, ok := colors.replyColorQuery(body); ok {
 			if f.inject != nil {
 				f.inject(reply)
 			}

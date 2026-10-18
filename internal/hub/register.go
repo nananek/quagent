@@ -27,6 +27,9 @@ type registerMsg struct {
 	Agent   string `json:"agent"`
 	Session string `json:"session"` // tmux セッション名
 	Console string `json:"console"` // console.sock のパス
+	// ThemeFile は hub がブラウザの配色を書き込むファイル。run が端末の配色を
+	// 判定できなかったとき、__attach が色問い合わせに答えるのに使う。
+	ThemeFile string `json:"theme_file"`
 }
 
 type registerReply struct {
@@ -37,12 +40,13 @@ type registerReply struct {
 
 // Request は run が hub へ登録する内容。
 type Request struct {
-	ID      string
-	Name    string
-	Repo    string
-	Agent   string
-	Session string
-	Console string
+	ID        string
+	Name      string
+	Repo      string
+	Agent     string
+	Session   string
+	Console   string
+	ThemeFile string
 }
 
 // Registration は run から hub への登録。Close するまで (接続を保持する間) 有効。
@@ -103,6 +107,7 @@ func Register(sock string, req Request, timeout time.Duration) (*Registration, e
 	msg := registerMsg{
 		Type: "register", ID: req.ID, Name: req.Name, Repo: req.Repo,
 		Agent: req.Agent, Session: req.Session, Console: req.Console,
+		ThemeFile: req.ThemeFile,
 	}
 	if err := enc.Encode(msg); err != nil {
 		c.Close()
@@ -182,6 +187,10 @@ func (s *Server) handleRegister(c net.Conn) {
 		reject("console.sock のパスが不正")
 		return
 	}
+	if !validThemeFile(m.ThemeFile) {
+		reject("テーマファイルのパスが不正")
+		return
+	}
 	if !validSessionName(m.Session) {
 		reject("tmux セッション名が不正")
 		return
@@ -192,6 +201,7 @@ func (s *Server) handleRegister(c net.Conn) {
 		reject(err.Error())
 		return
 	}
+	sess.ThemeFile = m.ThemeFile
 	if err := s.reg.add(sess); err != nil {
 		reject(err.Error())
 		return
@@ -236,12 +246,27 @@ func (s *Server) reissue(sess *Session) (string, error) {
 
 // validConsolePath は console.sock のパスが run の作業ディレクトリ配下の
 // console.sock であることを確かめる。
-func validConsolePath(p string) bool {
+func validConsolePath(p string) bool { return validRunsFile(p, "console.sock") }
+
+// validThemeFile はテーマファイルのパスが run の作業ディレクトリ配下の theme で
+// あることを確かめる。hub はここへブラウザの配色を書き込むので、run が使う値に
+// 限定する (常駐 daemon に任意のファイルを書かせない)。空は未指定として許す
+// (run 側が配色を判定できていれば不要)。
+func validThemeFile(p string) bool {
+	if p == "" {
+		return true
+	}
+	return validRunsFile(p, "theme")
+}
+
+// validRunsFile はパスが run の作業ディレクトリ (RunsDir 直下) の base という
+// 名前のファイルであることを確かめる。
+func validRunsFile(p, base string) bool {
 	if p == "" {
 		return false
 	}
 	clean := filepath.Clean(p)
-	if filepath.Base(clean) != "console.sock" {
+	if filepath.Base(clean) != base {
 		return false
 	}
 	root := filepath.Clean(paths.RunsDir())

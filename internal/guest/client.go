@@ -120,8 +120,9 @@ func doExec(c net.Conn, h Header, stdin io.Reader, stdout, stderr io.Writer, fw 
 // Interactive は端末を raw にして VM の端末つきコマンドにつなぐ (tmux のペイン用)。
 // onClip が nil でなければ、VM の出力から OSC 52 (クリップボード操作) を抜き取って渡す
 // (tmux や端末には届かない)。colors が nil でなければ、端末の色問い合わせ (OSC 10/11/12)
-// にもここで答え、応答をコマンドの入力へ流す (oscFilter を参照)。
-func Interactive(cid uint32, argv []string, dir string, colors *TerminalColors, onClip func(ClipboardEvent)) error {
+// にもここで答え、応答をコマンドの入力へ流す (oscFilter を参照)。colors が nil のときは
+// themeFile (hub がブラウザの配色を書くファイル) を読んで答え、それも無ければ素通しする。
+func Interactive(cid uint32, argv []string, dir string, colors *TerminalColors, themeFile string, onClip func(ClipboardEvent)) error {
 	c, err := Dial(cid)
 	if err != nil {
 		return err
@@ -158,6 +159,7 @@ func Interactive(cid uint32, argv []string, dir string, colors *TerminalColors, 
 	// onClip が無くても OSC 52 は抜き取って捨てる (host の端末に届かせない)
 	filter := newOSCFilter(os.Stdout, onClip)
 	filter.colors = colors
+	filter.themeFile = themeFile
 	filter.inject = inject
 	err = doExec(c, h, stdin, filter, nil, fw)
 	var ee *ExitError

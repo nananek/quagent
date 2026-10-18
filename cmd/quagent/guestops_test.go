@@ -10,13 +10,14 @@ import (
 
 func TestParseGuestArgs(t *testing.T) {
 	tests := []struct {
-		name        string
-		args        []string
-		wantCID     uint32
-		wantConsole string
-		wantTheme   string
-		wantArgv    []string
-		wantErr     bool
+		name          string
+		args          []string
+		wantCID       uint32
+		wantConsole   string
+		wantTheme     string
+		wantThemeFile string
+		wantArgv      []string
+		wantErr       bool
 	}{
 		{
 			name:        "simple",
@@ -44,8 +45,21 @@ func TestParseGuestArgs(t *testing.T) {
 			wantErr:     false,
 		},
 		{
+			name:          "with theme file",
+			args:          []string{"7", "--theme-file", "/runs/r1/theme", "--", "bash", "-lc", "x"},
+			wantCID:       7,
+			wantThemeFile: "/runs/r1/theme",
+			wantArgv:      []string{"bash", "-lc", "x"},
+			wantErr:       false,
+		},
+		{
 			name:    "theme without value",
 			args:    []string{"7", "--theme"},
+			wantErr: true,
+		},
+		{
+			name:    "theme file without value",
+			args:    []string{"7", "--theme-file"},
 			wantErr: true,
 		},
 		{
@@ -77,7 +91,7 @@ func TestParseGuestArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cid, con, theme, argv, err := parseGuestArgs(tt.args)
+			cid, con, theme, themeFile, argv, err := parseGuestArgs(tt.args)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("parseGuestArgs() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -90,6 +104,9 @@ func TestParseGuestArgs(t *testing.T) {
 				}
 				if theme != tt.wantTheme {
 					t.Errorf("theme = %q, want %q", theme, tt.wantTheme)
+				}
+				if themeFile != tt.wantThemeFile {
+					t.Errorf("themeFile = %q, want %q", themeFile, tt.wantThemeFile)
 				}
 				if !reflect.DeepEqual(argv, tt.wantArgv) {
 					t.Errorf("argv = %v, want %v", argv, tt.wantArgv)
@@ -105,7 +122,7 @@ func TestVMGuestInteractiveArgv(t *testing.T) {
 		self:        "/usr/local/bin/quagent",
 		consoleSock: "/run/user/1000/console.sock",
 	}
-	got := g.interactiveArgv("echo test", "")
+	got := g.interactiveArgv("echo test", "", "")
 	want := []string{
 		"/usr/local/bin/quagent",
 		attachCommand,
@@ -121,8 +138,8 @@ func TestVMGuestInteractiveArgv(t *testing.T) {
 		t.Errorf("interactiveArgv = %v, want %v", got, want)
 	}
 
-	// 配色が決まっていれば --theme を付ける。
-	got = g.interactiveArgv("echo test", "light")
+	// 配色が決まっていれば --theme、テーマファイルがあれば --theme-file を付ける。
+	got = g.interactiveArgv("echo test", "light", "/runs/r1/theme")
 	want = []string{
 		"/usr/local/bin/quagent",
 		attachCommand,
@@ -131,6 +148,8 @@ func TestVMGuestInteractiveArgv(t *testing.T) {
 		"/run/user/1000/console.sock",
 		"--theme",
 		"light",
+		"--theme-file",
+		"/runs/r1/theme",
 		"--",
 		"bash",
 		"-lc",
