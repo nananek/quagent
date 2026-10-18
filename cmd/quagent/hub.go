@@ -56,6 +56,7 @@ func cmdHub(args []string) error {
 		Notifier:           notifier,
 		NotifySessionStart: pol.Notify.NotifyOnSessionStart(),
 		NotifyApproval:     pol.Notify.NotifyOnApproval(),
+		NotifyReissue:      pol.Notify.NotifyOnReissue(),
 		Logger:             func(s string) { logf("%s", s) },
 	})
 

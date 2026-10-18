@@ -30,6 +30,16 @@ func TestIsPaste(t *testing.T) {
 	}
 }
 
+// TestWindowSizeCommand は共有ウィンドウを小さい方に合わせる設定を確かめる。
+// largest だと実端末が web UI の大きさで描画されて見切れる。
+func TestWindowSizeCommand(t *testing.T) {
+	got := windowSizeCommand("quagent-x")
+	want := "set-option -t 'quagent-x' window-size smallest"
+	if got != want {
+		t.Errorf("windowSizeCommand = %q, want %q", got, want)
+	}
+}
+
 func TestDecodeControl(t *testing.T) {
 	cases := map[string]string{
 		"plain": "plain",
@@ -93,6 +103,14 @@ func TestControlClient(t *testing.T) {
 	defer cc.Close()
 	if cc.Pane() == "" {
 		t.Fatal("ペインが取れていない")
+	}
+
+	// 実端末と web UI が同時に見るときは小さい方に合わせる (window-size smallest)。
+	// largest だと実端末が web UI の大きさで描画されて見切れる。
+	if out, err := exec.Command(tmuxBinary, "show-options", "-t", session, "window-size").CombinedOutput(); err != nil {
+		t.Fatalf("show-options: %v: %s", err, out)
+	} else if got := strings.TrimSpace(string(out)); got != "window-size smallest" {
+		t.Errorf("window-size = %q, want %q", got, "window-size smallest")
 	}
 
 	// 初期画面には先に出た出力が残っている。

@@ -228,6 +228,8 @@ type HubNotify struct {
 	OnSessionStart *bool `json:"on_session_start,omitempty"`
 	// OnApproval は承認ダイアログの発生を通知する (既定: true)。
 	OnApproval *bool `json:"on_approval,omitempty"`
+	// OnReissue はアクセス URL の再発行を通知する (既定: true)。
+	OnReissue *bool `json:"on_reissue,omitempty"`
 }
 
 // Webhook は Discord Webhook の URL を取り出す。未設定なら空文字列を返す。
@@ -244,6 +246,9 @@ func (n HubNotify) NotifyOnSessionStart() bool { return boolDefault(n.OnSessionS
 
 // NotifyOnApproval は承認通知が有効かを返す (既定: true)。
 func (n HubNotify) NotifyOnApproval() bool { return boolDefault(n.OnApproval, true) }
+
+// NotifyOnReissue はアクセス URL 再発行の通知が有効かを返す (既定: true)。
+func (n HubNotify) NotifyOnReissue() bool { return boolDefault(n.OnReissue, true) }
 
 func boolDefault(p *bool, def bool) bool {
 	if p == nil {

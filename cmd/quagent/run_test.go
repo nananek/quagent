@@ -539,4 +539,9 @@ func TestRunTmuxDetachPromptsAndReturns(t *testing.T) {
 	if !strings.Contains(string(b), "attach-session -t sess-test") {
 		t.Errorf("attach-session が呼ばれていない:\n%s", b)
 	}
+	// 複数クライアントで見るときは小さい方に合わせる (largest だと実端末が web UI の
+	// 大きさで描画されて見切れる)。
+	if !strings.Contains(string(b), "set-option -t sess-test window-size smallest") {
+		t.Errorf("window-size smallest が設定されていない:\n%s", b)
+	}
 }

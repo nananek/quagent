@@ -35,6 +35,7 @@ type Config struct {
 	Notifier           *notify.Notifier
 	NotifySessionStart bool
 	NotifyApproval     bool
+	NotifyReissue      bool
 	Logger             func(string)
 }
 
@@ -262,6 +263,21 @@ func (s *Server) notifySessionStart(sess *Session, url string) {
 	body := fmt.Sprintf("エージェント: %s\nリポジトリ: %s", sess.Agent, sess.Repo)
 	s.cfg.Notifier.Send(notify.Message{
 		Title: "quagent: セッションを開始 (" + sess.Name + ")",
+		Body:  body,
+		URL:   url,
+	})
+}
+
+// notifyReissue はアクセス URL の再発行を通知する。再発行は承認コンソール TUI の
+// r キーで行うため、その場に居ない利用者にも新しい URL が届くよう Discord へ送る。
+// 既存の端末はそのままで、新しい端末を追加するための URL であることを本文に書く。
+func (s *Server) notifyReissue(sess *Session, url string) {
+	if !s.cfg.Notifier.Enabled() || !s.cfg.NotifyReissue {
+		return
+	}
+	body := fmt.Sprintf("エージェント: %s\nリポジトリ: %s\n新しい URL を発行しました (以前の URL は無効)", sess.Agent, sess.Repo)
+	s.cfg.Notifier.Send(notify.Message{
+		Title: "quagent: アクセス URL を再発行 (" + sess.Name + ")",
 		Body:  body,
 		URL:   url,
 	})

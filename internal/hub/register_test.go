@@ -1,12 +1,16 @@
 package hub
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/nananek/quagent/internal/notify"
 	"github.com/nananek/quagent/internal/paths"
 )
 
@@ -179,6 +183,77 @@ func TestRegisterReissue(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("切断後も登録が残っている")
+}
+
+// TestRegisterReissueNotifies は承認コンソール TUI からの URL 再発行が Discord
+// Webhook にも通知されることを確かめる。通知には新しいワンタイム URL が載る。
+func TestRegisterReissueNotifies(t *testing.T) {
+	console := testConsolePath(t, "r1")
+	sock := filepath.Join(t.TempDir(), "hub.sock")
+
+	posts := make(chan notify.Message, 4)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p struct {
+			Embeds []struct {
+				Title       string `json:"title"`
+				Description string `json:"description"`
+				URL         string `json:"url"`
+			} `json:"embeds"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&p); err == nil && len(p.Embeds) > 0 {
+			e := p.Embeds[0]
+			posts <- notify.Message{Title: e.Title, Body: e.Description, URL: e.URL}
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer ts.Close()
+
+	notifier := notify.New(ts.URL)
+	if notifier == nil {
+		t.Fatal("Notifier を作れない")
+	}
+	defer notifier.Close()
+
+	// セッション開始の通知は切って、再発行の通知だけを検証する。
+	s := New(Config{
+		Addr: "127.0.0.1:0", BaseURL: "http://127.0.0.1:9999",
+		Notifier: notifier, NotifyReissue: true, Logger: func(string) {},
+	})
+	ln, err := s.listenRegister(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	reg, err := Register(sock, Request{
+		ID: "r1", Name: "repo", Repo: "/repo", Agent: "opencode",
+		Session: "quagent-r1", Console: console,
+	}, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	defer reg.Close()
+
+	newURL, err := reg.Reissue()
+	if err != nil {
+		t.Fatalf("Reissue: %v", err)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case m := <-posts:
+			if m.URL != newURL {
+				t.Errorf("通知の URL = %q, want %q", m.URL, newURL)
+			}
+			if !strings.Contains(m.Title, "再発行") {
+				t.Errorf("通知の見出しに再発行が無い: %q", m.Title)
+			}
+			return
+		case <-deadline:
+			t.Fatal("再発行の通知が届かない")
+		}
+	}
 }
 
 func TestRegisterRejectsInvalid(t *testing.T) {

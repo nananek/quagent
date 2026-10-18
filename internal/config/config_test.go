@@ -533,12 +533,12 @@ func TestHubPolicy(t *testing.T) {
 	}
 
 	// 通知の既定は有効。明示的な無効化が効く。
-	if !p.Notify.NotifyOnSessionStart() || !p.Notify.NotifyOnApproval() {
+	if !p.Notify.NotifyOnSessionStart() || !p.Notify.NotifyOnApproval() || !p.Notify.NotifyOnReissue() {
 		t.Error("通知の既定は有効のはず")
 	}
 	off := false
-	n := HubNotify{OnSessionStart: &off, OnApproval: &off}
-	if n.NotifyOnSessionStart() || n.NotifyOnApproval() {
+	n := HubNotify{OnSessionStart: &off, OnApproval: &off, OnReissue: &off}
+	if n.NotifyOnSessionStart() || n.NotifyOnApproval() || n.NotifyOnReissue() {
 		t.Error("明示的な無効化が効いていない")
 	}
 }
