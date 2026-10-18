@@ -33,7 +33,9 @@ func (s *streamScanner) scan(p []byte) bool {
 	if s.found {
 		return true
 	}
-	buf := make([]byte, 0, len(s.tail)+len(p))
+	// 容量を len+len で見積もると、値が大きいときにオーバーフローしうる。
+	// 伸長は append に任せ、make には単一の長さだけ渡す。
+	buf := make([]byte, 0, len(s.tail))
 	buf = append(buf, s.tail...)
 	buf = append(buf, p...)
 	for _, pat := range s.patterns {
