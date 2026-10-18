@@ -86,7 +86,13 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 			switch m.Type {
 			case "input":
 				b, err := base64.StdEncoding.DecodeString(m.Data)
-				if err == nil {
+				if err != nil {
+					continue
+				}
+				// キーストロークは send-keys、貼り付けはバッファ経由で送る。
+				if isPaste(b) {
+					_ = cc.Paste(b)
+				} else {
 					_ = cc.Send(b)
 				}
 			case "resize":

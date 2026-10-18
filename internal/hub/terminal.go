@@ -200,7 +200,21 @@ func (c *controlClient) fire(cmd string) error {
 // maxKeysPerSend は 1 回の send-keys で送るバイト数の上限。
 const maxKeysPerSend = 512
 
-// Send はブラウザからの入力を生バイトのままペインへ送る。
+// pasteThreshold は send-keys ではなく tmux のバッファ経由 (Paste) に切り替える
+// 入力の大きさ。キーストローク (数バイト) は send-keys のままにする。
+const pasteThreshold = 256
+
+// bracketedPasteStart は xterm.js が貼り付けに付けるブラケットペーストの開始
+// マーカー (ESC [ 2 0 0 ~)。
+const bracketedPasteStart = "\x1b[200~"
+
+// isPaste はブラウザからの入力を貼り付けとみなすかを返す。xterm.js は貼り付けを
+// 1 回の onData で送るので、大きさかブラケットペーストのマーカーで判別できる。
+func isPaste(data []byte) bool {
+	return len(data) >= pasteThreshold || bytes.Contains(data, []byte(bracketedPasteStart))
+}
+
+// Send はブラウザからの入力を生バイトのままペインへ送る。キーストローク向け。
 func (c *controlClient) Send(data []byte) error {
 	for off := 0; off < len(data); off += maxKeysPerSend {
 		chunk := data[off:min(off+maxKeysPerSend, len(data))]
@@ -211,6 +225,55 @@ func (c *controlClient) Send(data []byte) error {
 		if err := c.fire(fmt.Sprintf("send-keys -t %s -H %s", c.pane, strings.Join(hexes, " "))); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// Paste はまとまった入力を tmux のバッファ経由でペインへ一括して送る。
+//
+// send-keys は 512 バイトごとに 1 コマンドを流し、その各バイトをキー入力として
+// 1 つずつ注入するため、長い貼り付けほど遅くなる (実測で paste-buffer の 2〜5 倍)。
+// paste-buffer はバッファの中身をまとめてペインへ書くため、貼り付けをそのまま速く
+// 流せる。ブラウザが付けたブラケットペーストのマーカーはそのまま通し、tmux 側では
+// 付け直さない (-p なし)。
+func (c *controlClient) Paste(data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	// tmux はファイルからしかバッファへ読み込めない (control mode の stdin は
+	// コマンド列に使う)。0600 の一時ファイルに書いて load-buffer に読ませる。
+	f, err := os.CreateTemp("", "quagent-paste-*")
+	if err != nil {
+		return err
+	}
+	path := f.Name()
+	defer os.Remove(path)
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	name := "quagent-paste-" + randomHex(8)
+	// load-buffer / paste-buffer は成功時に何も出力しない。返答が空でなければ
+	// tmux のエラーなので、その内容をエラーとして返す。
+	if out, err := c.run(fmt.Sprintf("load-buffer -b %s %s", quote(name), quote(path))); err != nil {
+		return err
+	} else if len(out) > 0 {
+		return fmt.Errorf("load-buffer に失敗した: %s", strings.Join(out, "; "))
+	}
+	// -r で改行をそのまま渡し、-d で使い終わったバッファを消す。
+	out, err := c.run(fmt.Sprintf("paste-buffer -d -r -b %s -t %s", quote(name), quote(c.pane)))
+	if err != nil || len(out) > 0 {
+		// 失敗するとバッファが残るので消しておく。
+		_, _ = c.run(fmt.Sprintf("delete-buffer -b %s", quote(name)))
+	}
+	if err != nil {
+		return err
+	}
+	if len(out) > 0 {
+		return fmt.Errorf("paste-buffer に失敗した: %s", strings.Join(out, "; "))
 	}
 	return nil
 }

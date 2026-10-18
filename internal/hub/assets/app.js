@@ -117,11 +117,20 @@
     initTerminal();
   }
 
-  function b64encode(str) {
+  // ブラウザからの入力を端末へ送る。1 メッセージが WebSocket の読み込み上限
+  // (1 MiB) を超えないよう、base64 化する前のバイト列を分割する。分割しても
+  // ペイン側では連続したバイト列として届く (貼り付けのマーカーもそのまま通る)。
+  const INPUT_CHUNK = 128 * 1024;
+
+  function sendInput(str) {
+    if (!termWS || termWS.readyState !== WebSocket.OPEN) return;
     const bytes = enc.encode(str);
-    let bin = "";
-    for (const b of bytes) bin += String.fromCharCode(b);
-    return btoa(bin);
+    for (let off = 0; off < bytes.length; off += INPUT_CHUNK) {
+      const chunk = bytes.subarray(off, off + INPUT_CHUNK);
+      let bin = "";
+      for (const b of chunk) bin += String.fromCharCode(b);
+      termWS.send(JSON.stringify({ type: "input", data: btoa(bin) }));
+    }
   }
 
   function initTerminal() {
@@ -162,11 +171,7 @@
       ws.onerror = () => ws.close();
     }
 
-    term.onData((d) => {
-      if (termWS && termWS.readyState === WebSocket.OPEN) {
-        termWS.send(JSON.stringify({ type: "input", data: b64encode(d) }));
-      }
-    });
+    term.onData(sendInput);
 
     window.addEventListener("resize", termFit);
     window.addEventListener("orientationchange", () => setTimeout(termFit, 200));
