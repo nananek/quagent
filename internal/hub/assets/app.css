@@ -114,6 +114,10 @@ header h1 {
 main { flex: 1; min-height: 0; display: flex; flex-direction: row; }
 #terminal-wrap { flex: 1 1 auto; min-width: 0; min-height: 0; padding: .25rem; background: var(--bg); }
 #terminal { width: 100%; height: 100%; }
+/* xterm.js が作る .xterm は行数ぶんの高さしか持たないため、そのままだと
+   端末の背景とスクロールバーが viewport の途中で切れる (下に隙間が残る)。
+   親 (#terminal) いっぱいに広げ、viewport 全体を使う。 */
+#terminal .xterm { height: 100%; }
 /* xterm.js 同梱の CSS は IME 変換中の表示を黒地に固定している。配色に合わせる。 */
 .xterm .composition-view { background: var(--bg); color: var(--fg); }
 #approvals {

@@ -1364,9 +1364,10 @@ func runTmux(session string, agent, consoleArgv []string, quit <-chan struct{}) 
 	if err := tmux("set-option", "-t", session, "mouse", "on"); err != nil {
 		logf("%v", err)
 	}
-	// 複数のクライアント (ブラウザの hub など) が同時に見ても、小さい方に合わせて
-	// 共有ウィンドウが縮まないようにする。
-	if err := tmux("set-option", "-t", session, "window-size", "largest"); err != nil {
+	// 複数のクライアント (ブラウザの hub など) が同時に見るときは、小さい方の
+	// 大きさに合わせて共有ウィンドウを決める。大きい方に合わせると、小さい方の
+	// 端末が大きい方の描画に引きずられて見切れる。
+	if err := tmux("set-option", "-t", session, "window-size", "smallest"); err != nil {
 		logf("%v", err)
 	}
 	if err := tmux(append([]string{"split-window", "-v", "-l", "30%", "-t", session + ":"}, consoleArgv...)...); err != nil {

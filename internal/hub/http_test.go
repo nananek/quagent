@@ -234,6 +234,16 @@ func TestThemeAssets(t *testing.T) {
 	}
 }
 
+// TestTerminalFillsViewport は端末 (xterm.js) が親要素いっぱいに広がる CSS が
+// あることを確認する。xterm.js の .xterm は行数ぶんの高さしか持たず、そのままだと
+// 端末の背景とスクロールバーが viewport の途中で切れて下に隙間が残る。
+func TestTerminalFillsViewport(t *testing.T) {
+	css := strings.Join(strings.Fields(readAsset(t, "assets/app.css")), " ")
+	if !strings.Contains(css, "#terminal .xterm { height: 100%; }") {
+		t.Error("app.css に端末 (.xterm) を親いっぱいに広げる指定が無い")
+	}
+}
+
 func readAsset(t *testing.T, name string) string {
 	t.Helper()
 	b, err := assetsFS.ReadFile(name)

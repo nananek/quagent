@@ -81,10 +81,16 @@ func startControl(session string, sink func([]byte)) (*controlClient, error) {
 		c.Close()
 		return nil, err
 	}
-	// control client が最後にサイズを変えたクライアントになっても、共有ウィンドウを
-	// 縮めないようにする (スマホ接続でデスクトップの表示が縮むのを防ぐ)。
-	_ = c.fire(fmt.Sprintf("set-option -t %s window-size largest", quote(c.session)))
+	// 共有ウィンドウの大きさを「複数のクライアントのうち小さい方」に合わせる。
+	_ = c.fire(windowSizeCommand(c.session))
 	return c, nil
+}
+
+// windowSizeCommand は共有ウィンドウの大きさを「複数のクライアントのうち小さい方」
+// に合わせる設定を組み立てる。tmux の既定は latest で、最後にサイズを変えたクライアント
+// (web UI) が共有ウィンドウを決めてしまい、実端末の表示がその大きさで描画されて見切れる。
+func windowSizeCommand(session string) string {
+	return fmt.Sprintf("set-option -t %s window-size smallest", quote(session))
 }
 
 // resolvePane はペイン index 0 (エージェント) の pane id を調べる。

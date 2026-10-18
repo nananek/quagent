@@ -241,6 +241,7 @@ func (s *Server) reissue(sess *Session) (string, error) {
 		return "", err
 	}
 	s.logf("セッションのアクセス URL を再発行: %s", sess.Name)
+	s.notifyReissue(sess, url)
 	return url, nil
 }
 
