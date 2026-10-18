@@ -47,6 +47,9 @@ func parsePyPIPath(p string) (action, relPath, pkgName, filename string, ok bool
 	if p == "" {
 		return "", "", "", "", false
 	}
+	if !safePkgRelPath(p) {
+		return "", "", "", "", false
+	}
 
 	if strings.HasPrefix(p, "simple/") {
 		rel := strings.TrimPrefix(p, "simple/")

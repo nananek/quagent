@@ -18,6 +18,9 @@ func parseCargoPath(p string) (action, relPath, crate, version string, ok bool) 
 	if p == "" {
 		return "", "", "", "", false
 	}
+	if !safePkgRelPath(p) {
+		return "", "", "", "", false
+	}
 
 	if strings.HasPrefix(p, "index/") {
 		rel := strings.TrimPrefix(p, "index/")
