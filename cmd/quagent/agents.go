@@ -16,6 +16,7 @@ import (
 	"github.com/nananek/quagent/internal/config"
 	"github.com/nananek/quagent/internal/hostsvc"
 	"github.com/nananek/quagent/internal/mcpsrv"
+	"github.com/nananek/quagent/internal/vm"
 )
 
 // agentSpec は VM 内で動かすエージェントの準備と起動のしかた。
@@ -118,14 +119,49 @@ func agentNames() []string {
 
 func guestMCPURL() string { return hostsvc.GuestOrigin() + mcpsrv.Path }
 
+// opencodePluginDir は opencode に読ませるプラグインの置き場 (VM 内の絶対パス)。
+const opencodePluginDir = "/home/" + vm.GuestUser + "/.config/opencode/plugins/quagent"
+
+// opencodeProxyPlugin はモデルごとの baseURL を quagent のプロキシへ差し替える。
+// OpenCode v2.1 のカタログはモデル側に https://opencode.ai/inference/... を設定し、
+// provider 側の settings.baseURL より優先する。設定ファイルだけではプロキシを
+// 通らないため、provider transform で全モデルの baseURL を書き換える。
+const opencodeProxyPlugin = `import { Plugin } from "@opencode/plugin"
+
+type Options = { baseURLs?: Record<string, string> }
+
+export default Plugin.define({
+  id: "quagent.proxy",
+  async setup(ctx) {
+    const baseURLs = (ctx.options as Options).baseURLs ?? {}
+    await ctx.provider.transform((editor) => {
+      for (const [id, baseURL] of Object.entries(baseURLs)) {
+        const provider = editor.get(id)
+        if (!provider) continue
+        editor.update(id, (p) => {
+          p.settings = { ...p.settings, baseURL }
+        })
+        for (const modelID of provider.models.keys()) {
+          editor.models.update(id, modelID, (model) => {
+            model.settings = { ...model.settings, baseURL }
+          })
+        }
+      }
+    })
+  },
+})
+`
+
 // buildOpencodeConfig は opencode.json の設定オブジェクトを組み立てる。
 // OpenCode v2 の providers (<id>.settings) と v1 の provider (<id>.options) の
 // 両方を出力し、新旧どちらのバージョンでもプロキシ経由で動くようにする。
 func buildOpencodeConfig(cfg *config.Config, providers []string, token string) map[string]any {
 	provV1 := map[string]any{}
 	provV2 := map[string]any{}
+	baseURLs := map[string]string{}
 	for _, id := range providers {
 		u := authproxy.GuestBaseURL(hostsvc.GuestOrigin(), id)
+		baseURLs[id] = u
 		provV1[id] = map[string]any{"options": map[string]any{
 			"baseURL": u,
 			"apiKey":  token,
@@ -138,8 +174,13 @@ func buildOpencodeConfig(cfg *config.Config, providers []string, token string) m
 	conf := map[string]any{
 		"$schema":    "https://opencode.ai/config.json",
 		"autoupdate": false,
+		"update":     "disable",
 		"provider":   provV1,
 		"providers":  provV2,
+		"plugins": []any{map[string]any{
+			"package": opencodePluginDir,
+			"options": map[string]any{"baseURLs": baseURLs},
+		}},
 		"mcp": map[string]any{
 			"quagent": map[string]any{"type": "remote", "url": guestMCPURL(), "enabled": true, "oauth": false,
 				"headers": map[string]string{"Authorization": "Bearer " + token}},
@@ -154,6 +195,9 @@ func buildOpencodeConfig(cfg *config.Config, providers []string, token string) m
 // setupOpencode は opencode が provider を認証プロキシ経由で使い、quagent の MCP を
 // 使うよう設定する。apiKey は窓口の合言葉 (本物の鍵はプロキシが host 側で付け替える)。
 func setupOpencode(g vmGuest, cfg *config.Config, providers []string, token string) error {
+	if err := g.writeFile("~/.config/opencode/plugins/quagent/index.ts", []byte(opencodeProxyPlugin)); err != nil {
+		return fmt.Errorf("opencode のプロキシプラグインを書けない: %w", err)
+	}
 	conf := buildOpencodeConfig(cfg, providers, token)
 	return writeJSON(g, "~/.config/opencode/opencode.json", conf)
 }

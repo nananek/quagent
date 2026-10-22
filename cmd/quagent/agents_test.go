@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/nananek/quagent/internal/config"
+	"github.com/nananek/quagent/internal/vm"
 )
 
 func TestClaudeTheme(t *testing.T) {
@@ -195,6 +196,46 @@ func TestBuildOpencodeConfig(t *testing.T) {
 		}
 		if options["apiKey"] != token {
 			t.Errorf("provider[%q].options.apiKey = %v, want %v", id, options["apiKey"], token)
+		}
+	}
+
+	// v2.1 はモデル側の baseURL が provider 側より優先されるので、プラグインで
+	// 全モデルの baseURL をプロキシへ差し替える。
+	plugins, ok := conf["plugins"].([]any)
+	if !ok || len(plugins) != 1 {
+		t.Fatalf("plugins = %v, want one entry", conf["plugins"])
+	}
+	plugin, ok := plugins[0].(map[string]any)
+	if !ok {
+		t.Fatalf("plugins[0] is not a map: %v", plugins[0])
+	}
+	if plugin["package"] != opencodePluginDir {
+		t.Errorf("plugins[0].package = %v, want %v", plugin["package"], opencodePluginDir)
+	}
+	options, ok := plugin["options"].(map[string]any)
+	if !ok {
+		t.Fatalf("plugins[0].options missing: %v", plugin)
+	}
+	gotURLs, ok := options["baseURLs"].(map[string]string)
+	if !ok {
+		t.Fatalf("plugins[0].options.baseURLs missing: %v", options)
+	}
+	for _, id := range []string{"opencode", "opencode-go"} {
+		wantURL := "http://quagent.host:7070/llm/" + id
+		if gotURLs[id] != wantURL {
+			t.Errorf("plugins[0].options.baseURLs[%q] = %v, want %v", id, gotURLs[id], wantURL)
+		}
+	}
+}
+
+func TestOpencodeProxyPlugin(t *testing.T) {
+	wantDir := "/home/" + vm.GuestUser + "/.config/opencode/plugins/quagent"
+	if opencodePluginDir != wantDir {
+		t.Errorf("opencodePluginDir = %q, want %q", opencodePluginDir, wantDir)
+	}
+	for _, want := range []string{"ctx.provider.transform", "editor.models.update", "baseURLs"} {
+		if !strings.Contains(opencodeProxyPlugin, want) {
+			t.Errorf("opencodeProxyPlugin does not contain %q", want)
 		}
 	}
 }
