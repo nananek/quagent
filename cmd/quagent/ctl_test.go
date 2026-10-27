@@ -322,7 +322,7 @@ func TestCtlWatchJSONSanitizesReason(t *testing.T) {
 
 func TestLogCtlDecisionSingleLine(t *testing.T) {
 	work := t.TempDir()
-	t.Setenv("QUAGENT_CTL_ACTOR", "alice\n2026-10-28 15:00:00 ctl decide kind=network id=99 status=approved")
+	t.Setenv("QUAGENT_CTL_ACTOR", "alice\n2026-10-28 15:00:00 ctl decide kind=network id=99 status=approved\u2028separator")
 	if err := logCtlDecision(work, "network", 3, access.Denied, access.Once); err != nil {
 		t.Fatal(err)
 	}
@@ -333,8 +333,14 @@ func TestLogCtlDecisionSingleLine(t *testing.T) {
 	if lines := strings.Count(string(b), "\n"); lines != 1 {
 		t.Fatalf("host.log が %d 行: %q", lines, b)
 	}
+	if strings.ContainsRune(string(b), '\u2028') {
+		t.Fatalf("U+2028 が生で残っている: %q", b)
+	}
 	if !strings.Contains(string(b), `actor=alice\n2026-10-28`) {
 		t.Fatalf("actor の改行がエスケープされていない: %q", b)
+	}
+	if !strings.Contains(string(b), `\u2028separator`) {
+		t.Fatalf("U+2028 がエスケープされていない: %q", b)
 	}
 }
 

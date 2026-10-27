@@ -646,6 +646,8 @@ func singleLine(s string) string {
 	s = console.Sanitize(s)
 	s = strings.ReplaceAll(s, "\r", `\r`)
 	s = strings.ReplaceAll(s, "\n", `\n`)
+	s = strings.ReplaceAll(s, "\u2028", `\u2028`)
+	s = strings.ReplaceAll(s, "\u2029", `\u2029`)
 	if r := []rune(s); len(r) > 200 {
 		s = string(r[:200]) + "…"
 	}
