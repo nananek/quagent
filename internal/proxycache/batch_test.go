@@ -104,6 +104,51 @@ func TestBatchManagerPreResolvedItems(t *testing.T) {
 	}
 }
 
+// TestBatchManagerMetadataConsent は、同じエコシステムのメタデータ参照許可が
+// 並行要求でも 1 回の承認にまとまり、run 中は再確認しないことを確かめる。
+func TestBatchManagerMetadataConsent(t *testing.T) {
+	var calls int32
+	askBatch := func(info console.BatchDownloadInfo) (access.Kind, error) {
+		if !info.Metadata {
+			t.Errorf("メタデータ以外の承認が来た: %+v", info)
+		}
+		atomic.AddInt32(&calls, 1)
+		return access.Once, nil
+	}
+	bm := NewBatchManager(askBatch)
+
+	var wg sync.WaitGroup
+	for range 5 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := bm.AllowMetadata("npm"); err != nil {
+				t.Errorf("AllowMetadata: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if c := atomic.LoadInt32(&calls); c != 1 {
+		t.Fatalf("並行要求が 1 回の承認にまとまっていない: %d", c)
+	}
+
+	// 2 回目以降は確認しない。
+	if err := bm.AllowMetadata("npm"); err != nil {
+		t.Fatal(err)
+	}
+	if c := atomic.LoadInt32(&calls); c != 1 {
+		t.Fatalf("許可済みのメタデータ参照で再確認した: %d", c)
+	}
+
+	// 別エコシステムは別に確認する。
+	if err := bm.AllowMetadata("pypi"); err != nil {
+		t.Fatal(err)
+	}
+	if c := atomic.LoadInt32(&calls); c != 2 {
+		t.Fatalf("別エコシステムの確認回数が違う: %d", c)
+	}
+}
+
 // TestBatchManagerSessionScope は、Session 承認したエコシステムだけが以後
 // 確認なしで通り、他のエコシステムは従来どおり確認されることを確かめる。
 func TestBatchManagerSessionScope(t *testing.T) {

@@ -551,12 +551,17 @@ func ctlDecide(args []string) error {
 	}
 	pending := collectPending(conn, 200*time.Millisecond)
 	key := pendingKey(kind.request, id)
-	if !pending[key] {
+	req, ok := pending[key]
+	if !ok {
 		_ = conn.Close()
 		return ctlExitf(3, "申請 %d (%s) は保留中に無い (決着済み・期限切れの可能性)", id, kind.name)
 	}
 
 	msg := console.Msg{Type: kind.decideType, ID: id, Status: status}
+	if kind.name == "batch" {
+		// 一覧が合流で更新されている場合、古い版の判断はサーバーに拒否される。
+		msg.BatchRevision = req.BatchRevision
+	}
 	if status == access.Question {
 		// 下流 (Hermes / Discord など) の入力をそのままエージェントの端末へ
 		// 流さない。制御文字と Bidi をエスケープする。
@@ -589,8 +594,9 @@ func pendingKey(requestType string, id int) string {
 
 // collectPending は名乗り直後に送られてくる保留一覧を d のあいだ集める。
 // 同じ ID でも種類ごとに別のカウンタなので、種類を含めた key で持つ。
-func collectPending(conn *console.Conn, d time.Duration) map[string]bool {
-	pending := map[string]bool{}
+// バッチは最新の版を判断に載せるため、メッセージ全体を覚えておく。
+func collectPending(conn *console.Conn, d time.Duration) map[string]console.Msg {
+	pending := map[string]console.Msg{}
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	events := conn.Events()
@@ -604,15 +610,15 @@ func collectPending(conn *console.Conn, d time.Duration) map[string]bool {
 			}
 			switch m.Type {
 			case "request":
-				pending[pendingKey("request", m.ID)] = true
+				pending[pendingKey("request", m.ID)] = m
 			case "relaxrequest":
-				pending[pendingKey("relaxrequest", m.ID)] = true
+				pending[pendingKey("relaxrequest", m.ID)] = m
 			case "prrequest":
-				pending[pendingKey("prrequest", m.ID)] = true
+				pending[pendingKey("prrequest", m.ID)] = m
 			case "dockerrequest":
-				pending[pendingKey("dockerrequest", m.ID)] = true
+				pending[pendingKey("dockerrequest", m.ID)] = m
 			case "batchrequest":
-				pending[pendingKey("batchrequest", m.ID)] = true
+				pending[pendingKey("batchrequest", m.ID)] = m
 			case "settled":
 				delete(pending, pendingKey("request", m.ID))
 			case "relaxsettled":

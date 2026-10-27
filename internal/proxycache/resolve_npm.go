@@ -22,6 +22,8 @@ type npmPackument struct {
 type NPMResolver struct {
 	Client  *http.Client
 	BaseURL string // テスト用 (既定: "https://registry.npmjs.org")
+	// Logf は上流へ問い合わせるパッケージ名を記録する (nil なら記録しない)。
+	Logf func(string)
 
 	cacheMu sync.RWMutex
 	cache   map[string][]string // pkgName -> direct dependencies
@@ -101,6 +103,10 @@ func (r *NPMResolver) fetchDirectDeps(ctx context.Context, pkg, version string) 
 	r.cacheMu.RUnlock()
 	if ok {
 		return cached, nil
+	}
+
+	if r.Logf != nil {
+		r.Logf(norm)
 	}
 
 	url := fmt.Sprintf("%s/%s", r.BaseURL, norm)

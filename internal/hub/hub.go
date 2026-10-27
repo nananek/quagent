@@ -332,6 +332,9 @@ func approvalSummary(m console.Msg) (title, body string, ok bool) {
 	case "dockerrequest":
 		return "Docker イメージの取得", m.DockerRegistry + "/" + m.DockerRepository + ":" + m.DockerReference, true
 	case "batchrequest":
+		if m.BatchMetadata {
+			return "メタデータ参照の承認", m.BatchEcosystem + ": 依存解決のための参照", true
+		}
 		return "パッケージ取得の承認", m.BatchEcosystem + ": " + strconv.Itoa(len(m.BatchItems)) + " 件", true
 	case "clip":
 		return "クリップボードへの書き込み", m.Text, true

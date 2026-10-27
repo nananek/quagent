@@ -86,6 +86,15 @@ func (s *Server) handlePyPI(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePyPISimple(w http.ResponseWriter, r *http.Request, pkg string) {
 	cacheKey := "simple/" + pkg + "/index.html"
 
+	// 上流へ出る前に、この run 中のメタデータ参照を 1 回だけ確認する。
+	if s.batch != nil {
+		if err := s.batch.AllowMetadata("pypi"); err != nil {
+			http.Error(w, fmt.Sprintf("Forbidden: %v", err), http.StatusForbidden)
+			return
+		}
+		s.batch.LogMetadata("pypi", pkg)
+	}
+
 	upstreamURL := "https://pypi.org/simple/" + pkg + "/"
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstreamURL, nil)
 	if err != nil {
@@ -158,8 +167,18 @@ func (s *Server) handlePyPIPackages(w http.ResponseWriter, r *http.Request, relP
 	}
 
 	// PEP 658 の .metadata (METADATA ファイル) は依存関係解決用のテキストメタデータであり、
-	// 実行可能コードを含まないため Simple API と同様に承認不要で中継・キャッシュする。
+	// 実行可能コードを含まないためパッケージ本体の承認は不要。ただし上流へは出るので、
+	// メタデータ参照の許可だけは求める。
 	isMetadata := strings.HasSuffix(filename, ".metadata")
+
+	// PEP 658 の .metadata も上流へは出るので、参照許可だけは求める。
+	if isMetadata && s.batch != nil {
+		if err := s.batch.AllowMetadata("pypi"); err != nil {
+			http.Error(w, fmt.Sprintf("Forbidden: %v", err), http.StatusForbidden)
+			return
+		}
+		s.batch.LogMetadata("pypi", filename)
+	}
 
 	// 2. キャッシュミス: 承認 (メタデータ以外)
 	if !isMetadata && s.batch != nil {
@@ -170,7 +189,13 @@ func (s *Server) handlePyPIPackages(w http.ResponseWriter, r *http.Request, relP
 		}
 
 		if !s.batch.IsApproved("pypi", pkgName) {
+			// 事前解決は上流メタデータを読むので、先に run 単位の参照許可を得る。
+			if err := s.batch.AllowMetadata("pypi"); err != nil {
+				http.Error(w, fmt.Sprintf("Forbidden: %v", err), http.StatusForbidden)
+				return
+			}
 			resolver := NewPyPIResolver(s.client)
+			resolver.Logf = func(pkg string) { s.batch.LogMetadata("pypi", pkg) }
 			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 			defer cancel()
 			items, err := resolver.ResolveDependencies(ctx, pkgName, displayVer, 200)

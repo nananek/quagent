@@ -78,6 +78,15 @@ func (s *Server) handleNPM(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleNPMMetadata(w http.ResponseWriter, r *http.Request, relPath string) {
 	cacheKey := "metadata/" + relPath + ".json"
 
+	// 上流へ出る前に、この run 中のメタデータ参照を 1 回だけ確認する。
+	if s.batch != nil {
+		if err := s.batch.AllowMetadata("npm"); err != nil {
+			http.Error(w, fmt.Sprintf("Forbidden: %v", err), http.StatusForbidden)
+			return
+		}
+		s.batch.LogMetadata("npm", relPath)
+	}
+
 	// 上流から最新メタデータを取得
 	upstreamURL := "https://registry.npmjs.org/" + relPath
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstreamURL, nil)
@@ -147,7 +156,13 @@ func (s *Server) handleNPMTarball(w http.ResponseWriter, r *http.Request, relPat
 	// 2. キャッシュミス: 承認
 	if s.batch != nil {
 		if !s.batch.IsApproved("npm", pkgName) {
+			// 事前解決は上流メタデータを読むので、先に run 単位の参照許可を得る。
+			if err := s.batch.AllowMetadata("npm"); err != nil {
+				http.Error(w, fmt.Sprintf("Forbidden: %v", err), http.StatusForbidden)
+				return
+			}
 			resolver := NewNPMResolver(s.client)
+			resolver.Logf = func(pkg string) { s.batch.LogMetadata("npm", pkg) }
 			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 			defer cancel()
 			items, err := resolver.ResolveDependencies(ctx, pkgName, version, 200)

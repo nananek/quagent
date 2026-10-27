@@ -63,6 +63,12 @@ type Msg struct {
 	// パッケージ一括取得承認 (batchrequest / batchsettled) の内容。
 	BatchEcosystem string      `json:"batch_ecosystem,omitempty"`
 	BatchItems     []BatchItem `json:"batch_items,omitempty"`
+	// BatchMetadata はパッケージ取得ではなく、依存解決のためのメタデータ参照の
+	// 許可を求めるダイアログであることを示す。
+	BatchMetadata bool `json:"batch_metadata,omitempty"`
+	// BatchRevision は表示中の項目一覧の版。合流で内容が変わるたびに増える。
+	// 判断は自分が見た版を返し、サーバーは版が一致しない判断を拒否する。
+	BatchRevision int `json:"batch_revision,omitempty"`
 }
 
 // BatchItem はバッチ承認でダウンロードされる 1 つの項目。
@@ -76,6 +82,9 @@ type BatchItem struct {
 type BatchDownloadInfo struct {
 	Ecosystem string
 	Items     []BatchItem
+	// Metadata はパッケージそのものではなく、依存解決のためのメタデータ参照の
+	// 許可を求める。承認はこの run 中の参照すべてに効く。
+	Metadata bool
 }
 
 const (
@@ -134,12 +143,14 @@ type batchRequest struct {
 	done     chan struct{}
 	status   access.Status
 	kind     access.Kind
+	revision int
+	metadata bool
 	approved bool
 }
 
-// maxBatchItems は 1 枚のダイアログに合流させる項目数の上限。承認者を埋め尽くさない
-// ための上限であり、超えた分は別のダイアログになる。
-const maxBatchItems = 500
+// maxBatchReview は 1 枚のダイアログでレビューさせる項目数の上限。表示しきれない
+// 項目を同じ承認で通さないため、超えた分は次のダイアログに分ける。
+const maxBatchReview = 10
 
 // PRInfo は承認コンソールに諮る PR 作成の内容。
 type PRInfo struct {
@@ -270,7 +281,7 @@ func (s *Server) serve(c net.Conn) {
 		case "dockerdecide":
 			s.settleDocker(msg.ID, msg.Status)
 		case "batchdecide":
-			s.settleBatch(msg.ID, msg.Status, msg.Kind)
+			s.settleBatch(msg.ID, msg.Status, msg.Kind, msg.BatchRevision)
 		case "hubreissue":
 			s.reissueHubURL()
 		case "quit":
@@ -491,27 +502,82 @@ func dockerRequestMsg(r *dockerRequest) Msg {
 // 戻り値の kind は承認の種類で、Session なら呼び出し側は同じエコシステムの取得を
 // この run のあいだ確認なしで通してよい。
 func (s *Server) AskBatchDownload(info BatchDownloadInfo) (access.Kind, error) {
+	if info.Metadata {
+		return s.askBatchMetadata(info)
+	}
+
 	info.Items = normalizeBatchItems(info.Ecosystem, info.Items)
 	if len(info.Items) == 0 {
 		return access.Once, nil
 	}
 	info.Ecosystem = batchEcosystems(info.Items, info.Ecosystem)
 
+	// 1 枚に表示できる件数に分ける。Session が選ばれたら残りは諮らない。
+	for start := 0; start < len(info.Items); start += maxBatchReview {
+		end := min(start+maxBatchReview, len(info.Items))
+		kind, err := s.askBatchChunk(BatchDownloadInfo{
+			Ecosystem: info.Ecosystem,
+			Items:     info.Items[start:end],
+		})
+		if err != nil {
+			return "", err
+		}
+		if kind == access.Session {
+			return access.Session, nil
+		}
+	}
+	return access.Once, nil
+}
+
+// askBatchChunk は 1 枚分の項目を未決ダイアログへ合流させ、判断を待つ。
+func (s *Server) askBatchChunk(info BatchDownloadInfo) (access.Kind, error) {
 	req, msg, merged := s.addOrMergeBatch(info)
 	// 新規でも合流でも、表示中のダイアログを最新の内容に更新する (同じ ID で再送)。
 	s.broadcast(msg)
+	return s.waitBatch(req, merged)
+}
 
-	// 合流した側は、ダイアログを出した側のタイマーと終了処理に任せる。
+// askBatchMetadata はメタデータ参照の許可を 1 回だけ諮る。合流はしない。
+// 承認は run 全体に効くので、UI が once / session のどちらを返しても Session を返す。
+func (s *Server) askBatchMetadata(info BatchDownloadInfo) (access.Kind, error) {
+	info.Items = nil
+	if strings.TrimSpace(info.Ecosystem) == "" {
+		return "", fmt.Errorf("メタデータ参照の対象エコシステムが空")
+	}
+
+	s.batchMu.Lock()
+	s.batchNextID++
+	req := &batchRequest{
+		id:       s.batchNextID,
+		info:     info,
+		created:  time.Now(),
+		done:     make(chan struct{}),
+		revision: 1,
+		metadata: true,
+	}
+	s.batchPending = append(s.batchPending, req)
+	s.batchMu.Unlock()
+	s.broadcast(batchRequestMsg(req))
+
+	if _, err := s.waitBatch(req, false); err != nil {
+		return "", err
+	}
+	return access.Session, nil
+}
+
+// waitBatch はダイアログの決着を待つ。merged のときは、ダイアログを出した側の
+// タイマーと終了処理に任せる。
+func (s *Server) waitBatch(req *batchRequest, merged bool) (access.Kind, error) {
 	if !merged {
 		t := time.NewTimer(access.DecisionTimeout)
 		defer t.Stop()
 		select {
 		case <-req.done:
 		case <-t.C:
-			s.settleBatch(req.id, access.TimedOut, "")
+			s.settleBatch(req.id, access.TimedOut, "", 0)
 			<-req.done
 		case <-s.Quit:
-			s.settleBatch(req.id, access.Denied, "")
+			s.settleBatch(req.id, access.Denied, "", 0)
 			return "", fmt.Errorf("終了したのでパッケージを取得しなかった")
 		}
 	} else {
@@ -525,7 +591,13 @@ func (s *Server) AskBatchDownload(info BatchDownloadInfo) (access.Kind, error) {
 		return access.Once, nil
 	}
 	if req.status == access.TimedOut {
+		if req.metadata {
+			return "", fmt.Errorf("%s 以内に承認されなかったのでメタデータを参照しなかった", access.DecisionTimeout)
+		}
 		return "", fmt.Errorf("%s 以内に承認されなかったのでパッケージを取得しなかった", access.DecisionTimeout)
+	}
+	if req.metadata {
+		return "", fmt.Errorf("メタデータの参照は承認されなかった")
 	}
 	return "", fmt.Errorf("パッケージの取得は承認されなかった")
 }
@@ -537,15 +609,19 @@ func (s *Server) addOrMergeBatch(info BatchDownloadInfo) (req *batchRequest, msg
 	s.batchMu.Lock()
 	defer s.batchMu.Unlock()
 	for _, r := range s.batchPending {
-		if len(r.info.Items)+len(info.Items) > maxBatchItems {
+		if r.metadata {
+			continue
+		}
+		if len(r.info.Items)+len(info.Items) > maxBatchReview {
 			continue
 		}
 		r.info.Items = appendDedupBatchItems(r.info.Items, info.Items)
 		r.info.Ecosystem = batchEcosystems(r.info.Items, r.info.Ecosystem)
+		r.revision++
 		return r, batchRequestMsg(r), true
 	}
 	s.batchNextID++
-	req = &batchRequest{info: info, created: time.Now(), done: make(chan struct{})}
+	req = &batchRequest{info: info, created: time.Now(), done: make(chan struct{}), revision: 1}
 	req.id = s.batchNextID
 	s.batchPending = append(s.batchPending, req)
 	return req, batchRequestMsg(req), false
@@ -605,7 +681,8 @@ func batchEcosystems(items []BatchItem, fallback string) string {
 }
 
 // settleBatch は承認待ちのバッチ取得を決着させ、UI に知らせる。
-func (s *Server) settleBatch(id int, status access.Status, kind access.Kind) {
+// 項目一覧が更新された後に古い版の承認が届いた場合は決着させない。
+func (s *Server) settleBatch(id int, status access.Status, kind access.Kind, revision int) {
 	s.batchMu.Lock()
 	idx := -1
 	for i, r := range s.batchPending {
@@ -619,6 +696,11 @@ func (s *Server) settleBatch(id int, status access.Status, kind access.Kind) {
 		return
 	}
 	req := s.batchPending[idx]
+	if status == access.Approved && !req.metadata && revision != req.revision {
+		s.batchMu.Unlock()
+		s.Log("パッケージ一覧が更新されたので、内容を確認して再承認してください")
+		return
+	}
 	s.batchPending = append(s.batchPending[:idx], s.batchPending[idx+1:]...)
 	req.status = status
 	req.approved = status == access.Approved
@@ -636,6 +718,8 @@ func batchRequestMsg(r *batchRequest) Msg {
 		ID:             r.id,
 		BatchEcosystem: r.info.Ecosystem,
 		BatchItems:     r.info.Items,
+		BatchMetadata:  r.metadata,
+		BatchRevision:  r.revision,
 		Deadline:       r.created.Add(access.DecisionTimeout).Format("15:04:05"),
 	}
 }
