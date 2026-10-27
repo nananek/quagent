@@ -31,6 +31,7 @@ const usage = `usage:
   quagent image ls                             焼いたベースイメージの一覧
   quagent image rm IMAGE                       ベースイメージを消す
   quagent always ls | rm DOMAIN...              「以後確認しない」ドメインの一覧・取り消し
+  quagent ctl list | watch | decide             承認の流れを読む・判断する (外部プロセス向け)
   quagent cache ls | clean [docker|go|cargo|npm|pypi|all]  ローカルキャッシュの一覧・削除
   quagent hub                                    Web 遠隔操作モードを起動 (Tailscale 越しにブラウザから操作)
   quagent run [--repo DIR] [--image RECIPE] [--cpus N] [--mem MiB] [--agent opencode|claude|agy|codex] [--allow "d1 d2"] [--mount-tmp] [--nested-virt] [--local-head] [--pr-approval[=false]] [--hub]
@@ -39,8 +40,13 @@ const usage = `usage:
 
 func main() {
 	if err := dispatch(os.Args[1:]); err != nil {
+		code := 1
+		var ce *ctlExitError
+		if errors.As(err, &ce) {
+			code = ce.Code
+		}
 		fmt.Fprintf(os.Stderr, "quagent: %v\n", err)
-		os.Exit(1)
+		os.Exit(code)
 	}
 }
 
@@ -117,6 +123,8 @@ func dispatch(args []string) error {
 		return cmdHub(args[1:])
 	case "always":
 		return cmdAlways(args[1:])
+	case "ctl":
+		return cmdCtl(args[1:])
 	default:
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)

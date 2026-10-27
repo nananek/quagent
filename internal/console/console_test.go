@@ -1,6 +1,7 @@
 package console
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -845,6 +846,69 @@ func TestRelaxationConsoleIntegration(t *testing.T) {
 	}
 	if settledMsg.ID != relReq.ID || settledMsg.Status != access.Approved {
 		t.Fatalf("expected relaxsettled approved, got: %+v", settledMsg)
+	}
+}
+
+// TestConcurrentDecideIsIdempotent は TUI と hub (ctl も同じ) が同じ申請に
+// 同時に判断を送っても、決着が 1 回だけで壊れないことを確かめる。
+func TestConcurrentDecideIsIdempotent(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "console.sock")
+	m, err := access.NewManager(noApply{}, filepath.Join(t.TempDir(), "always.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(m, sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	req, err := m.Submit([]string{"pypi.org"}, "concurrent decide")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	u1, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer u1.Close()
+	u2, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer u2.Close()
+	for _, c := range []net.Conn{u1, u2} {
+		if err := json.NewEncoder(c).Encode(Msg{Type: "ui"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 2 つの UI から別々の判断をほぼ同時に送る。
+	errCh := make(chan error, 2)
+	go func() {
+		errCh <- json.NewEncoder(u1).Encode(Msg{Type: "decide", ID: req.ID, Status: access.Approved, Kind: access.Once})
+	}()
+	go func() {
+		errCh <- json.NewEncoder(u2).Encode(Msg{Type: "decide", ID: req.ID, Status: access.Denied})
+	}()
+	for i := 0; i < 2; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res, err := m.Wait(context.Background(), req.ID, 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 先に決着した方だけが残る (決着が二度起きない)。
+	if res.Status != access.Approved && res.Status != access.Denied {
+		t.Fatalf("決着: %+v", res)
+	}
+	settled, ok := m.Settled(req.ID)
+	if !ok || settled.Status != res.Status {
+		t.Fatalf("決着後の結果が変わった: wait=%+v settled=%+v ok=%v", res, settled, ok)
 	}
 }
 

@@ -68,6 +68,21 @@ quagent hub                    # Web 遠隔操作モードを起動 (Tailscale �
   - `codex` (Codex CLI、`--dangerously-bypass-approvals-and-sandbox` 付与)
   ※ VM による強固な隔離環境下で動作するため、エージェント側の実行前プロンプト確認はスキップして自律実行されます。
 
+### 外部プロセスからの承認 (quagent ctl)
+
+`quagent ctl` は動いている run の承認待ちを読み、判断を 1 つだけ送ります。hub を起動していなくても使えます。
+
+```sh
+quagent ctl list [--json]                  # run の一覧 (alive / repo / agent)
+quagent ctl watch [--run ID] [--json]      # 承認の流れを購読する
+quagent ctl decide --kind network 3 deny   # 判断を 1 つ送る
+```
+
+- `--kind` は `network` / `relax` / `pr` / `docker` / `batch`、判断は `allow` / `deny` / `question` です。`question` のときは `--question` で問いを渡します。
+- `decide` は egress を開ける権限そのものです。`console.sock` (0600) を使う同一ユーザーのローカル実行に限られ、TCP/HTTP には公開しません。
+- 自動承認や、失敗時の再送はありません。`--scope always` を明示したときだけ `~/.local/share/quagent/always-allow.json` に永続化し、その旨を stderr に警告します。
+- `ctl watch --json` は 1 行 1 イベントです。`log` と `clip` は既定で流さず、`--events log` のように明示したときだけ含めます。
+
 ### 画面構成: 上部でエージェントが自律動作し、下部承認コンソールで人間が判定する
 
 `quagent run` を実行すると tmux セッションが作成されます。

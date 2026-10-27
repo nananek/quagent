@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand/v2"
@@ -289,6 +290,14 @@ func run(o runOpts) error {
 		return err
 	}
 	defer lock.Close()
+	// ctl (quagent ctl list / watch) が run を特定できるようにする。古い run には
+	// meta.json が無いので、ctl 側は無くても動くこと。
+	if err := writeRunMeta(work, runMeta{
+		ID: id, Name: filepath.Base(repo), Repo: repo, Agent: o.Agent,
+		Tmux: "quagent-" + filepath.Base(work), PID: os.Getpid(),
+	}); err != nil {
+		logf("meta.json を書けない (ctl list で名前などが出ない): %v", err)
+	}
 	// 終了時の選択で「ログを残さない」にしたとき true にする
 	discardLogs := false
 	defer func() {
@@ -1169,6 +1178,16 @@ func checkSSHOff(g vmGuest, units []string) error {
 		return fmt.Errorf("VM の ssh を止められなかった:\n%s", s)
 	}
 	return nil
+}
+
+// writeRunMeta は run の作業ディレクトリに meta.json (0600) を書く。
+// ctl が run の id / repo / agent などを読むための補助で、無くても ctl は動く。
+func writeRunMeta(work string, m runMeta) error {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(work, "meta.json"), append(b, '\n'), 0o600)
 }
 
 // lockRun は作業ディレクトリのロックを取る。プロセスが終われば (強制終了でも) 外れる。
