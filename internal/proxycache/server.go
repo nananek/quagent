@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mdlayher/vsock"
+	"github.com/nananek/quagent/internal/access"
 	"github.com/nananek/quagent/internal/console"
 )
 
@@ -30,7 +31,8 @@ type Server struct {
 	AskApproval func(info console.DockerImageInfo) error
 
 	// AskBatch はパッケージ一括ダウンロード時に人間の承認を求めるコールバック。
-	AskBatch func(info console.BatchDownloadInfo) error
+	// 戻り値の Kind が Session なら、そのエコシステムはこの run 中まとめて許可する。
+	AskBatch func(info console.BatchDownloadInfo) (access.Kind, error)
 
 	batch         *BatchManager
 	client        *http.Client
@@ -54,18 +56,28 @@ func NewServer(storage *Storage, dockerHub, ghcr Upstream) *Server {
 		client:        &http.Client{Timeout: 30 * time.Minute, CheckRedirect: safeRedirect},
 		approvedRepos: make(map[string]bool),
 	}
-	s.batch = NewBatchManager(func(info console.BatchDownloadInfo) error {
+	s.batch = NewBatchManager(func(info console.BatchDownloadInfo) (access.Kind, error) {
 		if s.AskBatch != nil {
 			return s.AskBatch(info)
 		}
-		return nil
+		return access.Once, nil
 	})
 	return s
 }
 
 // SetAskBatch はバッチ承認コールバックを設定する。
-func (s *Server) SetAskBatch(fn func(info console.BatchDownloadInfo) error) {
+func (s *Server) SetAskBatch(fn func(info console.BatchDownloadInfo) (access.Kind, error)) {
 	s.AskBatch = fn
+}
+
+// SetBatchLogger はまとめて承認したことを承認コンソールのログに残す関数を設定する。
+func (s *Server) SetBatchLogger(fn func(string)) {
+	if s.batch == nil {
+		return
+	}
+	s.batch.mu.Lock()
+	s.batch.Logf = fn
+	s.batch.mu.Unlock()
 }
 
 // parsePath は /v2/<repo...>/<action>/<ref> を解析し、レジストリ・リポジトリ・参照・アクションを返す。

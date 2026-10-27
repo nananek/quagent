@@ -701,6 +701,7 @@ runcmd:
 	if cacheSrv != nil {
 		cacheSrv.AskApproval = con.AskDockerDownload
 		cacheSrv.SetAskBatch(con.AskBatchDownload)
+		cacheSrv.SetBatchLogger(con.Log)
 	}
 	g.consoleSock = filepath.Join(work, "console.sock")
 

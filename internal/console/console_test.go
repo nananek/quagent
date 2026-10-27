@@ -204,11 +204,15 @@ func TestAskBatchDownload(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var lastID int
-	ask := func(info BatchDownloadInfo) (chan error, Msg) {
-		resCh := make(chan error, 1)
+	type batchAnswer struct {
+		kind access.Kind
+		err  error
+	}
+	ask := func(info BatchDownloadInfo) (chan batchAnswer, Msg) {
+		resCh := make(chan batchAnswer, 1)
 		go func() {
-			resCh <- s.AskBatchDownload(info)
+			kind, err := s.AskBatchDownload(info)
+			resCh <- batchAnswer{kind: kind, err: err}
 		}()
 		for {
 			_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
@@ -216,8 +220,7 @@ func TestAskBatchDownload(t *testing.T) {
 			if err := dec.Decode(&msg); err != nil {
 				t.Fatal(err)
 			}
-			if msg.Type == "batchrequest" && msg.ID > lastID {
-				lastID = msg.ID
+			if msg.Type == "batchrequest" {
 				return resCh, msg
 			}
 		}
@@ -231,11 +234,11 @@ func TestAskBatchDownload(t *testing.T) {
 	if req.BatchEcosystem != "cargo" || len(req.BatchItems) != 1 || req.BatchItems[0].Name != "serde" {
 		t.Fatalf("バッチリクエスト内容が違う: %+v", req)
 	}
-	if err := enc.Encode(Msg{Type: "batchdecide", ID: req.ID, Status: access.Approved}); err != nil {
+	if err := enc.Encode(Msg{Type: "batchdecide", ID: req.ID, Status: access.Approved, Kind: access.Once}); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-resCh; err != nil {
-		t.Fatalf("承認期待だが got err=%v", err)
+	if ans := <-resCh; ans.err != nil || ans.kind != access.Once {
+		t.Fatalf("承認期待だが got kind=%q err=%v", ans.kind, ans.err)
 	}
 
 	// 2. 拒否 (access.Denied)
@@ -246,7 +249,101 @@ func TestAskBatchDownload(t *testing.T) {
 	if err := enc.Encode(Msg{Type: "batchdecide", ID: req.ID, Status: access.Denied}); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-resCh; err == nil {
+	if ans := <-resCh; ans.err == nil {
+		t.Fatal("拒否したのに nil が返った")
+	}
+}
+
+// TestAskBatchDownloadMergesAndSessions は、未決のダイアログに後続の取得が
+// 合流して 1 枚にまとまることと、session 承認が呼び出し側へ伝わることを確かめる。
+func TestAskBatchDownloadMergesAndSessions(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "console-batch-merge.sock")
+	m, err := access.NewManager(noApply{}, filepath.Join(t.TempDir(), "always.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(m, sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+
+	c, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	enc, dec := json.NewEncoder(c), json.NewDecoder(c)
+	if err := enc.Encode(Msg{Type: "ui"}); err != nil {
+		t.Fatal(err)
+	}
+
+	type batchAnswer struct {
+		kind access.Kind
+		err  error
+	}
+	fast := func(ecosystem, name string) chan batchAnswer {
+		resCh := make(chan batchAnswer, 1)
+		go func() {
+			kind, err := s.AskBatchDownload(BatchDownloadInfo{
+				Ecosystem: ecosystem,
+				Items:     []BatchItem{{Ecosystem: ecosystem, Name: name}},
+			})
+			resCh <- batchAnswer{kind: kind, err: err}
+		}()
+		return resCh
+	}
+	readRequest := func() Msg {
+		for {
+			_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+			var msg Msg
+			if err := dec.Decode(&msg); err != nil {
+				t.Fatal(err)
+			}
+			if msg.Type == "batchrequest" {
+				return msg
+			}
+		}
+	}
+
+	// 1 つ目 (cargo) が未決のまま、2 つ目 (npm) を送る。
+	first := fast("cargo", "serde")
+	req := readRequest()
+	if req.Type != "batchrequest" || req.BatchEcosystem != "cargo" {
+		t.Fatalf("1 枚目の内容が違う: %+v", req)
+	}
+	second := fast("npm", "express")
+	merged := readRequest()
+	if merged.ID != req.ID {
+		t.Fatalf("合流したら同じ ID のはず: first=%d merged=%d", req.ID, merged.ID)
+	}
+	if merged.BatchEcosystem != "cargo, npm" {
+		t.Fatalf("エコシステムがまとまっていない: %+v", merged.BatchEcosystem)
+	}
+	if len(merged.BatchItems) != 2 {
+		t.Fatalf("項目が合流していない: %+v", merged.BatchItems)
+	}
+
+	// 1 回の判断で両方の待ち手が返る。session はまとめて許可として伝わる。
+	if err := enc.Encode(Msg{Type: "batchdecide", ID: req.ID, Status: access.Approved, Kind: access.Session}); err != nil {
+		t.Fatal(err)
+	}
+	for _, resCh := range []chan batchAnswer{first, second} {
+		if ans := <-resCh; ans.err != nil || ans.kind != access.Session {
+			t.Fatalf("session 承認が伝わっていない: kind=%q err=%v", ans.kind, ans.err)
+		}
+	}
+
+	// 決着後は新しいダイアログになり、ID が進む。
+	third := fast("go", "example.com/pkg")
+	next := readRequest()
+	if next.ID <= req.ID {
+		t.Fatalf("決着後の ID が進んでいない: %d", next.ID)
+	}
+	if err := enc.Encode(Msg{Type: "batchdecide", ID: next.ID, Status: access.Denied}); err != nil {
+		t.Fatal(err)
+	}
+	if ans := <-third; ans.err == nil {
 		t.Fatal("拒否したのに nil が返った")
 	}
 }
@@ -617,13 +714,34 @@ func TestTUIModelDecisions(t *testing.T) {
 	m = newM.(model)
 	select {
 	case out := <-m.outChan:
-		if out.Type != "batchdecide" || out.Status != access.Approved {
+		if out.Type != "batchdecide" || out.Status != access.Approved || out.Kind != access.Once {
 			t.Errorf("expected Approved batchdecide with key '1', got %+v", out)
 		}
 	default:
 		t.Fatal("expected batchdecide on outChan")
 	}
-	newM, _ = m.Update(socketMsg(Msg{Type: "batchsettled", ID: 4, Status: access.Approved}))
+	newM, _ = m.Update(socketMsg(Msg{Type: "batchsettled", ID: 4, Status: access.Approved, Kind: access.Once}))
+	m = newM.(model)
+
+	// 3.7 batchrequest に s で「この run 中まとめて許可」
+	newM, _ = m.Update(socketMsg(Msg{
+		Type:           "batchrequest",
+		ID:             5,
+		BatchEcosystem: "go",
+		BatchItems:     []BatchItem{{Ecosystem: "go", Name: "example.com/a"}},
+	}))
+	m = newM.(model)
+	newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = newM.(model)
+	select {
+	case out := <-m.outChan:
+		if out.Type != "batchdecide" || out.Status != access.Approved || out.Kind != access.Session {
+			t.Errorf("expected Session batchdecide with key 's', got %+v", out)
+		}
+	default:
+		t.Fatal("expected batchdecide on outChan")
+	}
+	newM, _ = m.Update(socketMsg(Msg{Type: "batchsettled", ID: 5, Status: access.Approved, Kind: access.Session}))
 	m = newM.(model)
 
 	// 4. request 申請と決定 (1, 2, 3, d, q)
@@ -1183,22 +1301,44 @@ func TestTUIModelMouseDecisions(t *testing.T) {
 	}))
 	m = newM.(model)
 
-	// [y] 承認して取得 (X < 24)
+	// [y] 承認して取得 (左端)
 	newM, _ = m.Update(tea.MouseMsg{X: 10, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = newM.(model)
 	select {
 	case out := <-m.outChan:
-		if out.Type != "batchdecide" || out.Status != access.Approved {
+		if out.Type != "batchdecide" || out.Status != access.Approved || out.Kind != access.Once {
 			t.Errorf("expected batchdecide Approved on mouse click, got %+v", out)
 		}
 	default:
 		t.Fatal("expected batchdecide on outChan after mouse click")
 	}
 
-	newM, _ = m.Update(socketMsg(Msg{Type: "batchsettled", ID: 12, Status: access.Approved}))
+	newM, _ = m.Update(socketMsg(Msg{Type: "batchsettled", ID: 12, Status: access.Approved, Kind: access.Once}))
 	m = newM.(model)
 
-	// [n] 拒否 (X >= 24)
+	// [s] この run 中まとめて許可 (中央)
+	newM, _ = m.Update(socketMsg(Msg{
+		Type:           "batchrequest",
+		ID:             13,
+		BatchEcosystem: "cargo",
+		BatchItems:     []BatchItem{{Ecosystem: "cargo", Name: "serde", Version: "1.0.197"}},
+	}))
+	m = newM.(model)
+	newM, _ = m.Update(tea.MouseMsg{X: 30, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = newM.(model)
+	select {
+	case out := <-m.outChan:
+		if out.Type != "batchdecide" || out.Status != access.Approved || out.Kind != access.Session {
+			t.Errorf("expected batchdecide Session on mouse click, got %+v", out)
+		}
+	default:
+		t.Fatal("expected batchdecide on outChan after mouse click")
+	}
+
+	newM, _ = m.Update(socketMsg(Msg{Type: "batchsettled", ID: 13, Status: access.Approved, Kind: access.Session}))
+	m = newM.(model)
+
+	// [n] 拒否 (右端)
 	newM, _ = m.Update(socketMsg(Msg{
 		Type:           "batchrequest",
 		ID:             14,
@@ -1206,7 +1346,7 @@ func TestTUIModelMouseDecisions(t *testing.T) {
 		BatchItems:     []BatchItem{{Ecosystem: "pypi", Name: "jupyterlab", Version: "4.6.4"}},
 	}))
 	m = newM.(model)
-	newM, _ = m.Update(tea.MouseMsg{X: 45, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	newM, _ = m.Update(tea.MouseMsg{X: 70, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = newM.(model)
 	select {
 	case out := <-m.outChan:

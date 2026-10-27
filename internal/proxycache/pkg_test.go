@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nananek/quagent/internal/access"
 	"github.com/nananek/quagent/internal/console"
 	"github.com/nananek/quagent/internal/guest"
 )
@@ -47,9 +48,9 @@ func TestGoProxyCaching(t *testing.T) {
 	srv := NewServer(storage, nil, nil)
 	srv.client = client
 	var approvedEcosystems []string
-	srv.SetAskBatch(func(info console.BatchDownloadInfo) error {
+	srv.SetAskBatch(func(info console.BatchDownloadInfo) (access.Kind, error) {
 		approvedEcosystems = append(approvedEcosystems, info.Ecosystem)
-		return nil
+		return access.Once, nil
 	})
 
 	// 1. 初回リクエスト (キャッシュミス) -> 承認 & 上流ダウンロード
@@ -112,8 +113,8 @@ func TestCargoSparseIndexAndCrates(t *testing.T) {
 
 	srv := NewServer(storage, nil, nil)
 	srv.client = client
-	srv.SetAskBatch(func(info console.BatchDownloadInfo) error {
-		return nil
+	srv.SetAskBatch(func(info console.BatchDownloadInfo) (access.Kind, error) {
+		return access.Once, nil
 	})
 
 	// 1. config.json の dl 書き換え確認
@@ -174,8 +175,8 @@ func TestNPMMetadataAndTarball(t *testing.T) {
 
 	srv := NewServer(storage, nil, nil)
 	srv.client = client
-	srv.SetAskBatch(func(info console.BatchDownloadInfo) error {
-		return nil
+	srv.SetAskBatch(func(info console.BatchDownloadInfo) (access.Kind, error) {
+		return access.Once, nil
 	})
 
 	// 1. packument の tarball URL 書き換え確認
@@ -231,8 +232,8 @@ func TestPyPISimpleAndPackages(t *testing.T) {
 
 	srv := NewServer(storage, nil, nil)
 	srv.client = client
-	srv.SetAskBatch(func(info console.BatchDownloadInfo) error {
-		return nil
+	srv.SetAskBatch(func(info console.BatchDownloadInfo) (access.Kind, error) {
+		return access.Once, nil
 	})
 
 	// 1. Simple API のリンク書き換え確認
@@ -261,9 +262,9 @@ func TestPyPISimpleAndPackages(t *testing.T) {
 
 	// 3. PEP 658 .metadata の承認バイパスと Content-Type 確認
 	batchCalled := false
-	srv.SetAskBatch(func(info console.BatchDownloadInfo) error {
+	srv.SetAskBatch(func(info console.BatchDownloadInfo) (access.Kind, error) {
 		batchCalled = true
-		return nil
+		return access.Once, nil
 	})
 	recMeta := httptest.NewRecorder()
 	reqMeta := httptest.NewRequest(http.MethodGet, "/pypi/packages/ab/cd/requests-2.31.0-py3-none-any.whl.metadata", nil)

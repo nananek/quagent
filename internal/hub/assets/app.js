@@ -272,6 +272,9 @@
 
   function makeCard(key, msg, title) {
     clearEmpty();
+    // 合流で内容が増えた申請は同じ key で再送される。古いカードを差し替える。
+    const old = cards.get(key);
+    if (old) old.remove();
     const card = el("div", "card");
     card.appendChild(el("h3", null, title));
     listEl.prepend(card);
@@ -325,7 +328,7 @@
       switch (m.type) {
         case "prrequest": return "承認して push した";
         case "dockerrequest": return "承認して取得した";
-        case "batchrequest": return s.kind === "session" ? "セッション中常に承認" : "承認して取得した";
+        case "batchrequest": return s.kind === "session" ? "この run 中まとめて承認" : "承認して取得した";
         case "clip": return s.text || "コピーを許可した";
         default: return "許可" + (kind ? " (" + kind + ")" : "");
       }
@@ -441,7 +444,8 @@
           card.appendChild(el("div", "reason", names + (n > 20 ? " …" : "")));
         }
         card.appendChild(el("div", "row"));
-        button(card, "取得", "primary", () => decide("batchdecide", m.id, "approved"));
+        button(card, "取得", "primary", () => decide("batchdecide", m.id, "approved", "once"));
+        button(card, "この run 中まとめて許可", null, () => decide("batchdecide", m.id, "approved", "session"));
         button(card, "拒否", "danger", () => decide("batchdecide", m.id, "denied"));
         break;
       }

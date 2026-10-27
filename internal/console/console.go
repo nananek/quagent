@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -132,8 +133,13 @@ type batchRequest struct {
 	created  time.Time
 	done     chan struct{}
 	status   access.Status
+	kind     access.Kind
 	approved bool
 }
+
+// maxBatchItems は 1 枚のダイアログに合流させる項目数の上限。承認者を埋め尽くさない
+// ための上限であり、超えた分は別のダイアログになる。
+const maxBatchItems = 500
 
 // PRInfo は承認コンソールに諮る PR 作成の内容。
 type PRInfo struct {
@@ -264,7 +270,7 @@ func (s *Server) serve(c net.Conn) {
 		case "dockerdecide":
 			s.settleDocker(msg.ID, msg.Status)
 		case "batchdecide":
-			s.settleBatch(msg.ID, msg.Status)
+			s.settleBatch(msg.ID, msg.Status, msg.Kind)
 		case "hubreissue":
 			s.reissueHubURL()
 		case "quit":
@@ -481,37 +487,125 @@ func dockerRequestMsg(r *dockerRequest) Msg {
 }
 
 // AskBatchDownload はパッケージ一括取得を承認コンソールに諮り、承認されるまで待つ。
-func (s *Server) AskBatchDownload(info BatchDownloadInfo) error {
-	req := &batchRequest{info: info, created: time.Now(), done: make(chan struct{})}
-	s.batchMu.Lock()
-	s.batchNextID++
-	req.id = s.batchNextID
-	s.batchPending = append(s.batchPending, req)
-	s.batchMu.Unlock()
-	s.broadcast(batchRequestMsg(req))
-
-	t := time.NewTimer(access.DecisionTimeout)
-	defer t.Stop()
-	select {
-	case <-req.done:
-	case <-t.C:
-		s.settleBatch(req.id, access.TimedOut)
-		<-req.done
-	case <-s.Quit:
-		s.settleBatch(req.id, access.Denied)
-		return fmt.Errorf("終了したのでパッケージを取得しなかった")
+// 既に未決のダイアログがあれば新しい項目をそこへ合流させ、1 枚にまとめる。
+// 戻り値の kind は承認の種類で、Session なら呼び出し側は同じエコシステムの取得を
+// この run のあいだ確認なしで通してよい。
+func (s *Server) AskBatchDownload(info BatchDownloadInfo) (access.Kind, error) {
+	info.Items = normalizeBatchItems(info.Ecosystem, info.Items)
+	if len(info.Items) == 0 {
+		return access.Once, nil
 	}
+	info.Ecosystem = batchEcosystems(info.Items, info.Ecosystem)
+
+	req, msg, merged := s.addOrMergeBatch(info)
+	// 新規でも合流でも、表示中のダイアログを最新の内容に更新する (同じ ID で再送)。
+	s.broadcast(msg)
+
+	// 合流した側は、ダイアログを出した側のタイマーと終了処理に任せる。
+	if !merged {
+		t := time.NewTimer(access.DecisionTimeout)
+		defer t.Stop()
+		select {
+		case <-req.done:
+		case <-t.C:
+			s.settleBatch(req.id, access.TimedOut, "")
+			<-req.done
+		case <-s.Quit:
+			s.settleBatch(req.id, access.Denied, "")
+			return "", fmt.Errorf("終了したのでパッケージを取得しなかった")
+		}
+	} else {
+		<-req.done
+	}
+
 	if req.approved {
-		return nil
+		if req.kind == access.Session {
+			return access.Session, nil
+		}
+		return access.Once, nil
 	}
 	if req.status == access.TimedOut {
-		return fmt.Errorf("%s 以内に承認されなかったのでパッケージを取得しなかった", access.DecisionTimeout)
+		return "", fmt.Errorf("%s 以内に承認されなかったのでパッケージを取得しなかった", access.DecisionTimeout)
 	}
-	return fmt.Errorf("パッケージの取得は承認されなかった")
+	return "", fmt.Errorf("パッケージの取得は承認されなかった")
+}
+
+// addOrMergeBatch は未決のダイアログに項目を合流させる。合流先が無ければ新しい
+// 申請を作る。merged は既存のダイアログへ合流したとき true。msg は表示用の
+// スナップショット (合流で内容が変わるため、ロックを離す前に作る)。
+func (s *Server) addOrMergeBatch(info BatchDownloadInfo) (req *batchRequest, msg Msg, merged bool) {
+	s.batchMu.Lock()
+	defer s.batchMu.Unlock()
+	for _, r := range s.batchPending {
+		if len(r.info.Items)+len(info.Items) > maxBatchItems {
+			continue
+		}
+		r.info.Items = appendDedupBatchItems(r.info.Items, info.Items)
+		r.info.Ecosystem = batchEcosystems(r.info.Items, r.info.Ecosystem)
+		return r, batchRequestMsg(r), true
+	}
+	s.batchNextID++
+	req = &batchRequest{info: info, created: time.Now(), done: make(chan struct{})}
+	req.id = s.batchNextID
+	s.batchPending = append(s.batchPending, req)
+	return req, batchRequestMsg(req), false
+}
+
+// normalizeBatchItems は項目のエコシステムを補い、重複を落とす。
+func normalizeBatchItems(ecosystem string, items []BatchItem) []BatchItem {
+	out := make([]BatchItem, 0, len(items))
+	seen := make(map[string]bool, len(items))
+	for _, it := range items {
+		if it.Ecosystem == "" {
+			it.Ecosystem = ecosystem
+		}
+		key := it.Ecosystem + "\x00" + it.Name
+		if it.Name == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, it)
+	}
+	return out
+}
+
+// appendDedupBatchItems は dst に無い項目だけを足す。
+func appendDedupBatchItems(dst, add []BatchItem) []BatchItem {
+	seen := make(map[string]bool, len(dst)+len(add))
+	for _, it := range dst {
+		seen[it.Ecosystem+"\x00"+it.Name] = true
+	}
+	for _, it := range add {
+		key := it.Ecosystem + "\x00" + it.Name
+		if it.Name == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		dst = append(dst, it)
+	}
+	return dst
+}
+
+// batchEcosystems は項目に含まれるエコシステムを列挙する。複数エコシステムを
+// 1 枚のダイアログにまとめたとき、表示用に "npm, pypi" のように返す。
+func batchEcosystems(items []BatchItem, fallback string) string {
+	seen := make(map[string]bool, len(items))
+	var list []string
+	for _, it := range items {
+		if it.Ecosystem == "" || seen[it.Ecosystem] {
+			continue
+		}
+		seen[it.Ecosystem] = true
+		list = append(list, it.Ecosystem)
+	}
+	if len(list) == 0 {
+		return fallback
+	}
+	return strings.Join(list, ", ")
 }
 
 // settleBatch は承認待ちのバッチ取得を決着させ、UI に知らせる。
-func (s *Server) settleBatch(id int, status access.Status) {
+func (s *Server) settleBatch(id int, status access.Status, kind access.Kind) {
 	s.batchMu.Lock()
 	idx := -1
 	for i, r := range s.batchPending {
@@ -528,9 +622,12 @@ func (s *Server) settleBatch(id int, status access.Status) {
 	s.batchPending = append(s.batchPending[:idx], s.batchPending[idx+1:]...)
 	req.status = status
 	req.approved = status == access.Approved
+	if req.approved && kind == access.Session {
+		req.kind = access.Session
+	}
 	s.batchMu.Unlock()
 	close(req.done)
-	s.broadcast(Msg{Type: "batchsettled", ID: id, Status: status})
+	s.broadcast(Msg{Type: "batchsettled", ID: id, Status: status, Kind: req.kind})
 }
 
 func batchRequestMsg(r *batchRequest) Msg {
