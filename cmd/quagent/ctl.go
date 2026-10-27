@@ -478,7 +478,7 @@ func ctlDecide(args []string) error {
 	fs := ctlFlags("ctl decide")
 	runFlag := fs.String("run", "", "run の ID (省略時は watch と同じ規則)")
 	kindFlag := fs.String("kind", "", "network / relax / pr / docker / batch")
-	scopeFlag := fs.String("scope", "once", "network / relax の承認の種類 (once / session / always)")
+	scopeFlag := fs.String("scope", "once", "承認の種類 (network / relax は once / session / always、batch は once / session)")
 	questionFlag := fs.String("question", "", "question のときの問い")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -516,7 +516,8 @@ func ctlDecide(args []string) error {
 		return ctlExitf(2, "--question は判断が question のときだけ使える")
 	}
 	var scope access.Kind
-	if kind.name == "network" || kind.name == "relax" {
+	switch kind.name {
+	case "network", "relax":
 		switch *scopeFlag {
 		case "once":
 			scope = access.Once
@@ -526,6 +527,17 @@ func ctlDecide(args []string) error {
 			scope = access.Always
 		default:
 			return ctlExitf(2, "--scope は once / session / always のどれか: %q", *scopeFlag)
+		}
+	case "batch":
+		// パッケージは「この run 中まとめて許可」まで。全プロジェクト共通の
+		// 恒久許可は用意しない (任意の名前で外部へ出せる経路になるため)。
+		switch *scopeFlag {
+		case "once":
+			scope = access.Once
+		case "session":
+			scope = access.Session
+		default:
+			return ctlExitf(2, "batch の --scope は once / session のどれか: %q", *scopeFlag)
 		}
 	}
 
@@ -539,18 +551,23 @@ func ctlDecide(args []string) error {
 	}
 	pending := collectPending(conn, 200*time.Millisecond)
 	key := pendingKey(kind.request, id)
-	if !pending[key] {
+	req, ok := pending[key]
+	if !ok {
 		_ = conn.Close()
 		return ctlExitf(3, "申請 %d (%s) は保留中に無い (決着済み・期限切れの可能性)", id, kind.name)
 	}
 
 	msg := console.Msg{Type: kind.decideType, ID: id, Status: status}
+	if kind.name == "batch" {
+		// 一覧が合流で更新されている場合、古い版の判断はサーバーに拒否される。
+		msg.BatchRevision = req.BatchRevision
+	}
 	if status == access.Question {
 		// 下流 (Hermes / Discord など) の入力をそのままエージェントの端末へ
 		// 流さない。制御文字と Bidi をエスケープする。
 		msg.Question = console.Sanitize(*questionFlag)
 	}
-	if kind.name == "network" || kind.name == "relax" {
+	if kind.name == "network" || kind.name == "relax" || kind.name == "batch" {
 		msg.Kind = scope
 	}
 	// 監査を書けないなら判断を送らない (監査なしの承認を作らない)。
@@ -577,8 +594,9 @@ func pendingKey(requestType string, id int) string {
 
 // collectPending は名乗り直後に送られてくる保留一覧を d のあいだ集める。
 // 同じ ID でも種類ごとに別のカウンタなので、種類を含めた key で持つ。
-func collectPending(conn *console.Conn, d time.Duration) map[string]bool {
-	pending := map[string]bool{}
+// バッチは最新の版を判断に載せるため、メッセージ全体を覚えておく。
+func collectPending(conn *console.Conn, d time.Duration) map[string]console.Msg {
+	pending := map[string]console.Msg{}
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	events := conn.Events()
@@ -592,15 +610,15 @@ func collectPending(conn *console.Conn, d time.Duration) map[string]bool {
 			}
 			switch m.Type {
 			case "request":
-				pending[pendingKey("request", m.ID)] = true
+				pending[pendingKey("request", m.ID)] = m
 			case "relaxrequest":
-				pending[pendingKey("relaxrequest", m.ID)] = true
+				pending[pendingKey("relaxrequest", m.ID)] = m
 			case "prrequest":
-				pending[pendingKey("prrequest", m.ID)] = true
+				pending[pendingKey("prrequest", m.ID)] = m
 			case "dockerrequest":
-				pending[pendingKey("dockerrequest", m.ID)] = true
+				pending[pendingKey("dockerrequest", m.ID)] = m
 			case "batchrequest":
-				pending[pendingKey("batchrequest", m.ID)] = true
+				pending[pendingKey("batchrequest", m.ID)] = m
 			case "settled":
 				delete(pending, pendingKey("request", m.ID))
 			case "relaxsettled":
@@ -620,7 +638,7 @@ func collectPending(conn *console.Conn, d time.Duration) map[string]bool {
 // 呼び出し側は判断を送らずに中止する。
 func logCtlDecision(work, kind string, id int, status access.Status, scope access.Kind) error {
 	line := fmt.Sprintf("%s ctl decide kind=%s id=%d status=%s", time.Now().Format("15:04:05"), kind, id, status)
-	if scope != "" && (kind == "network" || kind == "relax") {
+	if scope != "" && (kind == "network" || kind == "relax" || kind == "batch") {
 		line += " scope=" + string(scope)
 	}
 	if actor := os.Getenv("QUAGENT_CTL_ACTOR"); actor != "" {

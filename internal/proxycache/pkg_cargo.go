@@ -65,6 +65,13 @@ func (s *Server) handleCargoIndex(w http.ResponseWriter, r *http.Request, relPat
 
 	// config.json の特別処理
 	if relPath == "config.json" {
+		if s.batch != nil {
+			if err := s.batch.AllowMetadata("cargo"); err != nil {
+				http.Error(w, fmt.Sprintf("Forbidden: %v", err), http.StatusForbidden)
+				return
+			}
+			s.batch.LogMetadata("cargo", "config.json")
+		}
 		upstreamURL := "https://index.crates.io/config.json"
 		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstreamURL, nil)
 		if err != nil {
@@ -134,6 +141,14 @@ func (s *Server) handleCargoIndex(w http.ResponseWriter, r *http.Request, relPat
 			}
 			return
 		}
+	}
+
+	if s.batch != nil {
+		if err := s.batch.AllowMetadata("cargo"); err != nil {
+			http.Error(w, fmt.Sprintf("Forbidden: %v", err), http.StatusForbidden)
+			return
+		}
+		s.batch.LogMetadata("cargo", relPath)
 	}
 
 	upstreamURL := "https://index.crates.io/" + relPath

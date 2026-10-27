@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/nananek/quagent/internal/access"
 	"github.com/nananek/quagent/internal/console"
 	"github.com/nananek/quagent/internal/guest"
 )
@@ -47,9 +49,9 @@ func TestGoProxyCaching(t *testing.T) {
 	srv := NewServer(storage, nil, nil)
 	srv.client = client
 	var approvedEcosystems []string
-	srv.SetAskBatch(func(info console.BatchDownloadInfo) error {
+	srv.SetAskBatch(func(info console.BatchDownloadInfo) (access.Kind, error) {
 		approvedEcosystems = append(approvedEcosystems, info.Ecosystem)
-		return nil
+		return access.Once, nil
 	})
 
 	// 1. 初回リクエスト (キャッシュミス) -> 承認 & 上流ダウンロード
@@ -112,8 +114,8 @@ func TestCargoSparseIndexAndCrates(t *testing.T) {
 
 	srv := NewServer(storage, nil, nil)
 	srv.client = client
-	srv.SetAskBatch(func(info console.BatchDownloadInfo) error {
-		return nil
+	srv.SetAskBatch(func(info console.BatchDownloadInfo) (access.Kind, error) {
+		return access.Once, nil
 	})
 
 	// 1. config.json の dl 書き換え確認
@@ -174,8 +176,8 @@ func TestNPMMetadataAndTarball(t *testing.T) {
 
 	srv := NewServer(storage, nil, nil)
 	srv.client = client
-	srv.SetAskBatch(func(info console.BatchDownloadInfo) error {
-		return nil
+	srv.SetAskBatch(func(info console.BatchDownloadInfo) (access.Kind, error) {
+		return access.Once, nil
 	})
 
 	// 1. packument の tarball URL 書き換え確認
@@ -231,8 +233,8 @@ func TestPyPISimpleAndPackages(t *testing.T) {
 
 	srv := NewServer(storage, nil, nil)
 	srv.client = client
-	srv.SetAskBatch(func(info console.BatchDownloadInfo) error {
-		return nil
+	srv.SetAskBatch(func(info console.BatchDownloadInfo) (access.Kind, error) {
+		return access.Once, nil
 	})
 
 	// 1. Simple API のリンク書き換え確認
@@ -261,9 +263,9 @@ func TestPyPISimpleAndPackages(t *testing.T) {
 
 	// 3. PEP 658 .metadata の承認バイパスと Content-Type 確認
 	batchCalled := false
-	srv.SetAskBatch(func(info console.BatchDownloadInfo) error {
+	srv.SetAskBatch(func(info console.BatchDownloadInfo) (access.Kind, error) {
 		batchCalled = true
-		return nil
+		return access.Once, nil
 	})
 	recMeta := httptest.NewRecorder()
 	reqMeta := httptest.NewRequest(http.MethodGet, "/pypi/packages/ab/cd/requests-2.31.0-py3-none-any.whl.metadata", nil)
@@ -298,5 +300,51 @@ func TestParsePyPIPackageFilename(t *testing.T) {
 			t.Errorf("parsePyPIPackageFilename(%q) = (%q, %q), want (%q, %q)",
 				tc.filename, pkg, ver, tc.wantPkg, tc.wantVersion)
 		}
+	}
+}
+
+// TestMetadataConsentPrecedesUpstream は、メタデータ取得の許可が上流リクエストより
+// 先に求められることを確かめる。許可なしに上流へ出る回帰を防ぐ。
+func TestMetadataConsentPrecedesUpstream(t *testing.T) {
+	storage, err := NewStorage(t.TempDir(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var events []string
+	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
+		events = append(events, "upstream")
+		mu.Unlock()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"name":"express","versions":{},"dist-tags":{}}`)),
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+		}, nil
+	})}
+
+	srv := NewServer(storage, nil, nil)
+	srv.client = client
+	srv.SetAskBatch(func(info console.BatchDownloadInfo) (access.Kind, error) {
+		mu.Lock()
+		if info.Metadata {
+			events = append(events, "metadata-ask")
+		} else {
+			events = append(events, "package-ask")
+		}
+		mu.Unlock()
+		return access.Once, nil
+	})
+
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/npm/express", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) < 1 || events[0] != "metadata-ask" {
+		t.Fatalf("メタデータの許可より先に上流へ出た: %v", events)
 	}
 }

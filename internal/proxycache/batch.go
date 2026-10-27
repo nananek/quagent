@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nananek/quagent/internal/access"
 	"github.com/nananek/quagent/internal/console"
 )
 
@@ -21,13 +22,26 @@ type batchQueue struct {
 // BatchManager はパッケージマネージャーの未キャッシュリクエストを集約し、
 // バッチ単位で承認コンソールに諮るマネージャー。
 type BatchManager struct {
-	AskBatch func(info console.BatchDownloadInfo) error
-	Window   time.Duration // デバウンス待機時間 (既定: 400ms)
-	MaxSize  int           // 1 バッチの最大項目数 (既定: 50)
+	// AskBatch は承認コンソールに判断を諮る。戻り値の Kind が Session なら、
+	// そのエコシステムの取得はこの run のあいだ確認なしで通す。
+	AskBatch func(info console.BatchDownloadInfo) (access.Kind, error)
+	// Logf はまとめて承認したことを記録する (nil なら記録しない)。
+	Logf    func(string)
+	Window  time.Duration // デバウンス待機時間 (既定: 400ms)
+	MaxSize int           // 1 バッチの最大項目数 (既定: 50)
 
-	mu            sync.Mutex
-	approvedItems map[string]bool        // "ecosystem:name" -> true (正規化キー)
-	pendingQueues map[string]*batchQueue // ecosystem -> queue
+	mu              sync.Mutex
+	approvedItems   map[string]bool // "ecosystem:name" -> true (正規化キー)
+	sessionAllowed  map[string]bool // ecosystem -> この run 中は確認しない
+	metadataAllowed map[string]bool // ecosystem -> メタデータ参照を許可済み
+	metadataPending map[string]*metadataWait
+	pendingQueues   map[string]*batchQueue // ecosystem -> queue
+}
+
+// metadataWait は同じエコシステムのメタデータ許可待ちを 1 回の承認にまとめる。
+type metadataWait struct {
+	done chan struct{}
+	err  error
 }
 
 // normalizeItemKey はエコシステムごとの規則でパッケージ名を正規化し、承認キーを作る。
@@ -42,21 +56,89 @@ func normalizeItemKey(ecosystem, name string) string {
 }
 
 // NewBatchManager は新しい BatchManager を作成する。
-func NewBatchManager(askBatch func(info console.BatchDownloadInfo) error) *BatchManager {
+func NewBatchManager(askBatch func(info console.BatchDownloadInfo) (access.Kind, error)) *BatchManager {
 	return &BatchManager{
-		AskBatch:      askBatch,
-		Window:        400 * time.Millisecond,
-		MaxSize:       50,
-		approvedItems: make(map[string]bool),
-		pendingQueues: make(map[string]*batchQueue),
+		AskBatch:        askBatch,
+		Window:          400 * time.Millisecond,
+		MaxSize:         50,
+		approvedItems:   make(map[string]bool),
+		sessionAllowed:  make(map[string]bool),
+		metadataAllowed: make(map[string]bool),
+		metadataPending: make(map[string]*metadataWait),
+		pendingQueues:   make(map[string]*batchQueue),
 	}
 }
 
-// IsApproved は指定されたパッケージが承認済みか確認する。
+// AllowMetadata は依存解決のためのメタデータ参照を、この run 中まとめて許可する。
+// 未許可なら承認コンソールに 1 回だけ諮り、同じエコシステムの並行要求はその結果を
+// 共有する。承認は run のメモリにだけ保持する。
+func (b *BatchManager) AllowMetadata(ecosystem string) error {
+	if b.AskBatch == nil {
+		return nil
+	}
+
+	b.mu.Lock()
+	if b.metadataAllowed[ecosystem] {
+		b.mu.Unlock()
+		return nil
+	}
+	if wait, ok := b.metadataPending[ecosystem]; ok {
+		b.mu.Unlock()
+		<-wait.done
+		return wait.err
+	}
+	wait := &metadataWait{done: make(chan struct{})}
+	b.metadataPending[ecosystem] = wait
+	b.mu.Unlock()
+
+	_, err := b.AskBatch(console.BatchDownloadInfo{
+		Ecosystem: ecosystem,
+		Metadata:  true,
+	})
+
+	b.mu.Lock()
+	if err == nil {
+		b.metadataAllowed[ecosystem] = true
+	}
+	wait.err = err
+	delete(b.metadataPending, ecosystem)
+	logf := b.Logf
+	b.mu.Unlock()
+	close(wait.done)
+
+	if err == nil && logf != nil {
+		logf(ecosystem + ": この run 中のメタデータ参照を許可した")
+	}
+	return err
+}
+
+// LogMetadata は上流へ問い合わせたパッケージ名を承認コンソールのログに残す。
+// 名前は VM 由来なので制御文字と Bidi を無害化する。
+func (b *BatchManager) LogMetadata(ecosystem, name string) {
+	b.mu.Lock()
+	logf := b.Logf
+	b.mu.Unlock()
+	if logf == nil {
+		return
+	}
+	logf(ecosystem + ": メタデータ参照: " + console.Sanitize(truncateRunes(name, 200)))
+}
+
+// truncateRunes はログを埋め尽くさないように文字数で切る。
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "..."
+}
+
+// IsApproved は指定されたパッケージが承認済みか確認する。この run 中まとめて
+// 許可されたエコシステムなら、パッケージ名を問わず承認済みとして扱う。
 func (b *BatchManager) IsApproved(ecosystem, name string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.approvedItems[normalizeItemKey(ecosystem, name)]
+	return b.sessionAllowed[ecosystem] || b.approvedItems[normalizeItemKey(ecosystem, name)]
 }
 
 // RequestApproval は指定されたエコシステム・パッケージのダウンロード承認を要求する。
@@ -77,6 +159,12 @@ func (b *BatchManager) RequestApprovalItems(ecosystem string, items []BatchItem)
 	}
 
 	b.mu.Lock()
+
+	// 0. この run 中まとめて許可されたエコシステムなら確認しない。
+	if b.sessionAllowed[ecosystem] {
+		b.mu.Unlock()
+		return nil
+	}
 
 	// 1. 未承認の項目のみ抽出
 	var unapproved []BatchItem
@@ -189,7 +277,33 @@ func (b *BatchManager) flushQueue(ecosystem string) {
 }
 
 func (b *BatchManager) executeBatch(q *batchQueue) {
-	err := b.AskBatch(console.BatchDownloadInfo{
+	// 順番待ちのあいだにまとめて許可された、あるいは別の経路で承認された項目は
+	// もう諮らない。承認直後に古いキューがダイアログを出し直すのを防ぐ。
+	b.mu.Lock()
+	if b.sessionAllowed[q.ecosystem] {
+		b.mu.Unlock()
+		for _, ch := range q.waiters {
+			ch <- nil
+		}
+		return
+	}
+	items := q.items[:0]
+	for _, it := range q.items {
+		if !b.approvedItems[normalizeItemKey(q.ecosystem, it.Name)] {
+			items = append(items, it)
+		}
+	}
+	q.items = items
+	if len(q.items) == 0 {
+		b.mu.Unlock()
+		for _, ch := range q.waiters {
+			ch <- nil
+		}
+		return
+	}
+	b.mu.Unlock()
+
+	kind, err := b.AskBatch(console.BatchDownloadInfo{
 		Ecosystem: q.ecosystem,
 		Items:     q.items,
 	})
@@ -199,8 +313,16 @@ func (b *BatchManager) executeBatch(q *batchQueue) {
 		for _, item := range q.items {
 			b.approvedItems[normalizeItemKey(q.ecosystem, item.Name)] = true
 		}
+		if kind == access.Session {
+			b.sessionAllowed[q.ecosystem] = true
+		}
 	}
+	logf := b.Logf
 	b.mu.Unlock()
+
+	if err == nil && kind == access.Session && logf != nil {
+		logf(q.ecosystem + ": この run 中のパッケージ取得をまとめて承認した")
+	}
 
 	for _, ch := range q.waiters {
 		ch <- err

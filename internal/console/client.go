@@ -48,6 +48,16 @@ const (
 	maxSettledHistory = 200
 )
 
+// パッケージ一括取得の承認ボタン。幅からマウスの当たり判定を出すため、
+// 表示と判定で同じ文字列を使う。
+const (
+	batchBtnAllow         = "[y] 承認して取得"
+	batchBtnSession       = "[s] この run 中まとめて許可"
+	batchBtnDeny          = "[n] 拒否"
+	batchBtnMetadataAllow = "[y] この run 中許可"
+	batchBtnMetadataDeny  = "[n] 拒否"
+)
+
 // historyEntry はセッション中に決着した申請の記録。
 type historyEntry struct {
 	ID        int
@@ -364,8 +374,10 @@ func (m model) handleSocketMsg(msg Msg) model {
 		return m.appendLog(msg.Text)
 
 	case "request", "relaxrequest", "clip", "prrequest", "dockerrequest", "batchrequest":
-		for _, q := range m.pending {
+		for i, q := range m.pending {
 			if q.Type == msg.Type && q.ID == msg.ID {
+				// 合流で内容が増えた申請は同じ ID で再送される。表示を差し替える。
+				m.pending[i] = msg
 				return m
 			}
 		}
@@ -445,11 +457,17 @@ func (m model) handleSocketMsg(msg Msg) model {
 					entry.Result = "拒否 (取得しなかった)"
 				}
 			case "batchrequest":
-				entry.Target = fmt.Sprintf("[%s] %d 個のパッケージ", q.BatchEcosystem, len(q.BatchItems))
+				if q.BatchMetadata {
+					entry.Target = fmt.Sprintf("[%s] メタデータ参照", q.BatchEcosystem)
+				} else {
+					entry.Target = fmt.Sprintf("[%s] %d 個のパッケージ", q.BatchEcosystem, len(q.BatchItems))
+				}
 				switch msg.Status {
 				case access.Approved:
-					if msg.Kind == access.Session {
-						entry.Result = "セッション中常に承認"
+					if q.BatchMetadata {
+						entry.Result = "メタデータ参照を許可"
+					} else if msg.Kind == access.Session {
+						entry.Result = "この run 中まとめて承認"
 					} else {
 						entry.Result = "承認して取得した"
 					}
@@ -642,11 +660,24 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.decide(Msg{Type: "dockerdecide", ID: r.ID, Status: access.Denied})
 			}
 		case "batchrequest":
+			if r.BatchMetadata {
+				switch key {
+				case "y", "Y", "1", "s", "S", "2":
+					// メタデータ参照は run 単位の許可しかない。
+					m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Approved, Kind: access.Session, BatchRevision: r.BatchRevision})
+				case "n", "N", "d", "D":
+					m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Denied, BatchRevision: r.BatchRevision})
+				}
+				return m, nil
+			}
 			switch key {
 			case "y", "Y", "1":
-				m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Approved})
+				m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Approved, Kind: access.Once, BatchRevision: r.BatchRevision})
+			case "s", "S", "2":
+				// ダイアログに含まれるエコシステムの取得をこの run 中まとめて許可する。
+				m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Approved, Kind: access.Session, BatchRevision: r.BatchRevision})
 			case "n", "N", "d", "D":
-				m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Denied})
+				m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Denied, BatchRevision: r.BatchRevision})
 			}
 
 		case "relaxrequest":
@@ -962,11 +993,26 @@ func (m model) handlePendingClick(x, y int) (tea.Model, tea.Cmd) {
 			m.decide(Msg{Type: "dockerdecide", ID: r.ID, Status: access.Denied})
 		}
 	case "batchrequest":
-		// [y] 承認して取得    [n] 拒否
-		if x < 24 {
-			m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Approved})
-		} else {
-			m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Denied})
+		if r.BatchMetadata {
+			// [y] この run 中許可    [n] 拒否
+			wAllow := lipgloss.Width(batchBtnMetadataAllow) + 4
+			if x < wAllow {
+				m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Approved, Kind: access.Session, BatchRevision: r.BatchRevision})
+			} else {
+				m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Denied, BatchRevision: r.BatchRevision})
+			}
+			return m, nil
+		}
+		// [y] 承認して取得    [s] この run 中まとめて許可    [n] 拒否
+		wAllow := lipgloss.Width(batchBtnAllow) + 4
+		wSession := wAllow + lipgloss.Width(batchBtnSession) + 4
+		switch {
+		case x < wAllow:
+			m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Approved, Kind: access.Once, BatchRevision: r.BatchRevision})
+		case x < wSession:
+			m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Approved, Kind: access.Session, BatchRevision: r.BatchRevision})
+		default:
+			m.decide(Msg{Type: "batchdecide", ID: r.ID, Status: access.Denied, BatchRevision: r.BatchRevision})
 		}
 
 	case "relaxrequest":
@@ -1233,21 +1279,42 @@ func (m model) renderActionButtons(r Msg, isHoverRow bool) string {
 		return strY + "    " + strN
 
 	case "batchrequest":
-		// [y] 承認して取得    [n] 拒否
-		btnY := "[y] 承認して取得"
-		btnN := "[n] 拒否"
-		var strY, strN string
-		if isHoverRow && m.mouseX < 24 {
-			strY = styleBtnHoverSuccess.Render(btnY)
-		} else {
-			strY = styleKey.Render(btnY)
+		if r.BatchMetadata {
+			// [y] この run 中許可    [n] 拒否
+			wAllow := lipgloss.Width(batchBtnMetadataAllow) + 4
+			var strY, strN string
+			if isHoverRow && m.mouseX < wAllow {
+				strY = styleBtnHoverSuccess.Render(batchBtnMetadataAllow)
+			} else {
+				strY = styleKey.Render(batchBtnMetadataAllow)
+			}
+			if isHoverRow && m.mouseX >= wAllow {
+				strN = styleBtnHoverDanger.Render(batchBtnMetadataDeny)
+			} else {
+				strN = styleKey.Render(batchBtnMetadataDeny)
+			}
+			return strY + "    " + strN
 		}
-		if isHoverRow && m.mouseX >= 24 {
-			strN = styleBtnHoverDanger.Render(btnN)
+		// [y] 承認して取得    [s] この run 中まとめて許可    [n] 拒否
+		wAllow := lipgloss.Width(batchBtnAllow) + 4
+		wSession := wAllow + lipgloss.Width(batchBtnSession) + 4
+		var strY, strS, strN string
+		if isHoverRow && m.mouseX < wAllow {
+			strY = styleBtnHoverSuccess.Render(batchBtnAllow)
 		} else {
-			strN = styleKey.Render(btnN)
+			strY = styleKey.Render(batchBtnAllow)
 		}
-		return strY + "    " + strN
+		if isHoverRow && m.mouseX >= wAllow && m.mouseX < wSession {
+			strS = styleBtnHoverSuccess.Render(batchBtnSession)
+		} else {
+			strS = styleKey.Render(batchBtnSession)
+		}
+		if isHoverRow && m.mouseX >= wSession {
+			strN = styleBtnHoverDanger.Render(batchBtnDeny)
+		} else {
+			strN = styleKey.Render(batchBtnDeny)
+		}
+		return strY + "    " + strS + "    " + strN
 
 	case "relaxrequest":
 		// [1] 今回のみ (5分)    [2] セッション許可    [d] 拒否    [q] 質問を返す
@@ -1347,7 +1414,11 @@ func (m model) renderPendingTab(availHeight int) string {
 	case "dockerrequest":
 		cardHeader = fmt.Sprintf(styleBadge.Foreground(colCyan).Render("━━ Docker イメージ取得承認 #%d ━━ 期限: %s"), r.ID, Sanitize(r.Deadline))
 	case "batchrequest":
-		cardHeader = fmt.Sprintf(styleBadge.Foreground(colCyan).Render("━━ パッケージ一括取得承認 (%s) #%d ━━ 期限: %s"), r.BatchEcosystem, r.ID, Sanitize(r.Deadline))
+		if r.BatchMetadata {
+			cardHeader = fmt.Sprintf(styleBadge.Foreground(colCyan).Render("━━ メタデータ参照の承認 (%s) #%d ━━ 期限: %s"), r.BatchEcosystem, r.ID, Sanitize(r.Deadline))
+		} else {
+			cardHeader = fmt.Sprintf(styleBadge.Foreground(colCyan).Render("━━ パッケージ一括取得承認 (%s) #%d ━━ 期限: %s"), r.BatchEcosystem, r.ID, Sanitize(r.Deadline))
+		}
 	case "relaxrequest":
 		cardHeader = fmt.Sprintf(styleBadge.Foreground(colMagenta).Render("━━ HTTP緩和申請 #%d ━━ 期限: %s"), r.ID, Sanitize(r.Deadline))
 	default:
@@ -1370,17 +1441,25 @@ func (m model) renderPendingTab(availHeight int) string {
 		sb.WriteString(fmt.Sprintf("%s %s\n", styleLabel.Render("タグ/参照:"), Sanitize(r.DockerReference)))
 
 	case "batchrequest":
+		if r.BatchMetadata {
+			sb.WriteString(fmt.Sprintf("%s %s\n", styleLabel.Render("エコシステム:"), Sanitize(r.BatchEcosystem)))
+			sb.WriteString("依存関係を解決するため、上流レジストリへパッケージ情報を問い合わせます。\n")
+			sb.WriteString("取得したパッケージ名は承認コンソールのログに残ります。\n")
+			sb.WriteString("許可すると、この run のあいだ同じエコシステムのメタデータ参照を確認なしで行います。\n")
+			break
+		}
 		sb.WriteString(fmt.Sprintf("%s %s (%d 個)\n", styleLabel.Render("エコシステム:"), Sanitize(r.BatchEcosystem), len(r.BatchItems)))
 		sb.WriteString(fmt.Sprintf("%s\n", styleLabel.Render("対象パッケージ:")))
-		for i, item := range r.BatchItems {
-			if i >= 10 {
-				sb.WriteString(fmt.Sprintf("    ... 他 %d 個\n", len(r.BatchItems)-10))
-				break
+		mixed := strings.Contains(r.BatchEcosystem, ", ")
+		for _, item := range r.BatchItems {
+			prefix := ""
+			if mixed && item.Ecosystem != "" {
+				prefix = "[" + Sanitize(item.Ecosystem) + "] "
 			}
 			if item.Version != "" {
-				sb.WriteString(fmt.Sprintf("    - %s (%s)\n", Sanitize(item.Name), Sanitize(item.Version)))
+				sb.WriteString(fmt.Sprintf("    - %s%s (%s)\n", prefix, Sanitize(item.Name), Sanitize(item.Version)))
 			} else {
-				sb.WriteString(fmt.Sprintf("    - %s\n", Sanitize(item.Name)))
+				sb.WriteString(fmt.Sprintf("    - %s%s\n", prefix, Sanitize(item.Name)))
 			}
 		}
 
@@ -1528,7 +1607,8 @@ func (m model) renderHelpModal(availHeight int) string {
 	sb.WriteString("↑ / ↓ / j / k     キュー/履歴選択、ログスクロール\n")
 	sb.WriteString("g / G             ログの先頭/末尾(最新)へジャンプ\n")
 	sb.WriteString("1, 2, 3, d, q     承認待ちの判断アクション\n")
-	sb.WriteString("y / n             クリップボード/PRの許可・拒否\n")
+	sb.WriteString("y / n             クリップボード/PR/Docker の許可・拒否\n")
+	sb.WriteString("s                 パッケージをこの run 中まとめて許可\n")
 	sb.WriteString("r                 hub のアクセス URL を再発行\n")
 	sb.WriteString("Q / Ctrl+C        VM を破棄して終了確認\n\n")
 	sb.WriteString(styleDim("任意のキーまたは Esc で閉じる"))

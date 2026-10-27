@@ -204,11 +204,16 @@ func TestAskBatchDownload(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	type batchAnswer struct {
+		kind access.Kind
+		err  error
+	}
 	var lastID int
-	ask := func(info BatchDownloadInfo) (chan error, Msg) {
-		resCh := make(chan error, 1)
+	ask := func(info BatchDownloadInfo) (chan batchAnswer, Msg) {
+		resCh := make(chan batchAnswer, 1)
 		go func() {
-			resCh <- s.AskBatchDownload(info)
+			kind, err := s.AskBatchDownload(info)
+			resCh <- batchAnswer{kind: kind, err: err}
 		}()
 		for {
 			_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
@@ -231,11 +236,11 @@ func TestAskBatchDownload(t *testing.T) {
 	if req.BatchEcosystem != "cargo" || len(req.BatchItems) != 1 || req.BatchItems[0].Name != "serde" {
 		t.Fatalf("バッチリクエスト内容が違う: %+v", req)
 	}
-	if err := enc.Encode(Msg{Type: "batchdecide", ID: req.ID, Status: access.Approved}); err != nil {
+	if err := enc.Encode(Msg{Type: "batchdecide", ID: req.ID, Status: access.Approved, Kind: access.Once, BatchRevision: req.BatchRevision}); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-resCh; err != nil {
-		t.Fatalf("承認期待だが got err=%v", err)
+	if ans := <-resCh; ans.err != nil || ans.kind != access.Once {
+		t.Fatalf("承認期待だが got kind=%q err=%v", ans.kind, ans.err)
 	}
 
 	// 2. 拒否 (access.Denied)
@@ -243,10 +248,107 @@ func TestAskBatchDownload(t *testing.T) {
 		Ecosystem: "pypi",
 		Items:     []BatchItem{{Ecosystem: "pypi", Name: "malicious-pkg", Version: "0.1.0"}},
 	})
-	if err := enc.Encode(Msg{Type: "batchdecide", ID: req.ID, Status: access.Denied}); err != nil {
+	if err := enc.Encode(Msg{Type: "batchdecide", ID: req.ID, Status: access.Denied, BatchRevision: req.BatchRevision}); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-resCh; err == nil {
+	if ans := <-resCh; ans.err == nil {
+		t.Fatal("拒否したのに nil が返った")
+	}
+}
+
+// TestAskBatchDownloadMergesAndSessions は、未決のダイアログに後続の取得が
+// 合流して 1 枚にまとまることと、session 承認が呼び出し側へ伝わることを確かめる。
+func TestAskBatchDownloadMergesAndSessions(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "console-batch-merge.sock")
+	m, err := access.NewManager(noApply{}, filepath.Join(t.TempDir(), "always.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(m, sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+
+	c, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	enc, dec := json.NewEncoder(c), json.NewDecoder(c)
+	if err := enc.Encode(Msg{Type: "ui"}); err != nil {
+		t.Fatal(err)
+	}
+
+	type batchAnswer struct {
+		kind access.Kind
+		err  error
+	}
+	fast := func(ecosystem, name string) chan batchAnswer {
+		resCh := make(chan batchAnswer, 1)
+		go func() {
+			kind, err := s.AskBatchDownload(BatchDownloadInfo{
+				Ecosystem: ecosystem,
+				Items:     []BatchItem{{Ecosystem: ecosystem, Name: name}},
+			})
+			resCh <- batchAnswer{kind: kind, err: err}
+		}()
+		return resCh
+	}
+	readRequest := func() Msg {
+		for {
+			_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+			var msg Msg
+			if err := dec.Decode(&msg); err != nil {
+				t.Fatal(err)
+			}
+			if msg.Type == "batchrequest" {
+				return msg
+			}
+		}
+	}
+
+	// 1 つ目 (cargo) が未決のまま、2 つ目 (npm) を送る。
+	first := fast("cargo", "serde")
+	req := readRequest()
+	if req.Type != "batchrequest" || req.BatchEcosystem != "cargo" {
+		t.Fatalf("1 枚目の内容が違う: %+v", req)
+	}
+	second := fast("npm", "express")
+	merged := readRequest()
+	for merged.ID == req.ID && merged.BatchRevision <= req.BatchRevision {
+		merged = readRequest()
+	}
+	if merged.ID != req.ID {
+		t.Fatalf("合流したら同じ ID のはず: first=%d merged=%d", req.ID, merged.ID)
+	}
+	if merged.BatchEcosystem != "cargo, npm" {
+		t.Fatalf("エコシステムがまとまっていない: %+v", merged.BatchEcosystem)
+	}
+	if len(merged.BatchItems) != 2 {
+		t.Fatalf("項目が合流していない: %+v", merged.BatchItems)
+	}
+
+	// 1 回の判断で両方の待ち手が返る。session はまとめて許可として伝わる。
+	if err := enc.Encode(Msg{Type: "batchdecide", ID: req.ID, Status: access.Approved, Kind: access.Session, BatchRevision: merged.BatchRevision}); err != nil {
+		t.Fatal(err)
+	}
+	for _, resCh := range []chan batchAnswer{first, second} {
+		if ans := <-resCh; ans.err != nil || ans.kind != access.Session {
+			t.Fatalf("session 承認が伝わっていない: kind=%q err=%v", ans.kind, ans.err)
+		}
+	}
+
+	// 決着後は新しいダイアログになり、ID が進む。
+	third := fast("go", "example.com/pkg")
+	next := readRequest()
+	if next.ID <= req.ID {
+		t.Fatalf("決着後の ID が進んでいない: %d", next.ID)
+	}
+	if err := enc.Encode(Msg{Type: "batchdecide", ID: next.ID, Status: access.Denied, BatchRevision: next.BatchRevision}); err != nil {
+		t.Fatal(err)
+	}
+	if ans := <-third; ans.err == nil {
 		t.Fatal("拒否したのに nil が返った")
 	}
 }
@@ -610,6 +712,7 @@ func TestTUIModelDecisions(t *testing.T) {
 		Type:           "batchrequest",
 		ID:             4,
 		BatchEcosystem: "cargo",
+		BatchRevision:  1,
 		BatchItems:     []BatchItem{{Ecosystem: "cargo", Name: "serde", Version: "1.0.197"}},
 	}))
 	m = newM.(model)
@@ -617,13 +720,35 @@ func TestTUIModelDecisions(t *testing.T) {
 	m = newM.(model)
 	select {
 	case out := <-m.outChan:
-		if out.Type != "batchdecide" || out.Status != access.Approved {
+		if out.Type != "batchdecide" || out.Status != access.Approved || out.Kind != access.Once {
 			t.Errorf("expected Approved batchdecide with key '1', got %+v", out)
 		}
 	default:
 		t.Fatal("expected batchdecide on outChan")
 	}
-	newM, _ = m.Update(socketMsg(Msg{Type: "batchsettled", ID: 4, Status: access.Approved}))
+	newM, _ = m.Update(socketMsg(Msg{Type: "batchsettled", ID: 4, Status: access.Approved, Kind: access.Once}))
+	m = newM.(model)
+
+	// 3.7 batchrequest に s で「この run 中まとめて許可」
+	newM, _ = m.Update(socketMsg(Msg{
+		Type:           "batchrequest",
+		ID:             5,
+		BatchEcosystem: "go",
+		BatchRevision:  1,
+		BatchItems:     []BatchItem{{Ecosystem: "go", Name: "example.com/a"}},
+	}))
+	m = newM.(model)
+	newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = newM.(model)
+	select {
+	case out := <-m.outChan:
+		if out.Type != "batchdecide" || out.Status != access.Approved || out.Kind != access.Session {
+			t.Errorf("expected Session batchdecide with key 's', got %+v", out)
+		}
+	default:
+		t.Fatal("expected batchdecide on outChan")
+	}
+	newM, _ = m.Update(socketMsg(Msg{Type: "batchsettled", ID: 5, Status: access.Approved, Kind: access.Session}))
 	m = newM.(model)
 
 	// 4. request 申請と決定 (1, 2, 3, d, q)
@@ -807,14 +932,14 @@ func TestRelaxationConsoleIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// UI に relaxrequest が届くのを待つ
+	// UI に relaxrequest が届くのを待つ。Decode のタイムアウト後に
+	// 同じ Decoder を続けて使うと壊れるので、期限は 1 回だけ設定する。
 	var reqMsg Msg
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		_ = c.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for {
 		var msg Msg
 		if err := dec.Decode(&msg); err != nil {
-			continue
+			break
 		}
 		if msg.Type == "relaxrequest" && msg.ID == relReq.ID {
 			reqMsg = msg
@@ -830,14 +955,13 @@ func TestRelaxationConsoleIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// UI に relaxsettled が届くのを待つ
+	// UI に relaxsettled が届くのを待つ。
 	var settledMsg Msg
-	deadline = time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		_ = c.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for {
 		var msg Msg
 		if err := dec.Decode(&msg); err != nil {
-			continue
+			break
 		}
 		if msg.Type == "relaxsettled" && msg.ID == relReq.ID {
 			settledMsg = msg
@@ -1179,34 +1303,59 @@ func TestTUIModelMouseDecisions(t *testing.T) {
 		Type:           "batchrequest",
 		ID:             12,
 		BatchEcosystem: "pypi",
+		BatchRevision:  1,
 		BatchItems:     []BatchItem{{Ecosystem: "pypi", Name: "jupyterlab", Version: "4.6.4"}},
 	}))
 	m = newM.(model)
 
-	// [y] 承認して取得 (X < 24)
+	// [y] 承認して取得 (左端)
 	newM, _ = m.Update(tea.MouseMsg{X: 10, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = newM.(model)
 	select {
 	case out := <-m.outChan:
-		if out.Type != "batchdecide" || out.Status != access.Approved {
+		if out.Type != "batchdecide" || out.Status != access.Approved || out.Kind != access.Once {
 			t.Errorf("expected batchdecide Approved on mouse click, got %+v", out)
 		}
 	default:
 		t.Fatal("expected batchdecide on outChan after mouse click")
 	}
 
-	newM, _ = m.Update(socketMsg(Msg{Type: "batchsettled", ID: 12, Status: access.Approved}))
+	newM, _ = m.Update(socketMsg(Msg{Type: "batchsettled", ID: 12, Status: access.Approved, Kind: access.Once}))
 	m = newM.(model)
 
-	// [n] 拒否 (X >= 24)
+	// [s] この run 中まとめて許可 (中央)
+	newM, _ = m.Update(socketMsg(Msg{
+		Type:           "batchrequest",
+		ID:             13,
+		BatchEcosystem: "cargo",
+		BatchRevision:  1,
+		BatchItems:     []BatchItem{{Ecosystem: "cargo", Name: "serde", Version: "1.0.197"}},
+	}))
+	m = newM.(model)
+	newM, _ = m.Update(tea.MouseMsg{X: 30, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = newM.(model)
+	select {
+	case out := <-m.outChan:
+		if out.Type != "batchdecide" || out.Status != access.Approved || out.Kind != access.Session {
+			t.Errorf("expected batchdecide Session on mouse click, got %+v", out)
+		}
+	default:
+		t.Fatal("expected batchdecide on outChan after mouse click")
+	}
+
+	newM, _ = m.Update(socketMsg(Msg{Type: "batchsettled", ID: 13, Status: access.Approved, Kind: access.Session}))
+	m = newM.(model)
+
+	// [n] 拒否 (右端)
 	newM, _ = m.Update(socketMsg(Msg{
 		Type:           "batchrequest",
 		ID:             14,
 		BatchEcosystem: "pypi",
+		BatchRevision:  1,
 		BatchItems:     []BatchItem{{Ecosystem: "pypi", Name: "jupyterlab", Version: "4.6.4"}},
 	}))
 	m = newM.(model)
-	newM, _ = m.Update(tea.MouseMsg{X: 45, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	newM, _ = m.Update(tea.MouseMsg{X: 70, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = newM.(model)
 	select {
 	case out := <-m.outChan:
@@ -1379,5 +1528,262 @@ func TestSanitizeBidiControls(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("Sanitize に %s が無い: %q", want, got)
 		}
+	}
+}
+
+// TestAskBatchDownloadRejectsStaleRevision は、合流で一覧が更新された後に
+// 古い版の承認が届いても決着しないことを確かめる。
+func TestAskBatchDownloadRejectsStaleRevision(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "console-batch-revision.sock")
+	m, err := access.NewManager(noApply{}, filepath.Join(t.TempDir(), "always.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(m, sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+
+	c, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	enc, dec := json.NewEncoder(c), json.NewDecoder(c)
+	if err := enc.Encode(Msg{Type: "ui"}); err != nil {
+		t.Fatal(err)
+	}
+
+	type answer struct {
+		kind access.Kind
+		err  error
+	}
+	start := func(name string) chan answer {
+		ch := make(chan answer, 1)
+		go func() {
+			kind, err := s.AskBatchDownload(BatchDownloadInfo{
+				Ecosystem: "npm",
+				Items:     []BatchItem{{Ecosystem: "npm", Name: name}},
+			})
+			ch <- answer{kind: kind, err: err}
+		}()
+		return ch
+	}
+	read := func() Msg {
+		for {
+			_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+			var msg Msg
+			if err := dec.Decode(&msg); err != nil {
+				t.Fatal(err)
+			}
+			if msg.Type == "batchrequest" {
+				return msg
+			}
+		}
+	}
+
+	firstCh := start("pkg-a")
+	first := read()
+	secondCh := start("pkg-b")
+	merged := read()
+	for merged.ID == first.ID && merged.BatchRevision <= first.BatchRevision {
+		merged = read()
+	}
+	if merged.ID != first.ID || merged.BatchRevision <= first.BatchRevision {
+		t.Fatalf("合流で版が進んでいない: first=%+v merged=%+v", first, merged)
+	}
+
+	// 1 枚目を見た時点の版で承認する。合流後の内容は通してはならない。
+	if err := enc.Encode(Msg{
+		Type: "batchdecide", ID: first.ID, Status: access.Approved,
+		Kind: access.Once, BatchRevision: first.BatchRevision,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-firstCh:
+		t.Fatal("古い版の承認で決着した")
+	case <-secondCh:
+		t.Fatal("古い版の承認で後着項目まで決着した")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// 最新の版なら決着する。
+	if err := enc.Encode(Msg{
+		Type: "batchdecide", ID: merged.ID, Status: access.Approved,
+		Kind: access.Once, BatchRevision: merged.BatchRevision,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, ch := range []chan answer{firstCh, secondCh} {
+		select {
+		case ans := <-ch:
+			if ans.err != nil {
+				t.Fatalf("承認期待だが got %v", ans.err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("最新の版で決着しない")
+		}
+	}
+}
+
+// TestAskBatchDownloadMetadata は、メタデータ参照の許可が run 単位の Session として
+// 返り、パッケージ項目を持たないことを確かめる。
+func TestAskBatchDownloadMetadata(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "console-batch-metadata.sock")
+	m, err := access.NewManager(noApply{}, filepath.Join(t.TempDir(), "always.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(m, sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+
+	c, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	enc, dec := json.NewEncoder(c), json.NewDecoder(c)
+	if err := enc.Encode(Msg{Type: "ui"}); err != nil {
+		t.Fatal(err)
+	}
+
+	resCh := make(chan error, 1)
+	var kind access.Kind
+	go func() {
+		k, err := s.AskBatchDownload(BatchDownloadInfo{Metadata: true, Ecosystem: "npm"})
+		kind = k
+		resCh <- err
+	}()
+	var req Msg
+	for {
+		_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+		if err := dec.Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.Type == "batchrequest" {
+			break
+		}
+	}
+	if !req.BatchMetadata || req.BatchEcosystem != "npm" || len(req.BatchItems) != 0 {
+		t.Fatalf("メタデータ要求の内容が違う: %+v", req)
+	}
+	if err := enc.Encode(Msg{Type: "batchdecide", ID: req.ID, Status: access.Approved, Kind: access.Once, BatchRevision: req.BatchRevision}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-resCh; err != nil {
+		t.Fatalf("承認期待だが got %v", err)
+	}
+	if kind != access.Session {
+		t.Fatalf("メタデータ参照は Session で返るべき: %q", kind)
+	}
+}
+
+// TestAskBatchDownloadSplitsReviewBatches は、11 件以上の要求が 1 枚 10 件までに
+// 分かれ、1 枚ずつ判断できることを確かめる。
+func TestAskBatchDownloadSplitsReviewBatches(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "console-batch-split.sock")
+	m, err := access.NewManager(noApply{}, filepath.Join(t.TempDir(), "always.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(m, sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+
+	c, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	enc, dec := json.NewEncoder(c), json.NewDecoder(c)
+	if err := enc.Encode(Msg{Type: "ui"}); err != nil {
+		t.Fatal(err)
+	}
+
+	items := make([]BatchItem, 11)
+	for i := range items {
+		items[i] = BatchItem{Ecosystem: "npm", Name: fmt.Sprintf("pkg-%02d", i)}
+	}
+	resCh := make(chan error, 1)
+	var kind access.Kind
+	go func() {
+		k, err := s.AskBatchDownload(BatchDownloadInfo{Ecosystem: "npm", Items: items})
+		kind = k
+		resCh <- err
+	}()
+
+	read := func() Msg {
+		for {
+			_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+			var msg Msg
+			if err := dec.Decode(&msg); err != nil {
+				t.Fatal(err)
+			}
+			if msg.Type == "batchrequest" {
+				return msg
+			}
+		}
+	}
+	first := read()
+	if len(first.BatchItems) != maxBatchReview {
+		t.Fatalf("1 枚目の件数が違う: %d", len(first.BatchItems))
+	}
+	if err := enc.Encode(Msg{Type: "batchdecide", ID: first.ID, Status: access.Approved, Kind: access.Once, BatchRevision: first.BatchRevision}); err != nil {
+		t.Fatal(err)
+	}
+	second := read()
+	for second.ID == first.ID {
+		// 登録直後の pending 送信と broadcast が重なると同じ要求が 2 回届く。
+		second = read()
+	}
+	if len(second.BatchItems) != 1 {
+		t.Fatalf("2 枚目の件数が違う: %d", len(second.BatchItems))
+	}
+	if err := enc.Encode(Msg{Type: "batchdecide", ID: second.ID, Status: access.Approved, Kind: access.Once, BatchRevision: second.BatchRevision}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-resCh; err != nil {
+		t.Fatalf("承認期待だが got %v", err)
+	}
+	if kind != access.Once {
+		t.Fatalf("Once で返るべき: %q", kind)
+	}
+}
+
+// TestTUIModelBatchMetadata は、メタデータ参照の専用カードとショートカットを
+// 確かめる。
+func TestTUIModelBatchMetadata(t *testing.T) {
+	m := newModel("test.sock")
+	newM, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	m = newM.(model)
+
+	newM, _ = m.Update(socketMsg(Msg{
+		Type:           "batchrequest",
+		ID:             1,
+		BatchEcosystem: "npm",
+		BatchMetadata:  true,
+		BatchRevision:  1,
+	}))
+	m = newM.(model)
+	if view := m.View(); !strings.Contains(view, "メタデータ参照の承認") {
+		t.Fatalf("メタデータ参照のカードが出ていない: %s", view)
+	}
+
+	newM, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m = newM.(model)
+	select {
+	case out := <-m.outChan:
+		if out.Type != "batchdecide" || out.Status != access.Approved || out.Kind != access.Session || out.BatchRevision != 1 {
+			t.Errorf("expected metadata batchdecide Session rev=1, got %+v", out)
+		}
+	default:
+		t.Fatal("expected batchdecide on outChan")
 	}
 }

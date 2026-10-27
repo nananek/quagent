@@ -65,6 +65,8 @@ type pypiJSONResponse struct {
 type PyPIResolver struct {
 	Client  *http.Client
 	BaseURL string // テスト用 (既定: "https://pypi.org")
+	// Logf は上流へ問い合わせるパッケージ名を記録する (nil なら記録しない)。
+	Logf func(string)
 
 	cacheMu sync.RWMutex
 	cache   map[string][]string // pkgName -> direct dependencies
@@ -179,6 +181,10 @@ func (r *PyPIResolver) fetchDirectDeps(ctx context.Context, pkg string) ([]strin
 	r.cacheMu.RUnlock()
 	if ok {
 		return cached, nil
+	}
+
+	if r.Logf != nil {
+		r.Logf(norm)
 	}
 
 	url := fmt.Sprintf("%s/pypi/%s/json", r.BaseURL, norm)

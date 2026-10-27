@@ -272,6 +272,9 @@
 
   function makeCard(key, msg, title) {
     clearEmpty();
+    // 合流で内容が増えた申請は同じ key で再送される。古いカードを差し替える。
+    const old = cards.get(key);
+    if (old) old.remove();
     const card = el("div", "card");
     card.appendChild(el("h3", null, title));
     listEl.prepend(card);
@@ -290,10 +293,11 @@
     return b;
   }
 
-  function decide(type, id, status, kind, question) {
+  function decide(type, id, status, kind, question, revision) {
     const body = { type: type, id: id, status: status };
     if (kind) body.kind = kind;
     if (question) body.question = question;
+    if (revision) body.batch_revision = revision;
     consoleWS.send(JSON.stringify(body));
   }
 
@@ -312,6 +316,7 @@
       case "dockerrequest":
         return (m.docker_registry || "") + "/" + (m.docker_repository || "") + ":" + (m.docker_reference || "");
       case "batchrequest":
+        if (m.batch_metadata) return "[" + (m.batch_ecosystem || "") + "] メタデータ参照";
         return "[" + (m.batch_ecosystem || "") + "] " + ((m.batch_items || []).length) + " 個のパッケージ";
       case "clip":
         return "クリップボード (" + (m.size || 0) + " バイト)";
@@ -325,7 +330,9 @@
       switch (m.type) {
         case "prrequest": return "承認して push した";
         case "dockerrequest": return "承認して取得した";
-        case "batchrequest": return s.kind === "session" ? "セッション中常に承認" : "承認して取得した";
+        case "batchrequest":
+          if (m.batch_metadata) return "メタデータ参照を許可した";
+          return s.kind === "session" ? "この run 中まとめて承認" : "承認して取得した";
         case "clip": return s.text || "コピーを許可した";
         default: return "許可" + (kind ? " (" + kind + ")" : "");
       }
@@ -435,14 +442,24 @@
       case "batchrequest": {
         const key = "batch:" + m.id;
         const n = (m.batch_items || []).length;
+        if (m.batch_metadata) {
+          const card = makeCard(key, m, "メタデータ参照の許可 (" + (m.batch_ecosystem || "") + ")");
+          card.appendChild(el("div", "reason",
+            "依存関係の解決のため、上流レジストリへパッケージ情報を問い合わせます。取得した名前はログに残ります。"));
+          card.appendChild(el("div", "row"));
+          button(card, "この run 中許可", "primary", () => decide("batchdecide", m.id, "approved", "session", null, m.batch_revision));
+          button(card, "拒否", "danger", () => decide("batchdecide", m.id, "denied", null, null, m.batch_revision));
+          break;
+        }
         const card = makeCard(key, m, "パッケージの一括取得 (" + (m.batch_ecosystem || "") + ", " + n + " 件)");
         if (n) {
-          const names = m.batch_items.slice(0, 20).map((i) => i.name + (i.version ? "@" + i.version : "")).join(", ");
-          card.appendChild(el("div", "reason", names + (n > 20 ? " …" : "")));
+          const names = m.batch_items.map((i) => i.name + (i.version ? "@" + i.version : "")).join(", ");
+          card.appendChild(el("div", "reason", names));
         }
         card.appendChild(el("div", "row"));
-        button(card, "取得", "primary", () => decide("batchdecide", m.id, "approved"));
-        button(card, "拒否", "danger", () => decide("batchdecide", m.id, "denied"));
+        button(card, "取得", "primary", () => decide("batchdecide", m.id, "approved", "once", null, m.batch_revision));
+        button(card, "この run 中まとめて許可", null, () => decide("batchdecide", m.id, "approved", "session", null, m.batch_revision));
+        button(card, "拒否", "danger", () => decide("batchdecide", m.id, "denied", null, null, m.batch_revision));
         break;
       }
       case "clip": {
