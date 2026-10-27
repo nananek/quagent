@@ -275,6 +275,89 @@ func TestCtlEventLine(t *testing.T) {
 	}
 }
 
+func TestCtlDecideSanitizesQuestion(t *testing.T) {
+	runs := setupRunsDir(t)
+	work := makeRunDir(t, runs, "20261028-153012-aaaaaa", &runMeta{ID: "20261028-153012"})
+	got := startFakeConsole(t, work, func(enc *json.Encoder) {
+		_ = enc.Encode(console.Msg{Type: "request", ID: 3, Domains: []string{"pypi.org"}})
+	})
+	q := "answer \x1b[2J \u202e spoof"
+	if err := ctlDecide([]string{"--run", "20261028-153012", "--kind", "network",
+		"--question", q, "3", "question"}); err != nil {
+		t.Fatalf("ctlDecide: %v", err)
+	}
+	select {
+	case m := <-got:
+		if strings.ContainsAny(m.Question, "\x1b\u202e") {
+			t.Fatalf("question に制御文字/Bidi が残っている: %q", m.Question)
+		}
+		if !strings.Contains(m.Question, `\u001b`) || !strings.Contains(m.Question, `\u202e`) {
+			t.Fatalf("question が sanitize されていない: %q", m.Question)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("判断が届かない")
+	}
+}
+
+func TestCtlWatchJSONSanitizesReason(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writeCtlEvent(&buf, true, "20261028-153012", console.Msg{
+		Type: "request", ID: 3, Domains: []string{"pypi.org"},
+		Reason: "pip install \u202e evil",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(buf.Bytes(), []byte("\u202e")) {
+		t.Fatalf("JSON に Bidi 制御文字が生で出ている: %q", buf.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	reason, _ := got["reason"].(string)
+	if !strings.Contains(reason, `\u202e`) {
+		t.Fatalf("reason が sanitize されていない: %q", reason)
+	}
+}
+
+func TestLogCtlDecisionSingleLine(t *testing.T) {
+	work := t.TempDir()
+	t.Setenv("QUAGENT_CTL_ACTOR", "alice\n2026-10-28 15:00:00 ctl decide kind=network id=99 status=approved")
+	if err := logCtlDecision(work, "network", 3, access.Denied, access.Once); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(work, "host.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lines := strings.Count(string(b), "\n"); lines != 1 {
+		t.Fatalf("host.log が %d 行: %q", lines, b)
+	}
+	if !strings.Contains(string(b), `actor=alice\n2026-10-28`) {
+		t.Fatalf("actor の改行がエスケープされていない: %q", b)
+	}
+}
+
+func TestCtlDecideFailsWhenAuditUnavailable(t *testing.T) {
+	runs := setupRunsDir(t)
+	work := makeRunDir(t, runs, "20261028-153012-aaaaaa", &runMeta{ID: "20261028-153012"})
+	got := startFakeConsole(t, work, func(enc *json.Encoder) {
+		_ = enc.Encode(console.Msg{Type: "request", ID: 3, Domains: []string{"pypi.org"}})
+	})
+	if err := os.Mkdir(filepath.Join(work, "host.log"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := ctlDecide([]string{"--run", "20261028-153012", "--kind", "network", "3", "allow"})
+	if code := ctlExitCode(err); code != 1 {
+		t.Fatalf("exit code = %d (%v), want 1", code, err)
+	}
+	select {
+	case m := <-got:
+		t.Fatalf("監査ログを書けないのに判断を送った: %+v", m)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
 func TestParseCtlEvents(t *testing.T) {
 	events, err := parseCtlEvents(ctlDefaultEvents)
 	if err != nil {

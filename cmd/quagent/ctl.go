@@ -190,7 +190,7 @@ func resolveRun(explicit string) (runEntry, error) {
 func runCandidates(runs []runEntry) string {
 	var b strings.Builder
 	for _, r := range runs {
-		fmt.Fprintf(&b, "  %s", r.ID)
+		fmt.Fprintf(&b, "  %s", console.Sanitize(r.ID))
 		if r.Meta.Repo != "" {
 			fmt.Fprintf(&b, "  %s", console.Sanitize(r.Meta.Repo))
 		}
@@ -236,7 +236,7 @@ func ctlList(w io.Writer, args []string) error {
 		if r.Alive {
 			status = "alive"
 		}
-		fmt.Fprintf(w, "%s  %s", r.ID, status)
+		fmt.Fprintf(w, "%s  %s", console.Sanitize(r.ID), status)
 		if r.Meta.Repo != "" {
 			fmt.Fprintf(w, "  repo=%s", console.Sanitize(r.Meta.Repo))
 		}
@@ -356,10 +356,54 @@ type ctlEvent struct {
 
 func writeCtlEvent(w io.Writer, jsonOut bool, run string, m console.Msg) error {
 	if jsonOut {
-		return json.NewEncoder(w).Encode(ctlEvent{Msg: m, Run: run})
+		return json.NewEncoder(w).Encode(ctlEvent{Msg: sanitizeEvent(m), Run: run})
 	}
 	_, err := fmt.Fprintln(w, ctlEventLine(m))
 	return err
+}
+
+// sanitizeEvent は JSON に出す前に、VM 側が決められる文字列を Sanitize する。
+// body は仕様どおり --json のときだけ生のまま残す (下流で表示するときは
+// エスケープが必要)。
+func sanitizeEvent(m console.Msg) console.Msg {
+	m.Domains = sanitizeStrings(m.Domains)
+	m.Reason = console.Sanitize(m.Reason)
+	m.Deadline = console.Sanitize(m.Deadline)
+	m.Question = console.Sanitize(m.Question)
+	m.Text = console.Sanitize(m.Text)
+	m.URL = console.Sanitize(m.URL)
+	m.Error = console.Sanitize(m.Error)
+	m.Branch = console.Sanitize(m.Branch)
+	m.Base = console.Sanitize(m.Base)
+	m.Title = console.Sanitize(m.Title)
+	m.RelaxHost = console.Sanitize(m.RelaxHost)
+	m.RelaxHeaders = sanitizeStrings(m.RelaxHeaders)
+	m.RelaxMethods = sanitizeStrings(m.RelaxMethods)
+	m.DockerRegistry = console.Sanitize(m.DockerRegistry)
+	m.DockerRepository = console.Sanitize(m.DockerRepository)
+	m.DockerReference = console.Sanitize(m.DockerReference)
+	m.BatchEcosystem = console.Sanitize(m.BatchEcosystem)
+	if len(m.BatchItems) > 0 {
+		items := make([]console.BatchItem, len(m.BatchItems))
+		copy(items, m.BatchItems)
+		for i := range items {
+			items[i].Name = console.Sanitize(items[i].Name)
+			items[i].Version = console.Sanitize(items[i].Version)
+		}
+		m.BatchItems = items
+	}
+	return m
+}
+
+func sanitizeStrings(in []string) []string {
+	if len(in) == 0 {
+		return in
+	}
+	out := make([]string, len(in))
+	for i, s := range in {
+		out[i] = console.Sanitize(s)
+	}
+	return out
 }
 
 // ctlEventLine は人間向けの 1 行。VM 側が決められる文字列は Sanitize を通す。
@@ -367,7 +411,7 @@ func writeCtlEvent(w io.Writer, jsonOut bool, run string, m console.Msg) error {
 func ctlEventLine(m console.Msg) string {
 	now := func() string {
 		if m.Deadline != "" {
-			return m.Deadline
+			return console.Sanitize(m.Deadline)
 		}
 		return time.Now().Format("15:04:05")
 	}
@@ -403,7 +447,7 @@ func ctlEventLine(m console.Msg) string {
 		return fmt.Sprintf("[%s] %sid=%d  %s  %s", now(), kind("batch"), m.ID,
 			console.Sanitize(m.BatchEcosystem), strings.Join(names, " "))
 	case "settled", "relaxsettled", "prsettled", "dockersettled", "batchsettled":
-		return fmt.Sprintf("[%s] %sid=%d  %s", now(), kind("settled"), m.ID, m.Status)
+		return fmt.Sprintf("[%s] %sid=%d  %s", now(), kind("settled"), m.ID, console.Sanitize(string(m.Status)))
 	case "log":
 		return fmt.Sprintf("[%s] %s", now(), console.Sanitize(m.Text))
 	case "clip":
@@ -502,10 +546,17 @@ func ctlDecide(args []string) error {
 
 	msg := console.Msg{Type: kind.decideType, ID: id, Status: status}
 	if status == access.Question {
-		msg.Question = *questionFlag
+		// 下流 (Hermes / Discord など) の入力をそのままエージェントの端末へ
+		// 流さない。制御文字と Bidi をエスケープする。
+		msg.Question = console.Sanitize(*questionFlag)
 	}
 	if kind.name == "network" || kind.name == "relax" {
 		msg.Kind = scope
+	}
+	// 監査を書けないなら判断を送らない (監査なしの承認を作らない)。
+	if err := logCtlDecision(run.Dir, kind.name, id, status, scope); err != nil {
+		_ = conn.Close()
+		return ctlExitf(1, "監査ログを書けないので判断を送らなかった: %v", err)
 	}
 	if err := conn.Send(msg); err != nil {
 		_ = conn.Close()
@@ -517,7 +568,6 @@ func ctlDecide(args []string) error {
 		fmt.Fprintf(os.Stderr, "警告: --scope always は %s に残り、以後すべてのプロジェクトで確認しない\n",
 			access.AlwaysPath())
 	}
-	logCtlDecision(run.Dir, kind.name, id, status, scope)
 	return nil
 }
 
@@ -566,19 +616,38 @@ func collectPending(conn *console.Conn, d time.Duration) map[string]bool {
 	}
 }
 
-// logCtlDecision は host 側のログに判断を 1 行残す。失敗しても判断は止めない。
-func logCtlDecision(work, kind string, id int, status access.Status, scope access.Kind) {
+// logCtlDecision は host 側のログに判断を 1 行残す。書けないときはエラーを返し、
+// 呼び出し側は判断を送らずに中止する。
+func logCtlDecision(work, kind string, id int, status access.Status, scope access.Kind) error {
 	line := fmt.Sprintf("%s ctl decide kind=%s id=%d status=%s", time.Now().Format("15:04:05"), kind, id, status)
 	if scope != "" && (kind == "network" || kind == "relax") {
 		line += " scope=" + string(scope)
 	}
 	if actor := os.Getenv("QUAGENT_CTL_ACTOR"); actor != "" {
-		line += " actor=" + console.Sanitize(actor)
+		line += " actor=" + singleLine(actor)
 	}
 	f, err := os.OpenFile(filepath.Join(work, "host.log"), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
-		return
+		return err
 	}
-	defer f.Close()
-	fmt.Fprintln(f, line)
+	if _, err := fmt.Fprintln(f, line); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// singleLine は監査ログの 1 行を壊す改行をエスケープし、長すぎる値を切る。
+func singleLine(s string) string {
+	s = console.Sanitize(s)
+	s = strings.ReplaceAll(s, "\r", `\r`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	if r := []rune(s); len(r) > 200 {
+		s = string(r[:200]) + "…"
+	}
+	return s
 }
