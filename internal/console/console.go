@@ -204,8 +204,11 @@ func NewServer(m *access.Manager, sock string) (*Server, error) {
 	return s, nil
 }
 
-// Close は待ち受けを止める。
-func (s *Server) Close() { s.l.Close() }
+// Close は待ち受けを止め、待機中の承認と監視 goroutine も終わらせる。
+func (s *Server) Close() {
+	s.TriggerQuit()
+	s.l.Close()
+}
 
 // Log は UI にログを流す。
 func (s *Server) Log(text string) {
@@ -732,6 +735,8 @@ func (s *Server) watch() {
 		select {
 		case <-s.m.Notify:
 		case <-tick.C:
+		case <-s.Quit:
+			return
 		}
 		pending := map[int]bool{}
 		for _, r := range s.m.Pending() {

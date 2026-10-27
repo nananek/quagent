@@ -932,14 +932,14 @@ func TestRelaxationConsoleIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// UI に relaxrequest が届くのを待つ
+	// UI に relaxrequest が届くのを待つ。Decode のタイムアウト後に
+	// 同じ Decoder を続けて使うと壊れるので、期限は 1 回だけ設定する。
 	var reqMsg Msg
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		_ = c.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for {
 		var msg Msg
 		if err := dec.Decode(&msg); err != nil {
-			continue
+			break
 		}
 		if msg.Type == "relaxrequest" && msg.ID == relReq.ID {
 			reqMsg = msg
@@ -955,14 +955,13 @@ func TestRelaxationConsoleIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// UI に relaxsettled が届くのを待つ
+	// UI に relaxsettled が届くのを待つ。
 	var settledMsg Msg
-	deadline = time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		_ = c.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for {
 		var msg Msg
 		if err := dec.Decode(&msg); err != nil {
-			continue
+			break
 		}
 		if msg.Type == "relaxsettled" && msg.ID == relReq.ID {
 			settledMsg = msg
