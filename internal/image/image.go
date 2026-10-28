@@ -56,7 +56,7 @@ type Recipe struct {
 	// (レシピのディレクトリにある公開鍵のファイル名) で gpgv により検証する。
 	SignatureURL string `json:"signature_url,omitempty"`
 	SigningKey   string `json:"signing_key,omitempty"`
-	// LatestURL は「今のイメージのファイル名」を載せた小さなテキスト (Gentoo の
+	// LatestURL は「今のイメージのファイル名」を載せた小さなテキスト (配布元の
 	// latest-*.txt など)。設定すると CloudImageURL / ChecksumURL / SignatureURL の
 	// 中の $FILE を、そのファイルが指すファイル名に置き換える。版ごとにファイル名が
 	// 変わる配布元で URL を固定するために使う。
@@ -113,9 +113,8 @@ func readRecipe(fsys fs.FS, name, source string) (Recipe, error) {
 	return r, nil
 }
 
-// recipeOrder は一覧に出すときの優先順。Gentoo はビルドが重いが、その分だけ
-// 硬化を一番強くできるので先頭に出す。ここに無いものは後ろに名前順で並べる。
-var recipeOrder = []string{"gentoo", "arch"}
+// recipeOrder は一覧に出すときの優先順。ここに無いものは後ろに名前順で並べる。
+var recipeOrder = []string{"arch"}
 
 // recipeRank は一覧の並び順 (小さいほど前)。recipeOrder に無ければ同じ扱いにする。
 func recipeRank(name string) int {
@@ -127,7 +126,7 @@ func recipeRank(name string) int {
 	return len(recipeOrder)
 }
 
-// Recipes は使えるレシピを、優先順 (Gentoo/Arch、その他は名前順) で返す。
+// Recipes は使えるレシピを、優先順 (Arch、その他は名前順) で返す。
 func Recipes() ([]Recipe, error) {
 	byName := map[string]Recipe{}
 	entries, err := fs.ReadDir(builtin, "recipes")
@@ -291,34 +290,19 @@ type BuildOpts struct {
 	MemMiB int
 	// Refresh はクラウドイメージを取り直す (OS の更新を取り込む)。
 	Refresh bool
-	// Incremental は前回焼いたイメージを出発点にして差分更新する。パッケージを
-	// 更新し、カーネルは更新があるときだけ作り直す (毎日カーネルを建て直さない)。
-	// 前回のイメージが無ければエラー。Refresh とは同時に使えない。
-	Incremental bool
 }
 
 // Build はレシピからベースイメージを新しく焼き、そのイメージを返す。
 func Build(r Recipe, o BuildOpts, progress io.Writer) (Image, error) {
-	// 出発点と起動ファームウェアを決める。差分更新は前回焼いたイメージから始める
-	// ので、レシピのクラウドイメージは取りに行かない (カーネルの作り直しを避ける)。
-	var src, firmware string
-	if o.Incremental {
-		prev, err := Latest(r.Name)
-		if err != nil {
-			return Image{}, fmt.Errorf("差分更新には前回のイメージが要る (%w)", err)
-		}
-		src, firmware = prev.Path, prev.Firmware
-		fmt.Fprintf(progress, "前回のイメージから差分更新: %s\n", filepath.Base(src))
-	} else {
-		if err := r.resolveLatest(progress); err != nil {
-			return Image{}, err
-		}
-		cloud, err := fetchCloudImage(r, o.Refresh, progress)
-		if err != nil {
-			return Image{}, err
-		}
-		src, firmware = cloud, r.Firmware
+	// 常にレシピのクラウドイメージから焼き直す (前回のイメージは使わない)。
+	if err := r.resolveLatest(progress); err != nil {
+		return Image{}, err
 	}
+	cloud, err := fetchCloudImage(r, o.Refresh, progress)
+	if err != nil {
+		return Image{}, err
+	}
+	src, firmware := cloud, r.Firmware
 	var ud bytes.Buffer
 	tmpl, err := template.New("user-data").Parse(r.userData)
 	if err != nil {

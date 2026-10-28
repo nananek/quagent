@@ -144,9 +144,9 @@ permissions:
 - レシピ（`internal/image/recipes/<名前>/` および `~/.config/quagent/images/<名前>/`）の追加・修正を行う際は、skill `recipe-authoring` の規約に従ってください。
 - イメージのビルド・一覧表示・削除は `quagent image ...` コマンドを使用します（PATH に通っていない場合は `./bin/quagent image ...` を使用。事前に `make build` または `make install` でバイナリをビルドしてください）:
   - `quagent image recipes`
-  - `quagent image build [--refresh|--incremental] [RECIPE]`
+  - `quagent image build [--refresh] [RECIPE]`
   - `quagent image ls` / `quagent image rm IMAGE`
-- セキュリティ強化 CONFIG やカーネル起動パラメータを変更した場合、差分更新では反映されないため、`--refresh` を指定してクリーン再ビルドを行ってください（`recipe-authoring` skill の記述を参照）。
+- ビルドは毎回レシピのクラウドイメージから新しく焼き直します。セキュリティ強化 CONFIG やカーネル起動パラメータを変更した場合も、そのまま再ビルドしてください。クラウドイメージの取得キャッシュも捨てたい場合は `--refresh` を指定します（`recipe-authoring` skill の記述を参照）。
 - イメージのビルド処理はリソース消費が大きいため、ホストの論理コア数およびメモリ空き容量に応じて十分なリソースを割り当ててください（`nproc` や `free -h` を確認の上、`--cpus` / `--mem` で指定）。上限時間はレシピの `build_timeout_minutes` に準じます。
 - ビルドの進行状況は、ビルド処理が出力するコンソールログファイルを `tail` して確認します（時刻の確認には `date` を使用）。
 - ビルドが失敗した場合は、エラー時に出力されるコンソールログ（`failed-*-console.log`）の内容を調査して修正してください。

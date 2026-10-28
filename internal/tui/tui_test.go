@@ -10,18 +10,30 @@ import (
 	"github.com/nananek/quagent/internal/paths"
 )
 
-// 起動画面のベースイメージは Gentoo/Arch の順で、焼いてあるものは色を
+// 起動画面のベースイメージは Arch を先頭に並べ、焼いてあるものは色を
 // 付けず、未ビルドのものはグレー (端末の色) にする。
 func TestRecipeOptions(t *testing.T) {
 	t.Setenv("CLICOLOR_FORCE", "1") // 擬似端末でなくても色を出す
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	// gentoo だけ焼いてあることにする。
+	// arch だけ焼いてあることにする。
 	dir := paths.ImagesDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "base-gentoo-20261007-010203.qcow2"), []byte("x"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "base-arch-20261007-010203.qcow2"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 未ビルドの利用者レシピを 1 つ置き、グレー表示を確かめられるようにする。
+	userRecipe := filepath.Join(filepath.Dir(paths.ConfigFile()), "images", "custom")
+	if err := os.MkdirAll(userRecipe, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userRecipe, "recipe.json"), []byte(
+		`{"description":"custom","cloud_image_url":"https://example.invalid/x.qcow2","checksum_url":"https://example.invalid/x.qcow2.sha256"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userRecipe, "user-data.yaml"), []byte("#cloud-config\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -33,7 +45,7 @@ func TestRecipeOptions(t *testing.T) {
 	for _, o := range opts {
 		names = append(names, o.Value)
 	}
-	if got := strings.Join(names, ","); got != "gentoo,arch" {
+	if got := strings.Join(names, ","); got != "arch,custom" {
 		t.Fatalf("並び: got %q", got)
 	}
 	if strings.Contains(opts[0].Key, "\x1b[") {
@@ -171,7 +183,7 @@ func TestHasAnyImage(t *testing.T) {
 	// 1つ作成
 	dir := paths.ImagesDir()
 	_ = os.MkdirAll(dir, 0o755)
-	_ = os.WriteFile(filepath.Join(dir, "base-gentoo-20261008-120000.qcow2"), []byte("data"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "base-arch-20261008-120000.qcow2"), []byte("data"), 0o644)
 	if !hasAnyImage() {
 		t.Error("expected hasAnyImage = true when an image exists")
 	}

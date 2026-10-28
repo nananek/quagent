@@ -50,7 +50,7 @@ func TestBuiltinRecipesAreVerifiable(t *testing.T) {
 	}
 }
 
-// 一覧は硬化を一番強くできる Gentoo を先頭に、Gentoo/Arch の順で出す。
+// 組み込みレシピは Arch を先頭に出す。
 func TestRecipesOrder(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // 利用者のレシピを混ぜない
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
@@ -62,7 +62,7 @@ func TestRecipesOrder(t *testing.T) {
 	for _, r := range rs {
 		names = append(names, r.Name)
 	}
-	if got := strings.Join(names, ","); got != "gentoo,arch" {
+	if got := strings.Join(names, ","); got != "arch" {
 		t.Fatalf("並び: got %q", got)
 	}
 }
@@ -87,86 +87,6 @@ func TestRecipeFirmware(t *testing.T) {
 	}
 	if _, err := readRecipe(fsys("legacy"), "t", "test"); err == nil {
 		t.Fatal("不明な firmware を受け付けた")
-	}
-}
-
-// Gentoo は UEFI 専用のクラウドイメージなので firmware を uefi にする。
-func TestGentooRecipeIsUEFI(t *testing.T) {
-	r, err := FindRecipe("gentoo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.Firmware != "uefi" {
-		t.Fatalf("got %q", r.Firmware)
-	}
-}
-
-// gentoo の焼き込みは、要求した硬化 CONFIG が実際に効いたかを検証してから成功と
-// する (シンボルの改名・廃止で黙って効かなくなるのを防ぐ)。改名済み・廃止済みの
-// シンボルに戻っていないことも確かめる。
-func TestGentooVerifiesHardeningConfig(t *testing.T) {
-	r, err := FindRecipe("gentoo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{
-		"verify_config /etc/kernel/config.d/50-quagent-docker.config",
-		"verify_config /etc/kernel/config.d/zz-quagent-hardening.config",
-		"KCONFIG=$(ls -1 /usr/src/linux-*/.config",
-		"CONFIG_MITIGATION_PAGE_TABLE_ISOLATION=y",
-		"CONFIG_MITIGATION_RETPOLINE=y",
-	} {
-		if !strings.Contains(r.userData, want) {
-			t.Errorf("gentoo の user-data に %q が無い", want)
-		}
-	}
-	// 6.8 で MITIGATION_ 接頭辞に改名された古い名前や、廃止・無効化できない
-	// シンボルを残さない (書いても無視され、硬化が静かに効かなくなる)。注釈では
-	// なく設定行だけを見る。
-	for _, line := range strings.Split(r.userData, "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "CONFIG_") {
-			continue
-		}
-		for _, stale := range []string{
-			"CONFIG_PAGE_TABLE_ISOLATION=",
-			"CONFIG_RETPOLINE=",
-			"CONFIG_BPF_JIT_HARDEN=",
-			"CONFIG_DEVKMEM",
-			"CONFIG_ACPI_CUSTOM_METHOD",
-			"CONFIG_X86_X32=",
-			"CONFIG_IO_URING=", // 6.18 では n にしても y に戻るので書かない
-		} {
-			if strings.HasPrefix(line, stale) {
-				t.Errorf("gentoo の user-data に廃止・改名された設定行が残っている: %q", line)
-			}
-		}
-	}
-}
-
-// gentoo の硬化は、攻撃面の削減と実行時の sysctl も揃っていること。
-func TestGentooHardeningSettings(t *testing.T) {
-	r, err := FindRecipe("gentoo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{
-		"CONFIG_RANDOM_KMALLOC_CACHES=y",
-		"CONFIG_LIST_HARDENED=y",
-		"CONFIG_BPF_LSM=y",
-		`CONFIG_LSM="landlock,yama,safesetid,bpf,lockdown"`,
-		"CONFIG_ETHERNET=n",        // VM に出てこないハードウェアのドライバは積まない
-		"CONFIG_SCSI_BNX2_ISCSI=n", // select ETHERNET で戻すので一緒に止める
-		"CONFIG_USB=n",
-		"CONFIG_JOYSTICK_XPAD=n", // select USB で戻すので一緒に止める
-		"kernel.unprivileged_bpf_disabled=2",
-		"kernel.io_uring_disabled=2", // io_uring は CONFIG では止められない
-		"kernel.sysrq=0",
-		"dev.tty.ldisc_autoload=0",
-	} {
-		if !strings.Contains(r.userData, want) {
-			t.Errorf("gentoo の user-data に %q が無い", want)
-		}
 	}
 }
 
@@ -199,16 +119,6 @@ func TestArchStopsSerialGetty(t *testing.T) {
 	}
 	if !strings.Contains(r.userData, "systemctl stop serial-getty@ttyS0.service") {
 		t.Error("arch の user-data に serial-getty の停止が無い")
-	}
-}
-
-// 差分更新なのに前回のイメージが無ければ、何も焼かずにエラーにする。
-func TestBuildIncrementalNeedsPrevious(t *testing.T) {
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	r := Recipe{Name: "gentoo", CloudImageURL: "https://example.invalid/x.qcow2",
-		ChecksumURL: "https://example.invalid/x.qcow2.sha256"}
-	if _, err := Build(r, BuildOpts{CPUs: 1, MemMiB: 256, Incremental: true}, io.Discard); err == nil {
-		t.Fatal("前回のイメージが無いのに成功した")
 	}
 }
 
@@ -265,7 +175,7 @@ func TestUserDataNoColumnZeroContent(t *testing.T) {
 // 付帯情報は既定 (bios) では書かず、uefi のときだけ書いて読める。
 func TestImageMeta(t *testing.T) {
 	dir := t.TempDir()
-	uefi := filepath.Join(dir, "base-gentoo-20261006-120000.qcow2")
+	uefi := filepath.Join(dir, "base-custom-20261006-120000.qcow2")
 	if err := writeMeta(uefi, imageMeta{Firmware: "uefi"}); err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +201,7 @@ func TestListAndRemoveWithMeta(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	uefi := filepath.Join(dir, "base-gentoo-20261006-120000.qcow2")
+	uefi := filepath.Join(dir, "base-custom-20261006-120000.qcow2")
 	bios := filepath.Join(dir, "base-arch-20261006-115959.qcow2")
 	for _, p := range []string{uefi, bios} {
 		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
@@ -438,7 +348,7 @@ func TestFindRecipeNotFound(t *testing.T) {
 
 func TestLatestNotFound(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	if _, err := Latest("gentoo"); err == nil {
+	if _, err := Latest("arch"); err == nil {
 		t.Fatal("expected error when no image exists")
 	}
 }
@@ -449,15 +359,15 @@ func TestLatestFound(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	oldImg := filepath.Join(dir, "base-gentoo-20261001-100000.qcow2")
-	newImg := filepath.Join(dir, "base-gentoo-20261005-100000.qcow2")
+	oldImg := filepath.Join(dir, "base-arch-20261001-100000.qcow2")
+	newImg := filepath.Join(dir, "base-arch-20261005-100000.qcow2")
 	for _, p := range []string{oldImg, newImg} {
 		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	latest, err := Latest("gentoo")
+	latest, err := Latest("arch")
 	if err != nil {
 		t.Fatalf("Latest() failed: %v", err)
 	}
@@ -602,21 +512,13 @@ func TestRunWithTimeout(t *testing.T) {
 func TestBuildErrors(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 
-	// 1. 差分更新 (Incremental) でベースイメージが無い
-	r := Recipe{Name: "gentoo"}
-	var buf bytes.Buffer
-	_, err := Build(r, BuildOpts{Incremental: true}, &buf)
-	if err == nil || !strings.Contains(err.Error(), "差分更新には前回のイメージが要る") {
-		t.Fatalf("expected incremental error, got %v", err)
-	}
-
-	// 2. resolveLatest が失敗する
+	// resolveLatest が失敗する
 	rFail := Recipe{
 		Name:          "custom",
 		LatestURL:     "http://127.0.0.1:0/latest",
 		CloudImageURL: "https://example.com/image-{{latest}}.qcow2",
 	}
-	_, err = Build(rFail, BuildOpts{Incremental: false}, &buf)
+	_, err := Build(rFail, BuildOpts{}, io.Discard)
 	if err == nil {
 		t.Fatal("expected error on failed resolveLatest")
 	}
