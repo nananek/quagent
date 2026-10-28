@@ -539,26 +539,17 @@ func buildImage(name string) error {
 	if err != nil {
 		return err
 	}
-	// 焼き方 (差分更新 / 焼き直し) と、焼き込み VM の CPU・メモリを決める。
-	// 前回のイメージがあれば差分更新を既定にする (カーネルの作り直しを避ける)。
-	mode := "fresh"
-	var fields []huh.Field
-	if _, err := image.Latest(name); err == nil {
-		mode = "incremental"
-		fields = append(fields, huh.NewSelect[string]().Title("焼き方").Options(
-			huh.NewOption("差分更新 (前回のイメージから。カーネルは更新があるときだけ)", "incremental"),
-			huh.NewOption("焼き直し (クラウドイメージから)", "fresh"),
-		).Value(&mode))
-	}
+	// 焼き込み VM の CPU・メモリを決める。既存のイメージは使わず、常にレシピから
+	// 新しく焼き直す。
 	s := loadBuildSettings()
 	cpus, mem := strconv.Itoa(s.CPUs), strconv.Itoa(s.MemMiB)
 	ok := true
-	fields = append(fields,
-		huh.NewInput().Title("CPU (焼き込み VM)").Description("ホストの範囲で。多いほどカーネルの作り直しが速い").
+	fields := []huh.Field{
+		huh.NewInput().Title("CPU (焼き込み VM)").Description("ホストの範囲で。多いほどビルドが速い").
 			Value(&cpus).Validate(positiveInt),
 		huh.NewInput().Title("メモリ MiB (焼き込み VM)").Value(&mem).Validate(positiveInt),
-		huh.NewConfirm().Title(name+" を焼く / 更新する?").Affirmative("焼く").Negative("戻る").Value(&ok),
-	)
+		huh.NewConfirm().Title(name + " を焼く?").Affirmative("焼く").Negative("戻る").Value(&ok),
+	}
 	if err := newForm(huh.NewGroup(fields...)).Run(); err != nil || !ok {
 		return nil
 	}
@@ -566,8 +557,7 @@ func buildImage(name string) error {
 	s.MemMiB, _ = strconv.Atoi(mem)
 	saveBuildSettings(s)
 	img, err := image.Build(r, image.BuildOpts{
-		CPUs: s.CPUs, MemMiB: s.MemMiB,
-		Refresh: mode == "fresh", Incremental: mode == "incremental",
+		CPUs: s.CPUs, MemMiB: s.MemMiB, Refresh: true,
 	}, os.Stdout)
 	if err != nil {
 		return err

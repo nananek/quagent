@@ -16,7 +16,7 @@ quagent は境界制御と内部制限を組み合わせた多層防御を採用
 | **第4層: 機密情報の非保持** | ・LLM API キー、GitHub トークン、GPG 鍵を VM に置かない<br>・ホスト側 LLM 認証プロキシ（推論・モデル一覧のみ転送）<br>・OpenAPI ツールサーバーのホスト側プロキシ<br>・使い捨て鍵とホスト正規鍵による二重署名 Git PR<br>・rootless Docker 向け OCI Pull-through Cache（vsock 経由・読み取り専用） |
 | **第5層: コントロール & 承認** | ・承認コンソールによる対話確認（通信申請、動的緩和、Docker イメージ取得、PR 作成）<br>・Web 遠隔操作 (hub) のワンタイム URL 認証と Tailscale バインド<br>・Git オブジェクト取り込み時の `transfer.fsckObjects` 検査<br>・画面偽装防止（制御文字・Bidi エスケープ）<br>・各種リソース上限と改変不能なホスト監査ログ (`host.log`) |
 
-| **第6層: ビルド & サプライチェーン** | ・静的リンクバイナリ (`CGO_ENABLED=0`)<br>・ベースイメージの GPG 署名検証 (Arch, Gentoo)<br>・Dependabot 更新の 7 日間遅延適用 |
+| **第6層: ビルド & サプライチェーン** | ・静的リンクバイナリ (`CGO_ENABLED=0`)<br>・ベースイメージの GPG 署名検証 (Arch)<br>・Dependabot 更新の 7 日間遅延適用 |
 
 ## 隔離の仕組み: 非特権名前空間と vsock 単一化で QEMU を封じ込める
 

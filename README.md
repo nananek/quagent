@@ -25,7 +25,7 @@ quagent は、外向き通信をホスト側で厳格に遮断した使い捨て
 
 - **仮想化・名前空間:** `qemu-system-x86_64` (KVM), `qemu-img`, `xorriso`, `slirp4netns`, `unshare` / `nsenter` / `prlimit` (util-linux), `nft`, 非特権ユーザー名前空間, vsock (`/dev/vhost-vsock`)
 - **ツール・CLI:** `git`, `gh`, `tmux`
-- **イメージビルド時:** `gpg` / `gpgv` (全レシピで署名検証), OVMF (Gentoo 等の UEFI レシピ用)
+- **イメージビルド時:** `gpg` / `gpgv` (全レシピで署名検証), OVMF (UEFI レシピを使う場合)
 
 ---
 
@@ -52,7 +52,7 @@ CLI から直接操作することも可能です。
 
 ```sh
 quagent image recipes          # 利用可能なレシピ (OS) の一覧表示
-quagent image build arch       # ベースイメージのビルド (--refresh / --incremental 対応)
+quagent image build arch       # ベースイメージのビルド (--refresh 対応)
 quagent image ls / rm IMAGE    # ビルド済みイメージの一覧表示・削除
 quagent cache ls / clean       # キャッシュの一覧表示・全削除
 quagent run --image arch       # VM を起動 (--mount-tmp: .tmp をホスト・ゲスト間で同期)
@@ -60,7 +60,7 @@ quagent hub                    # Web 遠隔操作モードを起動 (Tailscale �
 
 ```
 
-- **イメージの管理:** 初回起動時など利用可能なイメージが存在しない場合は、管理画面（ベースイメージの管理）へ案内されます。CPU コア数やメモリ容量の指定、差分更新、不要イメージの一括削除（prune）が可能です。
+- **イメージの管理:** 初回起動時など利用可能なイメージが存在しない場合は、管理画面（ベースイメージの管理）へ案内されます。CPU コア数やメモリ容量の指定、不要イメージの一括削除（prune）が可能です。ビルドは毎回レシピから新しく焼き直します。
 - **対応エージェント:** `quagent run` では `--agent` オプション（TUI でも選択可）でエージェントを指定します。
   - `opencode` (既定、`--auto` 付与)
   - `claude` (Claude Code、`--dangerously-skip-permissions` 付与)
