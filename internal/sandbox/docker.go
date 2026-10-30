@@ -79,15 +79,28 @@ func (p *Policy) DockerSeccompJSON() ([]byte, error) {
 
 // DockerDaemonConfig は Docker デーモンの設定構造体。
 type DockerDaemonConfig struct {
-	SeccompProfile  string   `json:"seccomp-profile,omitempty"`
-	RegistryMirrors []string `json:"registry-mirrors,omitempty"`
+	SeccompProfile  string          `json:"seccomp-profile,omitempty"`
+	RegistryMirrors []string        `json:"registry-mirrors,omitempty"`
+	Features        map[string]bool `json:"features,omitempty"`
+	StorageDriver   string          `json:"storage-driver,omitempty"`
 }
 
+// DockerRootlessStorageDriver は VM の rootless Docker が使う storage driver。
+//
+// linux-hardened カーネルは非特権 user namespace での overlayfs マウントを
+// 許さないため、複数レイヤーのイメージを展開できず "operation not permitted" に
+// なる。Docker 29 の既定 (containerd image store の overlayfs snapshotter) を
+// やめ、FUSE で重ねる fuse-overlayfs を使う。fuse-overlayfs はレシピが導入する。
+const DockerRootlessStorageDriver = "fuse-overlayfs"
+
 // GenerateDockerDaemonJSON は 指定された seccomp プロファイルパスおよびレジストリミラーを設定した daemon.json を生成する。
+// ストレージは DockerRootlessStorageDriver に固定する (レシピが置く daemon.json と同じ内容)。
 func GenerateDockerDaemonJSON(seccompProfilePath string, registryMirrors ...string) ([]byte, error) {
 	cfg := DockerDaemonConfig{
 		SeccompProfile:  seccompProfilePath,
 		RegistryMirrors: registryMirrors,
+		Features:        map[string]bool{"containerd-snapshotter": false},
+		StorageDriver:   DockerRootlessStorageDriver,
 	}
 	return json.MarshalIndent(cfg, "", "  ")
 }

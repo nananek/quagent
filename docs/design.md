@@ -92,6 +92,8 @@ sshd は完全に停止・無効化されます。systemd-ssh-generator が生�
 ### 5. rootless Docker へのサンドボックス制約継承 (`docker_inherit: true`、既定: 有効)
 rootless Docker コンテナに対しても、`sandbox.Policy` に基づく seccomp フィルタ（AF_VSOCK 遮断、危険システムコール拒否、64bit ABI 限定）を反映した Docker 既定プロファイルを透過適用します。コンテナのボリュームマウントを経由した機密ディレクトリの持ち出しも遮断します。
 
+VM の rootless Docker は storage driver に `fuse-overlayfs` を使います。linux-hardened のカーネルは非特権 user namespace での overlayfs マウントを許可しないため、Docker 29 以降の既定（containerd image store の overlayfs snapshotter）のままでは複数レイヤーのイメージを展開できません。daemon.json には seccomp プロファイルとレジストリミラーに加えて `"features": {"containerd-snapshotter": false}` と `"storage-driver": "fuse-overlayfs"` を書きます。
+
 ```json
 "sandbox": {
   "enabled": true,
