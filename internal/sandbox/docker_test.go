@@ -113,6 +113,14 @@ func TestGenerateDockerDaemonJSON(t *testing.T) {
 	if cfg.SeccompProfile != "/etc/quagent/docker-seccomp.json" {
 		t.Errorf("unexpected seccomp-profile: %s", cfg.SeccompProfile)
 	}
+	// linux-hardened では非特権 user namespace で overlayfs をマウントできないため、
+	// containerd image store を切って fuse-overlayfs を使う。
+	if cfg.StorageDriver != DockerRootlessStorageDriver {
+		t.Errorf("unexpected storage-driver: %q", cfg.StorageDriver)
+	}
+	if v, ok := cfg.Features["containerd-snapshotter"]; !ok || v {
+		t.Errorf("containerd-snapshotter を無効にしていない: %v", cfg.Features)
+	}
 
 	// Test with registry mirrors
 	bWithMirrors, err := GenerateDockerDaemonJSON("/etc/quagent/docker-seccomp.json", "http://127.0.0.1:51337")

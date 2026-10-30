@@ -47,6 +47,7 @@ quagent は OS ごとに「ベースイメージ」をビルドして利用し�
 
 - ユーザー `{{.User}}` を UID 1000 で作成する（sudo 権限は付与しない）。
 - rootless Docker、opencode、`git` をインストールする（`git` はリポジトリの同期および PR 作成時の fetch で使用されます）。root 権限の Docker デーモンは起動しない。
+- rootless Docker の storage driver は `fuse-overlayfs` に固定する（`~/.config/docker/daemon.json` に `{"features":{"containerd-snapshotter":false},"storage-driver":"fuse-overlayfs"}` を置き、起動時にその driver になっていることを確かめる）。linux-hardened は非特権 user namespace での overlayfs マウントを許可しないため、Docker 29 以降の既定（containerd image store の overlayfs snapshotter）では複数レイヤーのイメージ展開が `operation not permitted` で失敗する。
 - `/work` ディレクトリを作成し、所有者を当該ユーザーに設定する。
 - 正常終了時は `{{.Marker}}` を `/dev/ttyS0` に出力した上でシステムをシャットダウン（電源オフ）する。マーカーが出力されない場合、ビルドは失敗として扱われます。
 - 実行時の VM は外部ネットワーク通信が遮断されているため、起動時にネットワーク同期（NTP 等）を待機するシステムサービスは無効化しておく（例: Arch Linux では `systemd-time-wait-sync` が起動をブロックする要因となっていました）。

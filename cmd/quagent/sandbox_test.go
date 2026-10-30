@@ -56,6 +56,9 @@ func TestDockerWriteFiles(t *testing.T) {
 	if !strings.Contains(got, "permissions: '0644'") {
 		t.Errorf("missing permissions 0644 in %q", got)
 	}
+	if !strings.Contains(got, `"storage-driver": "fuse-overlayfs"`) {
+		t.Errorf("missing fuse-overlayfs storage driver in %q", got)
+	}
 }
 
 func TestSubboxWrapperFiles(t *testing.T) {

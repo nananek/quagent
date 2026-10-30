@@ -59,9 +59,28 @@ write_files:
       echo "DOCKER_HOST=unix:///run/user/$UID_/docker.sock" >> /etc/environment
       echo 'export PATH="$HOME/bin:$PATH"' >> "/home/$U/.bash_profile"
 
+      # linux-hardened は非特権 user namespace での overlayfs マウントを許さない。
+      # Docker 29 の既定 (containerd image store の overlayfs snapshotter) のままだと
+      # 複数レイヤーのイメージ展開が "operation not permitted" で失敗するので、
+      # rootless 向けの fuse-overlayfs に固定する。quagent が実行時に置く
+      # daemon.json も同じ内容にする (internal/sandbox/docker.go)。
+      install -d -o "$U" -g "$U" "/home/$U/.config/docker"
+      printf '%s\n' '{"features":{"containerd-snapshotter":false},"storage-driver":"fuse-overlayfs"}' \
+        > "/home/$U/.config/docker/daemon.json"
+      chown "$U:$U" "/home/$U/.config/docker/daemon.json"
+      # インストーラーが既定 driver で作ったデータが残っていると切り替えられない
+      runuser -u "$U" -- env XDG_RUNTIME_DIR="/run/user/$UID_" systemctl --user stop docker || true
+      rm -rf "/home/$U/.local/share/docker"
+      runuser -u "$U" -- env XDG_RUNTIME_DIR="/run/user/$UID_" systemctl --user start docker
+      for _ in $(seq 1 60); do [ -S "/run/user/$UID_/docker.sock" ] && break; sleep 1; done
+
       runuser -u "$U" -- env XDG_RUNTIME_DIR="/run/user/$UID_" \
         DOCKER_HOST="unix:///run/user/$UID_/docker.sock" \
         "/home/$U/bin/docker" info --format '{{"{{"}}.SecurityOptions{{"}}"}}' | grep -q rootless
+      # fuse-overlayfs が実際に選ばれていることまで確かめる
+      runuser -u "$U" -- env XDG_RUNTIME_DIR="/run/user/$UID_" \
+        DOCKER_HOST="unix:///run/user/$UID_/docker.sock" \
+        "/home/$U/bin/docker" info --format '{{"{{"}}.Driver{{"}}"}}' | grep -qx fuse-overlayfs
       # compose プラグインは pacman の docker-compose (/usr/lib/docker/cli-plugins)
       runuser -l "$U" -c 'docker compose version'
 
