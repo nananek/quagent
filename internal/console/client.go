@@ -1432,7 +1432,10 @@ func (m model) renderPendingTab(availHeight int) string {
 	case "prrequest":
 		sb.WriteString(fmt.Sprintf("%s %s → %s\n", styleLabel.Render("ブランチ:"), Sanitize(r.Branch), Sanitize(r.Base)))
 		sb.WriteString(fmt.Sprintf("%s %s\n", styleLabel.Render("タイトル:"), Sanitize(r.Title)))
-		if b := strings.TrimSpace(r.Body); b != "" && availHeight >= 8 {
+		// 本文が空のまま作ると、何を変えた PR か読めない。空を黙って隠さず明示する。
+		if b := strings.TrimSpace(r.Body); b == "" {
+			sb.WriteString(fmt.Sprintf("%s %s\n", styleLabel.Render("本文:"), styleLabel.Render("(なし)")))
+		} else if availHeight >= 8 {
 			sb.WriteString(fmt.Sprintf("%s\n%s\n", styleLabel.Render("本文:"), Sanitize(truncateRunes(b, 500))))
 		}
 	case "dockerrequest":

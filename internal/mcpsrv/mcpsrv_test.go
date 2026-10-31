@@ -146,6 +146,36 @@ func TestHandlerToolsIntegration(t *testing.T) {
 		}
 	}
 
+	// create_pull_request の入力ではタイトルと本文を必須にする。本文を渡し忘れた
+	// 呼び出しが素通りして空本文の PR ができるのを、スキーマの段階で防ぐ。
+	for _, tool := range toolsRes.Tools {
+		if tool.Name != "create_pull_request" {
+			continue
+		}
+		schema, ok := tool.InputSchema.(map[string]any)
+		if !ok {
+			t.Fatalf("create_pull_request の入力スキーマが読めない: %#v", tool.InputSchema)
+		}
+		required := map[string]bool{}
+		switch rs := schema["required"].(type) {
+		case []any:
+			for _, r := range rs {
+				if s, ok := r.(string); ok {
+					required[s] = true
+				}
+			}
+		case []string:
+			for _, s := range rs {
+				required[s] = true
+			}
+		}
+		for _, key := range []string{"branch", "title", "body"} {
+			if !required[key] {
+				t.Errorf("create_pull_request の必須項目に %q が無い: %v", key, schema["required"])
+			}
+		}
+	}
+
 	// 2. request_network_access (auto-approved domain)
 	reqCall, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name: "request_network_access",
