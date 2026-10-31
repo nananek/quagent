@@ -11,6 +11,7 @@ package pr
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -211,6 +212,9 @@ func (p *Publisher) Publish(req Request) (Result, error) {
 	}
 	if strings.TrimSpace(req.Title) == "" {
 		return Result{}, fmt.Errorf("タイトルが必要")
+	}
+	if strings.TrimSpace(req.Body) == "" {
+		return Result{}, fmt.Errorf("本文が必要。PR 本文を書いた一時ファイルの内容を body に渡す (本文が空のままだと、何を変えた PR か読めない)")
 	}
 	if utf8.RuneCountInString(req.Title) > maxTitleRunes || len(req.Body) > maxBodyBytes {
 		return Result{}, fmt.Errorf("タイトルは %d 文字、本文は %d バイトまで", maxTitleRunes, maxBodyBytes)
@@ -531,12 +535,16 @@ func (p *Publisher) finish(req Request, base, head string, signed int) (Result, 
 	if p.GH == nil {
 		return res, nil
 	}
-	// 開いている PR があれば push で更新済み。閉じた・マージ済みの PR は使い回さない
-	if out, err := p.GH(p.Repo, "pr", "view", req.Branch, "--json", "url,state", "-q", `select(.state == "OPEN") | .url`); err == nil {
-		if url := strings.TrimSpace(string(out)); url != "" {
-			res.URL = url
-			return res, nil
+	// 開いている PR があれば push で更新済み。閉じた・マージ済みの PR は使い回さない。
+	// タイトル・本文は push では変わらないので、依頼と違えば入れ直す。
+	if url, title, body, ok := p.openPR(req.Branch); ok {
+		res.URL = url
+		if title != req.Title || body != req.Body {
+			if out, err := p.GH(p.Repo, "pr", "edit", url, "--title", req.Title, "--body", req.Body); err != nil {
+				return res, fmt.Errorf("PR のタイトル・本文を更新できない: %v: %s", err, out)
+			}
 		}
+		return res, nil
 	}
 	out, err := p.GH(p.Repo, "pr", "create", "--head", req.Branch, "--base", base,
 		"--title", req.Title, "--body", req.Body)
@@ -546,6 +554,24 @@ func (p *Publisher) finish(req Request, base, head string, signed int) (Result, 
 	res.URL = strings.TrimSpace(lastLine(string(out)))
 	res.Created = true
 	return res, nil
+}
+
+// openPR は branch に開いている PR があれば、その URL・タイトル・本文を返す。
+func (p *Publisher) openPR(branch string) (url, title, body string, ok bool) {
+	out, err := p.GH(p.Repo, "pr", "view", branch, "--json", "url,state,title,body")
+	if err != nil {
+		return "", "", "", false
+	}
+	var v struct {
+		URL   string `json:"url"`
+		State string `json:"state"`
+		Title string `json:"title"`
+		Body  string `json:"body"`
+	}
+	if json.Unmarshal(out, &v) != nil || v.State != "OPEN" || v.URL == "" {
+		return "", "", "", false
+	}
+	return v.URL, v.Title, v.Body, true
 }
 
 func lastLine(s string) string {

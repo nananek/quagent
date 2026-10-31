@@ -151,7 +151,7 @@ func describeWith(r access.Result, requestTool, waitTool string, cooldown bool) 
 type prIn struct {
 	Branch string `json:"branch" jsonschema:"Branch in /work that holds your commits. Must not be a protected branch (main, master, develop by default)."`
 	Title  string `json:"title" jsonschema:"Pull request title"`
-	Body   string `json:"body,omitempty" jsonschema:"Pull request description (markdown)"`
+	Body   string `json:"body" jsonschema:"Pull request description (markdown). Pass the finalized text of your PR body file; an empty body is rejected."`
 	Base   string `json:"base,omitempty" jsonschema:"Branch to merge into. Defaults to the repository's default branch."`
 }
 
@@ -306,7 +306,7 @@ func Handler(m *access.Manager, pub PRPublisher, logf func(string), extra ...fun
 		if res.Created {
 			verb = "作成"
 		}
-		logf(fmt.Sprintf("PR を%s: %s (署名 %d コミット) %s", verb, in.Branch, res.Signed, res.URL))
+		logf(fmt.Sprintf("PR を%s: %s (署名 %d コミット, 本文 %d バイト) %s", verb, in.Branch, res.Signed, len(in.Body), res.URL))
 		return nil, res, nil
 	})
 

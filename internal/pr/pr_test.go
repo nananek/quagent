@@ -1,6 +1,7 @@
 package pr
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -111,7 +112,7 @@ func TestPublishResignsVMCommitsIncrementally(t *testing.T) {
 	commit(t, f.guest, "a.txt", "a\n")
 	commit(t, f.guest, "b.txt", "b\n")
 
-	res, err := f.p.Publish(Request{Branch: "feature", Title: "t"})
+	res, err := f.p.Publish(Request{Branch: "feature", Title: "t", Body: "b"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +140,7 @@ func TestPublishResignsVMCommitsIncrementally(t *testing.T) {
 
 	// 追加のコミットだけが署名され、既に push したコミットは書き換わらない
 	commit(t, f.guest, "c.txt", "c\n")
-	res2, err := f.p.Publish(Request{Branch: "feature", Title: "t"})
+	res2, err := f.p.Publish(Request{Branch: "feature", Title: "t", Body: "b"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +149,7 @@ func TestPublishResignsVMCommitsIncrementally(t *testing.T) {
 	}
 
 	// 変化がなければ何もしない
-	res3, err := f.p.Publish(Request{Branch: "feature", Title: "t"})
+	res3, err := f.p.Publish(Request{Branch: "feature", Title: "t", Body: "b"})
 	if err != nil || res3.Signed != 0 || res3.Head != res2.Head {
 		t.Fatalf("変化なしで何かした: %+v %v", res3, err)
 	}
@@ -164,7 +165,7 @@ func TestPublishUsesRepoSigningConfig(t *testing.T) {
 	run(t, f.guest, "git", "switch", "-q", "-c", "feature")
 	commit(t, f.guest, "a.txt", "a\n")
 
-	if _, err := f.p.Publish(Request{Branch: "feature", Title: "t"}); err != nil {
+	if _, err := f.p.Publish(Request{Branch: "feature", Title: "t", Body: "b"}); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(repoKey + ".pub")
@@ -193,7 +194,7 @@ func TestPublishKeepsOthersCommits(t *testing.T) {
 	run(t, f.guest, "git", "switch", "-q", "-c", "on-colleague", "colleague")
 	commit(t, f.guest, "mine.txt", "m\n")
 
-	res, err := f.p.Publish(Request{Branch: "on-colleague", Title: "t"})
+	res, err := f.p.Publish(Request{Branch: "on-colleague", Title: "t", Body: "b"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +213,7 @@ func TestPublishRejectsUnmarkedVMCommit(t *testing.T) {
 	f := newFixture(t)
 	run(t, f.guest, "git", "switch", "-q", "-c", "feature")
 	commit(t, f.guest, "a.txt", "a\n", "-c", "commit.gpgsign=false") // VM で署名を切った
-	if _, err := f.p.Publish(Request{Branch: "feature", Title: "t"}); err == nil {
+	if _, err := f.p.Publish(Request{Branch: "feature", Title: "t", Body: "b"}); err == nil {
 		t.Fatal("印の無い VM のコミットが通った")
 	}
 	if out, _ := exec.Command("git", "-C", f.origin, "rev-parse", "--verify", "-q", "feature").Output(); len(out) > 0 {
@@ -224,7 +225,7 @@ func TestPublishRejectsUnmarkedVMCommit(t *testing.T) {
 	keygen(t, other)
 	run(t, f.guest, "git", "switch", "-q", "-c", "feature2", "main")
 	commit(t, f.guest, "b.txt", "b\n", "-c", "user.signingkey="+other+".pub")
-	if _, err := f.p.Publish(Request{Branch: "feature2", Title: "t"}); err == nil {
+	if _, err := f.p.Publish(Request{Branch: "feature2", Title: "t", Body: "b"}); err == nil {
 		t.Fatal("別の鍵の署名を VM の印とみなした")
 	}
 }
@@ -232,10 +233,10 @@ func TestPublishRejectsUnmarkedVMCommit(t *testing.T) {
 func TestPublishRejectsProtectedAndExistingBranches(t *testing.T) {
 	f := newFixture(t)
 	commit(t, f.guest, "x.txt", "x\n")
-	if _, err := f.p.Publish(Request{Branch: "main", Title: "t"}); err == nil {
+	if _, err := f.p.Publish(Request{Branch: "main", Title: "t", Body: "b"}); err == nil {
 		t.Fatal("保護ブランチへの push が通った")
 	}
-	if _, err := f.p.Publish(Request{Branch: "--force", Title: "t"}); err == nil {
+	if _, err := f.p.Publish(Request{Branch: "--force", Title: "t", Body: "b"}); err == nil {
 		t.Fatal("オプションに見えるブランチ名が通った")
 	}
 
@@ -244,7 +245,7 @@ func TestPublishRejectsProtectedAndExistingBranches(t *testing.T) {
 	before := run(t, f.origin, "git", "rev-parse", "users-branch")
 	run(t, f.guest, "git", "switch", "-q", "-c", "users-branch")
 	commit(t, f.guest, "y.txt", "y\n")
-	if _, err := f.p.Publish(Request{Branch: "users-branch", Title: "t"}); err == nil {
+	if _, err := f.p.Publish(Request{Branch: "users-branch", Title: "t", Body: "b"}); err == nil {
 		t.Fatal("既存のリモートブランチを上書きした")
 	}
 	if run(t, f.origin, "git", "rev-parse", "users-branch") != before {
@@ -262,7 +263,7 @@ func TestPublishIgnoresGuestHooks(t *testing.T) {
 	run(t, f.guest, "git", "switch", "-q", "-c", "feature")
 	_ = os.Remove(marker) // guest 自身の switch で作られた分は消す
 	commit(t, f.guest, "a.txt", "a\n")
-	if _, err := f.p.Publish(Request{Branch: "feature", Title: "t"}); err != nil {
+	if _, err := f.p.Publish(Request{Branch: "feature", Title: "t", Body: "b"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(marker); err == nil {
@@ -270,25 +271,41 @@ func TestPublishIgnoresGuestHooks(t *testing.T) {
 	}
 }
 
+func TestPublishRejectsEmptyBody(t *testing.T) {
+	f := newFixture(t)
+	run(t, f.guest, "git", "switch", "-q", "-c", "feature")
+	commit(t, f.guest, "a.txt", "a\n")
+	// 弾いた依頼で間隔や回数を消費しないことも見る
+	f.p.MinInterval = time.Hour
+	for _, body := range []string{"", " \n\t"} {
+		if _, err := f.p.Publish(Request{Branch: "feature", Title: "t", Body: body}); err == nil {
+			t.Fatalf("空の本文 (%q) が通った", body)
+		}
+	}
+	if _, err := f.p.Publish(Request{Branch: "feature", Title: "t", Body: "本文"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPublishLimits(t *testing.T) {
 	f := newFixture(t)
 	run(t, f.guest, "git", "switch", "-q", "-c", "feature")
 	commit(t, f.guest, "a.txt", "a\n")
-	if _, err := f.p.Publish(Request{Branch: "feature", Title: strings.Repeat("あ", maxTitleRunes+1)}); err == nil {
+	if _, err := f.p.Publish(Request{Branch: "feature", Title: strings.Repeat("あ", maxTitleRunes+1), Body: "b"}); err == nil {
 		t.Fatal("長すぎるタイトルが通った")
 	}
 	f.p.MinInterval = time.Hour
-	if _, err := f.p.Publish(Request{Branch: "feature", Title: "t"}); err != nil {
+	if _, err := f.p.Publish(Request{Branch: "feature", Title: "t", Body: "b"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.p.Publish(Request{Branch: "feature", Title: "t"}); err == nil {
+	if _, err := f.p.Publish(Request{Branch: "feature", Title: "t", Body: "b"}); err == nil {
 		t.Fatal("間隔の制限が効かない")
 	}
 	f.p.MinInterval = 0
 	for i := range maxBranches + 1 {
 		b := fmt.Sprintf("b%d", i)
 		run(t, f.guest, "git", "switch", "-q", "-c", b, "feature")
-		_, err := f.p.Publish(Request{Branch: b, Title: "t"})
+		_, err := f.p.Publish(Request{Branch: b, Title: "t", Body: "b"})
 		if i+1 < maxBranches && err != nil {
 			t.Fatalf("%s: %v", b, err)
 		}
@@ -326,7 +343,7 @@ func TestPublishApprovalGatesPush(t *testing.T) {
 
 	// 承認すれば push される
 	f.p.Approve = func(Request) error { return nil }
-	res, err := f.p.Publish(Request{Branch: "feature", Title: "t"})
+	res, err := f.p.Publish(Request{Branch: "feature", Title: "t", Body: "b"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,7 +358,7 @@ func TestPublishUpdatesExistingBranch(t *testing.T) {
 	f := newFixture(t)
 	run(t, f.guest, "git", "switch", "-q", "-c", "feature")
 	commit(t, f.guest, "a.txt", "a\n")
-	res1, err := f.p.Publish(Request{Branch: "feature", Title: "t"})
+	res1, err := f.p.Publish(Request{Branch: "feature", Title: "t", Body: "b"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +370,7 @@ func TestPublishUpdatesExistingBranch(t *testing.T) {
 	p2 := &Publisher{Repo: f.host, Work: t.TempDir(), GuestURL: f.guest,
 		Protected: DefaultProtected, MarkPub: f.p.MarkPub}
 	commit(t, f.guest, "b.txt", "b\n")
-	res2, err := p2.Publish(Request{Branch: "feature", Title: "t"})
+	res2, err := p2.Publish(Request{Branch: "feature", Title: "t", Body: "b"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +385,7 @@ func TestPublishUpdatesExistingBranch(t *testing.T) {
 	}
 
 	// 変化がなければ何もしない
-	res3, err := p2.Publish(Request{Branch: "feature", Title: "t"})
+	res3, err := p2.Publish(Request{Branch: "feature", Title: "t", Body: "b"})
 	if err != nil || res3.Signed != 0 || res3.Head != res2.Head {
 		t.Fatalf("変化なしで何かした: %+v %v", res3, err)
 	}
@@ -386,7 +403,7 @@ func TestPublishRejectsForeignExistingBranch(t *testing.T) {
 	// guest は別の中身で同名のブランチを作る
 	run(t, f.guest, "git", "switch", "-q", "-c", "other", "main")
 	commit(t, f.guest, "z.txt", "z\n")
-	if _, err := f.p.Publish(Request{Branch: "other", Title: "t"}); err == nil {
+	if _, err := f.p.Publish(Request{Branch: "other", Title: "t", Body: "b"}); err == nil {
 		t.Fatal("対応しないコミットがあるブランチを書き換えた")
 	}
 	if run(t, f.origin, "git", "rev-parse", "other") != before {
@@ -442,28 +459,68 @@ func TestFinishWithGH(t *testing.T) {
 	p := &Publisher{
 		Repo: t.TempDir(),
 	}
+	const url = "https://github.com/org/repo/pull/123"
+	viewJSON := func(state, title, body string) []byte {
+		b, err := json.Marshal(map[string]string{"url": url, "state": state, "title": title, "body": body})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	var calls []string
+	record := func(args ...string) { calls = append(calls, strings.Join(args, " ")) }
 
-	// 1. 既存のOPENなPRがある場合
+	// 1. 既存の OPEN な PR があり、依頼と同じタイトル・本文なら編集しない
+	calls = nil
 	p.GH = func(dir string, args ...string) ([]byte, error) {
+		record(args...)
 		if args[0] == "pr" && args[1] == "view" {
-			return []byte("https://github.com/org/repo/pull/123\n"), nil
+			return viewJSON("OPEN", "title", "body"), nil
 		}
 		return nil, fmt.Errorf("unexpected args: %v", args)
 	}
-	res, err := p.finish(Request{Branch: "feature"}, "main", "commit1", 1)
+	res, err := p.finish(Request{Branch: "feature", Title: "title", Body: "body"}, "main", "commit1", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.URL != "https://github.com/org/repo/pull/123" || res.Created {
+	if res.URL != url || res.Created {
 		t.Fatalf("unexpected res: %+v", res)
 	}
+	if len(calls) != 1 {
+		t.Fatalf("同じ内容なのに編集した: %v", calls)
+	}
 
-	// 2. 新規PR作成の場合
+	// 2. 既存の OPEN な PR でも、タイトル・本文が違えば gh pr edit で入れ直す
+	calls = nil
 	p.GH = func(dir string, args ...string) ([]byte, error) {
-		if args[0] == "pr" && args[1] == "view" {
-			return nil, fmt.Errorf("no pr")
+		record(args...)
+		switch args[1] {
+		case "view":
+			return viewJSON("OPEN", "title", ""), nil
+		case "edit":
+			return nil, nil
 		}
-		if args[0] == "pr" && args[1] == "create" {
+		return nil, fmt.Errorf("unexpected args: %v", args)
+	}
+	res, err = p.finish(Request{Branch: "feature", Title: "title", Body: "body"}, "main", "commit1", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.URL != url || res.Created {
+		t.Fatalf("unexpected res: %+v", res)
+	}
+	if len(calls) != 2 || calls[1] != "pr edit "+url+" --title title --body body" {
+		t.Fatalf("本文を入れ直していない: %v", calls)
+	}
+
+	// 3. 閉じた・マージ済みの PR は使い回さず、新しく作る
+	calls = nil
+	p.GH = func(dir string, args ...string) ([]byte, error) {
+		record(args...)
+		switch args[1] {
+		case "view":
+			return viewJSON("CLOSED", "title", "body"), nil
+		case "create":
 			return []byte("Creating pull request...\nhttps://github.com/org/repo/pull/456\n"), nil
 		}
 		return nil, fmt.Errorf("unexpected args: %v", args)
@@ -474,6 +531,9 @@ func TestFinishWithGH(t *testing.T) {
 	}
 	if res2.URL != "https://github.com/org/repo/pull/456" || !res2.Created {
 		t.Fatalf("unexpected res: %+v", res2)
+	}
+	if len(calls) != 2 || !strings.HasPrefix(calls[1], "pr create ") {
+		t.Fatalf("新しい PR を作っていない: %v", calls)
 	}
 }
 
