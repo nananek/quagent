@@ -792,8 +792,12 @@ runcmd:
 	if err != nil {
 		return err
 	}
+	forge, err := newPRForge(cfg, repo)
+	if err != nil {
+		return err
+	}
 	publisher := &pr.Publisher{
-		Repo: repo, Work: work, Protected: protected, GH: pr.RunGH,
+		Repo: repo, Work: work, Protected: protected, Forge: forge,
 		GuestURL: g.gitURL(), GitConfig: []string{"protocol.ext.allow=always"},
 		MarkPub: strings.TrimSpace(string(markPub)), MinInterval: 10 * time.Second,
 	}

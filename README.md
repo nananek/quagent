@@ -15,7 +15,7 @@ quagent は、外向き通信をホスト側で厳格に遮断した使い捨て
 - **ホスト側での厳格な通信遮断:** 未許可のアウトバウンド通信は VM の外側ですべて遮断されます。ゲスト OS 内の root 権限からもルールを参照・改変できません。
 - **機密情報を VM に渡さない:** API キーや Git 署名鍵はホスト側のプロキシが保持し、VM 内には一時認証トークンのみを渡します。
 - **完全使い捨ての VM 環境:** セッションごとにスナップショットから起動し、終了時に破棄されます。
-- **安全な PR 作成:** VM 内で作成されたコミットをホスト側が検証し、正規の鍵で再署名して GitHub へ push します。
+- **安全な PR 作成:** VM 内で作成されたコミットをホスト側が検証し、正規の鍵で再署名して GitHub / Gitea へ push します。
 
 アーキテクチャや脅威モデルの詳細は [docs/design.md](docs/design.md)、開発やコーディング指針については [docs/development.md](docs/development.md) を参照してください。
 
@@ -24,7 +24,7 @@ quagent は、外向き通信をホスト側で厳格に遮断した使い捨て
 ## 動作環境: Linux ホスト上に KVM・非特権名前空間・vsock が必要
 
 - **仮想化・名前空間:** `qemu-system-x86_64` (KVM), `qemu-img`, `xorriso`, `slirp4netns`, `unshare` / `nsenter` / `prlimit` (util-linux), `nft`, 非特権ユーザー名前空間, vsock (`/dev/vhost-vsock`)
-- **ツール・CLI:** `git`, `gh`, `tmux`
+- **ツール・CLI:** `git`, `tmux` (GitHub へ PR を作る場合は `gh`。Gitea / Forgejo は追加の CLI 不要)
 - **イメージビルド時:** `gpg` / `gpgv` (全レシピで署名検証), OVMF (UEFI レシピを使う場合)
 
 ---
@@ -286,8 +286,32 @@ VM 内のエージェントが端末経由でクリップボードへ書き込�
 
 エージェントは `/work` の作業ブランチでコミットを作成し、MCP の `create_pull_request` ツールを通じて PR 作成を依頼します。
 
-- **安全なコミット再署名:** VM 内では一時的な使い捨て鍵でコミットが作成され、ホスト側がこれを取り込んで正規の鍵で再署名した上で push します（GitHub トークンや秘密鍵は VM に渡りません）。
+- **安全なコミット再署名:** VM 内では一時的な使い捨て鍵でコミットが作成され、ホスト側がこれを取り込んで正規の鍵で再署名した上で push します（GitHub / Gitea のトークンや秘密鍵は VM に渡りません）。
 - **PR 作成の承認:** 既定で承認制（`--pr-approval`）となっており、push 前に承認コンソール上でブランチ名・マージ先・タイトル・本文の確認を求めます。
+- **対応する PR サービス:** 既定は GitHub で `gh` CLI を使います。`config.json` の `pr.forge` に `"gitea"` を指定すると、Gitea / Forgejo の REST API で PR を作成・更新します（`gh` も `tea` も不要）。
+
+Gitea を使う場合の設定例:
+
+```json
+{
+  "pr": {
+    "forge": "gitea",
+    "protected_branches": ["main"],
+    "gitea": {
+      "url": "https://git.example.com",
+      "token_command": ["pass", "show", "gitea/token"]
+    }
+  }
+}
+```
+
+- `gitea.url` は Gitea の base URL です。サブパス設置なら `https://example.com/gitea` のように書き、API は `<url>/api/v1` になります。
+- トークンは `token_env` / `token_file` / `token_command` のいずれか 1 つで指定します。ホスト側でのみ使い、VM には渡しません。
+- `gitea.owner` / `gitea.repo` は任意です。origin の URL から owner/repo を解釈できないリモートのときだけ指定します。
+- トークンには対象リポジトリで PR を作成・更新できる権限が必要です（repository の read/write、Gitea のスコープ表記では `write:repository`）。
+- 自己署名証明書の Gitea へ接続する場合は、ホストの信頼ストアに CA を追加します（quagent はホストの既定の TLS 検証を使います）。
+- push の認証は従来どおりホスト側 Git の設定（SSH 鍵や credential helper）を使います。GitHub / Gitea のトークンを push には使いません。
+- 再署名、保護ブランチ、force push の防止、承認フローは GitHub / Gitea によらず同じように動きます。詳細は [docs/design.md](docs/design.md) を参照してください。
 
 ---
 

@@ -461,7 +461,9 @@ func TestFinishWithGH(t *testing.T) {
 	}
 	const url = "https://github.com/org/repo/pull/123"
 	viewJSON := func(state, title, body string) []byte {
-		b, err := json.Marshal(map[string]string{"url": url, "state": state, "title": title, "body": body})
+		b, err := json.Marshal(map[string]any{
+			"url": url, "state": state, "title": title, "body": body, "number": 123,
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -472,13 +474,13 @@ func TestFinishWithGH(t *testing.T) {
 
 	// 1. 既存の OPEN な PR があり、依頼と同じタイトル・本文なら編集しない
 	calls = nil
-	p.GH = func(dir string, args ...string) ([]byte, error) {
+	p.Forge = &GHForge{Dir: p.Repo, Run: func(dir string, args ...string) ([]byte, error) {
 		record(args...)
 		if args[0] == "pr" && args[1] == "view" {
 			return viewJSON("OPEN", "title", "body"), nil
 		}
 		return nil, fmt.Errorf("unexpected args: %v", args)
-	}
+	}}
 	res, err := p.finish(Request{Branch: "feature", Title: "title", Body: "body"}, "main", "commit1", 1)
 	if err != nil {
 		t.Fatal(err)
@@ -492,7 +494,7 @@ func TestFinishWithGH(t *testing.T) {
 
 	// 2. 既存の OPEN な PR でも、タイトル・本文が違えば gh pr edit で入れ直す
 	calls = nil
-	p.GH = func(dir string, args ...string) ([]byte, error) {
+	p.Forge = &GHForge{Dir: p.Repo, Run: func(dir string, args ...string) ([]byte, error) {
 		record(args...)
 		switch args[1] {
 		case "view":
@@ -501,7 +503,7 @@ func TestFinishWithGH(t *testing.T) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("unexpected args: %v", args)
-	}
+	}}
 	res, err = p.finish(Request{Branch: "feature", Title: "title", Body: "body"}, "main", "commit1", 1)
 	if err != nil {
 		t.Fatal(err)
@@ -515,7 +517,7 @@ func TestFinishWithGH(t *testing.T) {
 
 	// 3. 閉じた・マージ済みの PR は使い回さず、新しく作る
 	calls = nil
-	p.GH = func(dir string, args ...string) ([]byte, error) {
+	p.Forge = &GHForge{Dir: p.Repo, Run: func(dir string, args ...string) ([]byte, error) {
 		record(args...)
 		switch args[1] {
 		case "view":
@@ -524,7 +526,7 @@ func TestFinishWithGH(t *testing.T) {
 			return []byte("Creating pull request...\nhttps://github.com/org/repo/pull/456\n"), nil
 		}
 		return nil, fmt.Errorf("unexpected args: %v", args)
-	}
+	}}
 	res2, err := p.finish(Request{Branch: "new-feature", Title: "title", Body: "body"}, "main", "commit2", 1)
 	if err != nil {
 		t.Fatal(err)

@@ -293,8 +293,9 @@ func Handler(m *access.Manager, pub PRPublisher, logf func(string), extra ...fun
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "create_pull_request",
-		Description: "Publish a branch of /work as a GitHub pull request. Commit your work on a non-protected branch first. " +
-			"The host fetches the branch, signs the commits, pushes it and opens the PR (you have no GitHub credentials and cannot push yourself). " +
+		Description: "Publish a branch of /work as a pull request on the repository's forge (GitHub or Gitea, depending on config). " +
+			"Commit your work on a non-protected branch first. " +
+			"The host fetches the branch, signs the commits, pushes it and opens the PR (you have no forge credentials and cannot push yourself). " +
 			"Call again with the same branch after adding commits to update the PR. Do not rewrite already-published commits.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in prIn) (*mcp.CallToolResult, pr.Result, error) {
 		res, err := pub.Publish(pr.Request{Branch: in.Branch, Title: in.Title, Body: in.Body, Base: in.Base})
