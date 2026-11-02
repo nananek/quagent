@@ -288,14 +288,14 @@ VM 内のエージェントが端末経由でクリップボードへ書き込�
 
 - **安全なコミット再署名:** VM 内では一時的な使い捨て鍵でコミットが作成され、ホスト側がこれを取り込んで正規の鍵で再署名した上で push します（GitHub / Gitea のトークンや秘密鍵は VM に渡りません）。
 - **PR 作成の承認:** 既定で承認制（`--pr-approval`）となっており、push 前に承認コンソール上でブランチ名・マージ先・タイトル・本文の確認を求めます。
-- **対応する PR サービス:** 既定は GitHub で `gh` CLI を使います。`config.json` の `pr.forge` に `"gitea"` を指定すると、Gitea / Forgejo の REST API で PR を作成・更新します（`gh` も `tea` も不要）。
+- **対応する PR サービス:** 既定は GitHub で `gh` CLI を使います。`config.json` の `pr.forge` に `"gitea"` を指定すると、Gitea / Forgejo の REST API で PR を作成・更新します（`gh` も `tea` も不要）。`"auto"` にすると、origin のホストが `pr.gitea.url` と同じリポジトリだけ Gitea、それ以外は GitHub になり、両方を 1 つの設定で併用できます。
 
-Gitea を使う場合の設定例:
+GitHub と Gitea を併用する場合の設定例:
 
 ```json
 {
   "pr": {
-    "forge": "gitea",
+    "forge": "auto",
     "protected_branches": ["main"],
     "gitea": {
       "url": "https://git.example.com",
@@ -306,7 +306,8 @@ Gitea を使う場合の設定例:
 ```
 
 - `gitea.url` は Gitea の base URL です。サブパス設置なら `https://example.com/gitea` のように書き、API は `<url>/api/v1` になります。
-- トークンは `token_env` / `token_file` / `token_command` のいずれか 1 つで指定します。ホスト側でのみ使い、VM には渡しません。
+- `forge` が `"auto"` のときは origin のホスト名が `gitea.url` のホスト名と同じなら Gitea、それ以外は GitHub です。ポートやパスは見ません。origin を読めないリポジトリでは run の開始時にエラーになります。特定の forge だけを使うなら `"github"` か `"gitea"` を明示します。
+- トークンは `token_env` / `token_file` / `token_command` のいずれか 1 つで指定します。ホスト側でのみ使い、VM には渡しません。`pass` のようにメタデータ行を含む出力を返す場合は、1 行目だけを取り出してください（例: `["sh", "-c", "pass show gitea/token | sed -n 1p"]`）。
 - `gitea.owner` / `gitea.repo` は任意です。origin の URL から owner/repo を解釈できないリモートのときだけ指定します。
 - トークンには対象リポジトリで PR を作成・更新できる権限が必要です（repository の read/write、Gitea のスコープ表記では `write:repository`）。
 - 自己署名証明書の Gitea へ接続する場合は、ホストの信頼ストアに CA を追加します（quagent はホストの既定の TLS 検証を使います）。

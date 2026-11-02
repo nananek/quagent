@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -321,17 +322,26 @@ type PR struct {
 	// ProtectedBranches はエージェントに push させないブランチ。
 	// 未指定なら main / master / develop。
 	ProtectedBranches []string `json:"protected_branches,omitempty"`
-	// Forge は PR を扱うサービス ("github" または "gitea")。空なら "github"。
+	// Forge は PR を扱うサービス ("github" / "gitea" / "auto")。空なら "github"。
+	// "auto" は origin のホストが pr.gitea.url と同じなら Gitea、それ以外は
+	// GitHub にする (GitHub と Gitea のリポジトリを 1 つの設定で併用する)。
 	Forge string `json:"forge,omitempty"`
-	// Gitea は forge が "gitea" のときの接続設定。
+	// Gitea は forge が "gitea" または "auto" のときの接続設定。
 	Gitea *Gitea `json:"gitea,omitempty"`
 }
 
-// ForgeResolved は PR を扱うサービスを返す (既定: "github")。
+// PR を扱うサービス。
+const (
+	ForgeGitHub = "github"
+	ForgeGitea  = "gitea"
+	ForgeAuto   = "auto"
+)
+
+// ForgeResolved は PR を扱うサービスの指定を返す (既定: "github")。
 func (p PR) ForgeResolved() string {
 	f := strings.ToLower(strings.TrimSpace(p.Forge))
 	if f == "" {
-		return "github"
+		return ForgeGitHub
 	}
 	return f
 }
@@ -347,6 +357,22 @@ type Gitea struct {
 	TokenEnv     string   `json:"token_env,omitempty"`
 	TokenFile    string   `json:"token_file,omitempty"`
 	TokenCommand []string `json:"token_command,omitempty"`
+}
+
+// Host は pr.gitea.url のホスト名を小文字で返す (ポートは含めない)。
+// pr.forge が "auto" のとき、origin のホストと比べるのに使う。
+func (g *Gitea) Host() (string, error) {
+	if g == nil || strings.TrimSpace(g.URL) == "" {
+		return "", fmt.Errorf("pr.gitea.url が必要")
+	}
+	u, err := url.Parse(g.URL)
+	if err != nil {
+		return "", fmt.Errorf("pr.gitea.url が不正: %w", err)
+	}
+	if u.Hostname() == "" {
+		return "", fmt.Errorf("pr.gitea.url にホストが無い: %q", g.URL)
+	}
+	return strings.ToLower(u.Hostname()), nil
 }
 
 // Token は Gitea のトークンを取り出す。トークンは host のプロセス内だけで使い、
