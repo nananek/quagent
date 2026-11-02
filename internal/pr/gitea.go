@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os/exec"
 	"strings"
 	"time"
 )
@@ -81,12 +80,11 @@ func (f *GiteaForge) repoPath() (owner, repo string, err error) {
 	if f.owner != "" && f.repo != "" {
 		return f.owner, f.repo, nil
 	}
-	cmd := exec.Command("git", "-C", f.dir, "remote", "get-url", "origin")
-	out, err := cmd.Output()
+	raw, err := originURL(f.dir)
 	if err != nil {
 		return "", "", fmt.Errorf("origin の URL を読めない (pr.gitea.owner / repo を指定する): %w", err)
 	}
-	owner, repo, err = parseRemote(strings.TrimSpace(string(out)))
+	owner, repo, err = parseRemote(raw)
 	if err != nil {
 		return "", "", fmt.Errorf("origin から owner/repo を解釈できない (pr.gitea.owner / repo を指定する): %w", err)
 	}

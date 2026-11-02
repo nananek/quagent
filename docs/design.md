@@ -280,15 +280,16 @@ Web 透過プロキシを通過するすべての HTTP リクエスト（URL、�
 
 ### 対応する PR サービス (GitHub / Gitea)
 
-PR 作成は forge (GitHub / Gitea) の違いを吸収する形に抽象化されています。`config.json` の `pr.forge` で切り替え、既定は GitHub (`gh` CLI) です。`"gitea"` を指定すると Gitea / Forgejo の REST API で PR を作成・更新します (`gh` も `tea` も不要)。
+PR 作成は forge (GitHub / Gitea) の違いを吸収する形に抽象化されています。`config.json` の `pr.forge` で切り替え、既定は GitHub (`gh` CLI) です。`"gitea"` を指定すると Gitea / Forgejo の REST API で PR を作成・更新します (`gh` も `tea` も不要)。`"auto"` にすると origin のホスト名で選ぶため、GitHub と Gitea のリポジトリを 1 つの設定で併用できます。
 
 | キー | 内容 |
 | --- | --- |
-| `pr.forge` | `"github"` (既定) または `"gitea"` |
+| `pr.forge` | `"github"` (既定) / `"gitea"` / `"auto"`。`"auto"` は origin のホスト名が `pr.gitea.url` と同じなら Gitea、それ以外は GitHub |
 | `pr.gitea.url` | Gitea の base URL。API は `<url>/api/v1` を使う。サブパス設置なら `https://example.com/gitea` |
 | `pr.gitea.token_env` / `token_file` / `token_command` | API トークンの取得方法。いずれか 1 つだけ指定する |
 | `pr.gitea.owner` / `pr.gitea.repo` | 任意。origin の URL から owner/repo を解釈できないリモートのときだけ指定する |
 
+- **forge の自動選択:** `pr.forge` が `"auto"` のとき、run の開始時に origin の URL からホスト名を取り出し、`pr.gitea.url` のホスト名と一致すれば Gitea、一致しなければ GitHub を選びます。判定に使うのはホスト名だけで、ポートとパス (サブパス設置) は見ません。origin を持たないリポジトリでは push も PR もできないため、この時点でエラーにします。
 - **トークンの非保持:** トークンは PR の作成・更新の直前にホスト側で取得し、VM には渡しません。取得に失敗した場合は push を済ませたままエラーを返します (PR は作られません)。API がエラーを返した場合も push は取り消さずエラーを返します。
 - **トークンのスコープ:** Gitea の API トークンには、対象リポジトリで PR を作成・更新できる権限が必要です。repository の read/write に相当し、Gitea のスコープ表記では `write:repository` です。読み取り専用のトークンでは PR を作成・更新できません。
 - **TLS 信頼:** Gitea クライアントはホストの既定の TLS 検証を使い、証明書検証を無効化する設定を持ちません。自己署名証明書の Gitea へ接続するには、ホストの信頼ストアに CA を追加します。
