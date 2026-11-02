@@ -1,7 +1,8 @@
 // Package pr は guest のブランチを host 側で取り込み、署名して push し、PR を作る。
 //
-// gh のトークンも利用者の署名鍵も VM に入れない。VM 内のコミットは run ごとの
-// 捨て鍵 (印) で署名させておき、host は guest の /work からブランチを取り込んで、
+// forge (GitHub / Gitea) のトークンも利用者の署名鍵も VM に入れない。VM 内の
+// コミットは run ごとの捨て鍵 (印) で署名させておき、host は guest の /work から
+// ブランチを取り込んで、
 // 印の付いたコミット (= VM で作ったもの) だけを利用者の鍵で署名し直して、host の
 // repo の origin へ push する。host の repo に既にあるコミット (他人のものや未 push
 // のもの) には一切触らない。push 先は固定で、保護ブランチには push しない。
@@ -11,7 +12,6 @@ package pr
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -28,7 +28,7 @@ import (
 // DefaultProtected は既定の保護ブランチ。
 var DefaultProtected = []string{"main", "master", "develop"}
 
-// 敵対的なエージェントに host の資源 (署名・ディスク・GitHub) を使い潰させない上限。
+// 敵対的なエージェントに host の資源 (署名・ディスク・Git サーバー) を使い潰させない上限。
 const (
 	maxTitleRunes = 256
 	maxBodyBytes  = 60000
@@ -60,7 +60,7 @@ type Result struct {
 
 // Publisher は 1 つの run の PR 作成を担う。
 type Publisher struct {
-	Repo      string   // host の repo (origin と gh の対象)
+	Repo      string   // host の repo (origin と forge の対象)
 	Work      string   // run の作業ディレクトリ
 	GuestURL  string   // guest の repo を取り込む URL
 	GitConfig []string // git に足す設定 (-c の値。ext:: 転送の許可など)
@@ -73,8 +73,8 @@ type Publisher struct {
 	// Approve は push の前に承認を求める (nil なら確認なしで進む)。エラーを返すと
 	// push も PR の作成もしない。base は既定ブランチを埋めた値。
 	Approve func(Request) error
-	// GH は PR を作る (nil なら作らずに push まで)。テストで差し替える。
-	GH func(dir string, args ...string) ([]byte, error)
+	// Forge は PR を作る (nil なら作らずに push まで)。テストで差し替える。
+	Forge Forge
 
 	mu        sync.Mutex
 	bare      string
@@ -532,46 +532,31 @@ func (p *Publisher) resign(c string) (string, error) {
 
 func (p *Publisher) finish(req Request, base, head string, signed int) (Result, error) {
 	res := Result{Branch: req.Branch, Base: base, Head: head, Signed: signed}
-	if p.GH == nil {
+	if p.Forge == nil {
 		return res, nil
 	}
 	// 開いている PR があれば push で更新済み。閉じた・マージ済みの PR は使い回さない。
 	// タイトル・本文は push では変わらないので、依頼と違えば入れ直す。
-	if url, title, body, ok := p.openPR(req.Branch); ok {
-		res.URL = url
-		if title != req.Title || body != req.Body {
-			if out, err := p.GH(p.Repo, "pr", "edit", url, "--title", req.Title, "--body", req.Body); err != nil {
-				return res, fmt.Errorf("PR のタイトル・本文を更新できない: %v: %s", err, out)
+	existing, ok, err := p.Forge.OpenPR(req.Branch)
+	if err != nil {
+		return res, fmt.Errorf("push はしたが PR を確認できない: %w", err)
+	}
+	if ok {
+		res.URL = existing.URL
+		if existing.Title != req.Title || existing.Body != req.Body {
+			if err := p.Forge.EditPR(existing, req.Title, req.Body); err != nil {
+				return res, fmt.Errorf("PR のタイトル・本文を更新できない: %w", err)
 			}
 		}
 		return res, nil
 	}
-	out, err := p.GH(p.Repo, "pr", "create", "--head", req.Branch, "--base", base,
-		"--title", req.Title, "--body", req.Body)
+	created, err := p.Forge.CreatePR(req.Branch, base, req.Title, req.Body)
 	if err != nil {
-		return res, fmt.Errorf("push はしたが PR を作れない: %v: %s", err, out)
+		return res, fmt.Errorf("push はしたが PR を作れない: %w", err)
 	}
-	res.URL = strings.TrimSpace(lastLine(string(out)))
+	res.URL = created.URL
 	res.Created = true
 	return res, nil
-}
-
-// openPR は branch に開いている PR があれば、その URL・タイトル・本文を返す。
-func (p *Publisher) openPR(branch string) (url, title, body string, ok bool) {
-	out, err := p.GH(p.Repo, "pr", "view", branch, "--json", "url,state,title,body")
-	if err != nil {
-		return "", "", "", false
-	}
-	var v struct {
-		URL   string `json:"url"`
-		State string `json:"state"`
-		Title string `json:"title"`
-		Body  string `json:"body"`
-	}
-	if json.Unmarshal(out, &v) != nil || v.State != "OPEN" || v.URL == "" {
-		return "", "", "", false
-	}
-	return v.URL, v.Title, v.Body, true
 }
 
 func lastLine(s string) string {

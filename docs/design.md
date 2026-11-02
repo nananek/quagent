@@ -13,7 +13,7 @@ quagent は境界制御と内部制限を組み合わせた多層防御を採用
 | **第1層: ホスト & VM 境界** | ・QEMU (KVM) による完全隔離と非特権名前空間の分離<br>・QEMU プロセスのサンドボックス化（seccomp / Landlock / tmpfs）<br>・ホスト・VM 間通信の vsock 単一化（sshd 排除）<br>・ホスト側リソース監視と動的保護（容量検査、ACPI 停止） |
 | **第2層: ゲストOS & サンドボックス** | ・非特権 `agent` ユーザーと rootless Docker<br>・カーネル硬化（Lockdown、モジュール署名、32bit ABI 廃止）<br>・VM 内コマンドの seccomp / Landlock 制限<br>・プロセス間権限分離（窓口 PID 検証、設定ファイル不可視化） |
 | **第3層: ネットワーク & Egress 遮断** | ・ホスト側 nftables による Default Deny と IPv6 遮断<br>・自前 DNS による名前解決制御と内部向け IP 遮断<br>・Web 透過プロキシによる SNI / Host 検証<br>・Content Guard / DLP による機密情報漏洩遮断と動的緩和 |
-| **第4層: 機密情報の非保持** | ・LLM API キー、GitHub トークン、GPG 鍵を VM に置かない<br>・ホスト側 LLM 認証プロキシ（推論・モデル一覧のみ転送）<br>・OpenAPI ツールサーバーのホスト側プロキシ<br>・使い捨て鍵とホスト正規鍵による二重署名 Git PR<br>・rootless Docker 向け OCI Pull-through Cache（vsock 経由・読み取り専用） |
+| **第4層: 機密情報の非保持** | ・LLM API キー、GitHub / Gitea のトークン、GPG 鍵を VM に置かない<br>・ホスト側 LLM 認証プロキシ（推論・モデル一覧のみ転送）<br>・OpenAPI ツールサーバーのホスト側プロキシ<br>・使い捨て鍵とホスト正規鍵による二重署名 Git PR<br>・rootless Docker 向け OCI Pull-through Cache（vsock 経由・読み取り専用） |
 | **第5層: コントロール & 承認** | ・承認コンソールによる対話確認（通信申請、動的緩和、Docker イメージ取得、PR 作成）<br>・Web 遠隔操作 (hub) のワンタイム URL 認証と Tailscale バインド<br>・Git オブジェクト取り込み時の `transfer.fsckObjects` 検査<br>・画面偽装防止（制御文字・Bidi エスケープ）<br>・各種リソース上限と改変不能なホスト監査ログ (`host.log`) |
 
 | **第6層: ビルド & サプライチェーン** | ・静的リンクバイナリ (`CGO_ENABLED=0`)<br>・ベースイメージの GPG 署名検証 (Arch)<br>・Dependabot 更新の 7 日間遅延適用 |
@@ -265,7 +265,7 @@ Web 透過プロキシを通過するすべての HTTP リクエスト（URL、�
 
 ## PR 作成とコミット再署名: 一時鍵とホスト正規鍵の連携で安全に公開する
 
-エージェントは `/work` の保護されていないブランチにコミットを作成し、MCP の `create_pull_request` ツールを通じてプルリクエストの作成を依頼します。GitHub のパーソナルアクセストークンやコミット署名鍵は VM 内には配置されません。
+エージェントは `/work` の保護されていないブランチにコミットを作成し、MCP の `create_pull_request` ツールを通じてプルリクエストの作成を依頼します。PR サービスの認証トークン (GitHub / Gitea) やコミット署名鍵は VM 内には配置されません。
 
 ### コミット取り込みと再署名の流れ
 
@@ -276,13 +276,32 @@ Web 透過プロキシを通過するすべての HTTP リクエスト（URL、�
    - **属性の維持:** コミットの内容、コミットログ、author 情報（利用者の名義）は一切変更せず、committer のみ利用者の情報に設定されます。
    - **既存コミットの保護:** ホスト側リポジトリに既に存在するコミット（他者が作成したコミットや未 push のコミット）は、ハッシュ値も署名も変更せずに維持されます。既に push 済みのコミットがゲスト側に残っている場合も内容の一致を確認してそのまま利用します。そのため、同一 PR への追加コミットによって過去のコミットハッシュが改変されることはありません。
    - **拒否条件:** 署名が存在しないコミットや、ホスト側にも存在しない不正なコミット（VM 内で署名を無効化して作成されたものなど）が含まれている場合は処理を拒否します。
-4. **GitHub への push と PR 作成:** ホスト側リポジトリの `origin` リモートへブランチを push し、`gh` CLI で GitHub 上に PR を作成します。既に PR が存在する場合はブランチを更新し、依頼されたタイトル・本文が現在の PR と違えば `gh pr edit` で入れ直します。
+4. **push と PR 作成:** ホスト側リポジトリの `origin` リモートへブランチを push し、PR を作成します。GitHub は `gh` CLI、Gitea / Forgejo は REST API を使います。既に PR が存在する場合はブランチを更新し、依頼されたタイトル・本文が現在の PR と違えば更新します。
+
+### 対応する PR サービス (GitHub / Gitea)
+
+PR 作成は forge (GitHub / Gitea) の違いを吸収する形に抽象化されています。`config.json` の `pr.forge` で切り替え、既定は GitHub (`gh` CLI) です。`"gitea"` を指定すると Gitea / Forgejo の REST API で PR を作成・更新します (`gh` も `tea` も不要)。
+
+| キー | 内容 |
+| --- | --- |
+| `pr.forge` | `"github"` (既定) または `"gitea"` |
+| `pr.gitea.url` | Gitea の base URL。API は `<url>/api/v1` を使う。サブパス設置なら `https://example.com/gitea` |
+| `pr.gitea.token_env` / `token_file` / `token_command` | API トークンの取得方法。いずれか 1 つだけ指定する |
+| `pr.gitea.owner` / `pr.gitea.repo` | 任意。origin の URL から owner/repo を解釈できないリモートのときだけ指定する |
+
+- **トークンの非保持:** トークンは PR の作成・更新の直前にホスト側で取得し、VM には渡しません。取得に失敗した場合は push を済ませたままエラーを返します (PR は作られません)。API がエラーを返した場合も push は取り消さずエラーを返します。
+- **トークンのスコープ:** Gitea の API トークンには、対象リポジトリで PR を作成・更新できる権限が必要です。repository の read/write に相当し、Gitea のスコープ表記では `write:repository` です。読み取り専用のトークンでは PR を作成・更新できません。
+- **TLS 信頼:** Gitea クライアントはホストの既定の TLS 検証を使い、証明書検証を無効化する設定を持ちません。自己署名証明書の Gitea へ接続するには、ホストの信頼ストアに CA を追加します。
+- **push 認証:** push は従来どおりホスト側 Git の設定 (SSH 鍵や credential helper) で行います。PR 用のトークンを push には使いません。
+- **既存 PR の判定:** 開いている PR を API のページを進めて取得し、head ブランチ名と head リポジトリ (owner/repo) の両方が一致するものを対象にします。閉じた・マージ済みの PR は使い回しません。
+- **更新:** 対象の PR があれば、タイトル・本文が依頼と違うときだけ PATCH で更新します。無ければ作成します。
+- **forge 非依存の制御:** 再署名、保護ブランチ、force push の防止、承認フロー (`--pr-approval`) は forge によらず同じように動作します。
 
 ### 署名鍵と認証情報の隔離
 
 SSH 署名で ssh-agent を利用している場合は、quagent 起動時の環境変数 `SSH_AUTH_SOCK` が参照されます。SSH エージェント転送経由で接続している環境では、転送元のセッションが切断されると以降のコミット署名に失敗します（tmux にアタッチし直しても quagent 本体の実行環境変数は変更されません）。
 
-コミットの author は利用者の名義で作成されます。VM にはホスト側 Git の `user.name` / `user.email` のみが渡され、署名秘密鍵や GitHub 認証トークンは渡されません。
+コミットの author は利用者の名義で作成されます。VM にはホスト側 Git の `user.name` / `user.email` のみが渡され、署名秘密鍵や PR サービスの認証トークン (GitHub / Gitea) は渡されません。
 
 ### プッシュ制御と保護ブランチ
 
@@ -296,7 +315,7 @@ PR 作成は既定で承認制（`--pr-approval`、TUI の起動設定「PR を�
 
 - `n` が入力された場合や 10 分間応答がない場合は、push および PR 作成は中止されます。
 - 自動 push に戻す場合は `--pr-approval=false` を指定します。
-- 承認フローを有効にした場合でも、PR 作成後に GitHub 上で内容を最終確認することを推奨します。
+- 承認フローを有効にした場合でも、PR 作成後に PR サービス上で内容を最終確認することを推奨します。
 
 ## Web 遠隔操作 (hub): ワンタイム URL と tmux control mode で Tailscale 越しに操作する
 

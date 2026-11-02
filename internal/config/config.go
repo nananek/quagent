@@ -321,6 +321,49 @@ type PR struct {
 	// ProtectedBranches はエージェントに push させないブランチ。
 	// 未指定なら main / master / develop。
 	ProtectedBranches []string `json:"protected_branches,omitempty"`
+	// Forge は PR を扱うサービス ("github" または "gitea")。空なら "github"。
+	Forge string `json:"forge,omitempty"`
+	// Gitea は forge が "gitea" のときの接続設定。
+	Gitea *Gitea `json:"gitea,omitempty"`
+}
+
+// ForgeResolved は PR を扱うサービスを返す (既定: "github")。
+func (p PR) ForgeResolved() string {
+	f := strings.ToLower(strings.TrimSpace(p.Forge))
+	if f == "" {
+		return "github"
+	}
+	return f
+}
+
+// Gitea は Gitea / Forgejo の接続設定。
+type Gitea struct {
+	// URL は Gitea の base URL (例: https://git.example.com)。API は <url>/api/v1。
+	URL string `json:"url,omitempty"`
+	// Owner / Repo は origin から解釈できない場合の明示指定。
+	Owner string `json:"owner,omitempty"`
+	Repo  string `json:"repo,omitempty"`
+	// トークンの取り出し方。どれか 1 つを指定する (providers の secret と同じ書式)。
+	TokenEnv     string   `json:"token_env,omitempty"`
+	TokenFile    string   `json:"token_file,omitempty"`
+	TokenCommand []string `json:"token_command,omitempty"`
+}
+
+// Token は Gitea のトークンを取り出す。トークンは host のプロセス内だけで使い、
+// guest には渡さない。
+func (g *Gitea) Token() (string, error) {
+	if g == nil {
+		return "", fmt.Errorf("pr.gitea が無い")
+	}
+	if g.TokenEnv == "" && g.TokenFile == "" && len(g.TokenCommand) == 0 {
+		return "", fmt.Errorf("pr.gitea.token_env / token_file / token_command のどれかが必要")
+	}
+	p := Provider{SecretEnv: g.TokenEnv, SecretFile: g.TokenFile, SecretCommand: g.TokenCommand}
+	s, err := p.Secret()
+	if err != nil {
+		return "", fmt.Errorf("Gitea のトークンを取得できない: %w", err)
+	}
+	return s, nil
 }
 
 // Agy は VM 内の agy (Antigravity CLI) の設定。

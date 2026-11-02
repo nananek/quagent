@@ -560,6 +560,81 @@ func TestHubWebhookSecret(t *testing.T) {
 	}
 }
 
+func TestForgeResolved(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", "github"},
+		{"   ", "github"},
+		{" Gitea ", "gitea"},
+		{"GITHUB", "github"},
+		{"forgejo", "forgejo"},
+	}
+	for _, c := range cases {
+		if got := (PR{Forge: c.in}).ForgeResolved(); got != c.want {
+			t.Errorf("ForgeResolved(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestGiteaToken(t *testing.T) {
+	var nilGitea *Gitea
+	if _, err := nilGitea.Token(); err == nil {
+		t.Error("nil の Gitea が通った")
+	}
+	if _, err := (&Gitea{}).Token(); err == nil {
+		t.Error("取り出し方の無い Gitea が通った")
+	} else if !strings.Contains(err.Error(), "token_env") {
+		t.Errorf("エラーに取り出し方の説明が無い: %v", err)
+	}
+
+	t.Setenv("QUAGENT_TEST_GITEA_TOKEN", "env-token")
+	if got, err := (&Gitea{TokenEnv: "QUAGENT_TEST_GITEA_TOKEN"}).Token(); err != nil || got != "env-token" {
+		t.Errorf("env: %q, %v", got, err)
+	}
+
+	dir := t.TempDir()
+	file := filepath.Join(dir, "token")
+	if err := os.WriteFile(file, []byte(" file-token \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := (&Gitea{TokenFile: file}).Token(); err != nil || got != "file-token" {
+		t.Errorf("file: %q, %v", got, err)
+	}
+
+	if got, err := (&Gitea{TokenCommand: []string{"echo", "cmd-token"}}).Token(); err != nil || got != "cmd-token" {
+		t.Errorf("command: %q, %v", got, err)
+	}
+
+	// 取り出しに失敗したら Gitea のトークンだと分かるエラーにする
+	_, err := (&Gitea{TokenEnv: "QUAGENT_TEST_GITEA_MISSING"}).Token()
+	if err == nil {
+		t.Fatal("未設定の環境変数が通った")
+	}
+	if !strings.Contains(err.Error(), "Gitea のトークンを取得できない") {
+		t.Errorf("エラーの文脈が無い: %v", err)
+	}
+}
+
+func TestGiteaConfigJSON(t *testing.T) {
+	doc := `{"pr":{"forge":"gitea","gitea":{
+		"url":"https://git.example.com","owner":"org","repo":"repo","token_env":"QUAGENT_TEST_GITEA_JSON"}}}`
+	var c Config
+	if err := json.Unmarshal([]byte(doc), &c); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.PR.ForgeResolved(); got != "gitea" {
+		t.Errorf("forge = %q", got)
+	}
+	g := c.PR.Gitea
+	if g == nil || g.URL != "https://git.example.com" || g.Owner != "org" || g.Repo != "repo" ||
+		g.TokenEnv != "QUAGENT_TEST_GITEA_JSON" {
+		t.Fatalf("読み込み: %+v", g)
+	}
+	t.Setenv("QUAGENT_TEST_GITEA_JSON", "json-token")
+	if got, err := g.Token(); err != nil || got != "json-token" {
+		t.Errorf("Token() = %q, %v", got, err)
+	}
+}
+
 func TestHubSectionRoundTrip(t *testing.T) {
 	// JSON から読み込めること。
 	doc := `{"hub":{"enabled":true,"listen":"tailscale","port":1234,
