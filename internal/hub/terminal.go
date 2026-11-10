@@ -39,6 +39,9 @@ type controlClient struct {
 	cmdMu   sync.Mutex // コマンドは 1 つずつ流す
 	replies chan []string
 
+	pasteOnce sync.Once
+	pasteRaw  bool // paste-buffer が -S を受け付けるか
+
 	closeOnce sync.Once
 	done      chan struct{}
 	waitErr   error
@@ -269,8 +272,9 @@ func (c *controlClient) Paste(data []byte) error {
 	} else if len(out) > 0 {
 		return fmt.Errorf("load-buffer に失敗した: %s", strings.Join(out, "; "))
 	}
-	// -r で改行をそのまま渡し、-d で使い終わったバッファを消す。
-	out, err := c.run(fmt.Sprintf("paste-buffer -d -r -b %s -t %s", quote(name), quote(c.pane)))
+	// -r で改行をそのまま渡し、-d で使い終わったバッファを消す。-S は tmux 3.7
+	// 以降の vis(3) 経由の変換 (ESC が "^[" になる) を止めるために付ける。
+	out, err := c.run(fmt.Sprintf("paste-buffer -d -r%s -b %s -t %s", c.pasteRawFlag(), quote(name), quote(c.pane)))
 	if err != nil || len(out) > 0 {
 		// 失敗するとバッファが残るので消しておく。
 		_, _ = c.run(fmt.Sprintf("delete-buffer -b %s", quote(name)))
@@ -282,6 +286,50 @@ func (c *controlClient) Paste(data []byte) error {
 		return fmt.Errorf("paste-buffer に失敗した: %s", strings.Join(out, "; "))
 	}
 	return nil
+}
+
+// pasteRawFlag は paste-buffer に付ける -S の有無を返す。tmux 3.7 以降は
+// 貼り付けたバッファを vis(3) に通すため、ESC などの制御文字が "^[" に置き換わり、
+// ブラケットペーストのマーカー (ESC[200~) も壊れる。-S でその変換を止める。
+// 3.7 より前の tmux は変換自体を行わないので、フラグの有無だけを見て決める。
+func (c *controlClient) pasteRawFlag() string {
+	c.pasteOnce.Do(func() {
+		lines, err := c.run("list-commands paste-buffer")
+		if err != nil {
+			return
+		}
+		for _, ln := range lines {
+			if hasShortFlag(ln, 'S') {
+				c.pasteRaw = true
+				return
+			}
+		}
+	})
+	if c.pasteRaw {
+		return " -S"
+	}
+	return ""
+}
+
+// hasShortFlag は tmux の usage 行 ("paste-buffer (pasteb) [-dprS] …") の
+// フラグ群に want が含まれるかを返す。
+func hasShortFlag(line string, want byte) bool {
+	for {
+		i := strings.IndexByte(line, '[')
+		if i < 0 {
+			return false
+		}
+		line = line[i+1:]
+		j := strings.IndexByte(line, ']')
+		if j < 0 {
+			return false
+		}
+		group := line[:j]
+		if strings.HasPrefix(group, "-") && strings.IndexByte(group[1:], want) >= 0 {
+			return true
+		}
+		line = line[j+1:]
+	}
 }
 
 // Resize は control クライアントのサイズを伝える (バリデーション付き)。

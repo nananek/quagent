@@ -113,14 +113,10 @@ func TestControlClient(t *testing.T) {
 		t.Errorf("window-size = %q, want %q", got, "window-size smallest")
 	}
 
-	// 初期画面には先に出た出力が残っている。
-	screen, err := cc.Capture()
-	if err != nil {
-		t.Fatalf("Capture: %v", err)
-	}
-	if !strings.Contains(string(screen), "HELLO") {
-		t.Errorf("初期画面に HELLO が無い: %q", screen)
-	}
+	// 初期画面には先に出た出力が残っている。ペインのシェルが動き出して最初の行を
+	// 書くまでには数十ミリ秒かかるので、出るまで待ってから見る (待たずに取りに行くと
+	// 空の画面を掴む)。
+	screen := waitForCapture(t, cc, "HELLO", 5*time.Second)
 	if !bytes.Contains(screen, []byte("\x1b[31m")) {
 		t.Errorf("色のエスケープが保持されていない: %q", screen)
 	}
@@ -200,6 +196,46 @@ func TestControlClientPaste(t *testing.T) {
 			got := strings.Join(strings.Fields(string(acc)), "")
 			t.Fatalf("貼り付けたバイトが一致しない\n want: %s\n got:  %s", want, got)
 		}
+	}
+}
+
+// TestHasShortFlag は paste-buffer の -S 判定を確かめる。tmux 3.7 以降は usage の
+// フラグ群に -S が入り、3.6 以前には無い。
+func TestHasShortFlag(t *testing.T) {
+	cases := []struct {
+		line string
+		want bool
+	}{
+		{"paste-buffer (pasteb) [-dprS] [-s separator] [-b buffer-name] [-t target-pane]", true},
+		{"paste-buffer (pasteb) [-dp] [-s separator] [-b buffer-name] [-t target-pane]", false},
+		{"paste-buffer (pasteb) [separator S]", false}, // フラグ群でない括弧は見ない
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := hasShortFlag(c.line, 'S'); got != c.want {
+			t.Errorf("hasShortFlag(%q) = %v, want %v", c.line, got, c.want)
+		}
+	}
+}
+
+// waitForCapture はペインの初期画面に want が現れるまで Capture を繰り返し、
+// 現れた画面を返す。control mode の attach 直後はペイン側のシェルがまだ最初の
+// 行を書いていないことがあり、その時点の capture-pane は空になる。
+func waitForCapture(t *testing.T, cc *controlClient, want string, d time.Duration) []byte {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for {
+		screen, err := cc.Capture()
+		if err != nil {
+			t.Fatalf("Capture: %v", err)
+		}
+		if strings.Contains(string(screen), want) {
+			return screen
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("初期画面に %s が現れない: %q", want, screen)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
