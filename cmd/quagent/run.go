@@ -1539,6 +1539,12 @@ func copyRepo(g vmGuest, repo, work, markKey string, localHead bool) error {
 	if err != nil {
 		return err
 	}
+	// shallow clone の境界は bundle に載らない。ゲスト側にも同じ shallow を書いて、
+	// 取り込み時に境界の親を辿らないようにする (辿ると欠けた object で失敗する)。
+	shallow, err := shallowBoundary(repo)
+	if err != nil {
+		return err
+	}
 	bundle := filepath.Join(work, "repo.bundle")
 	if out, err := exec.Command("git", "-C", repo, "bundle", "create", "-q", bundle, src, "--remotes=origin").CombinedOutput(); err != nil {
 		return fmt.Errorf("git bundle に失敗: %v: %s", err, out)
@@ -1572,6 +1578,10 @@ func copyRepo(g vmGuest, repo, work, markKey string, localHead bool) error {
 	}
 	// コミットは利用者の名前で作り (host と同じ user.name / user.email)、run ごとの
 	// 捨て鍵で署名して「VM で作った」印にする。利用者の鍵での署名は PR 化のときに host で行う。
+	shallowCmd := ""
+	if len(shallow) > 0 {
+		shallowCmd = "printf '%s' " + shellQuote(string(shallow)) + " > .git/shallow\n"
+	}
 	script := `set -e
 git config --global user.name ` + shellQuote(name) + `
 git config --global user.email ` + shellQuote(email) + `
@@ -1582,13 +1592,34 @@ git config --global commit.gpgsign true
 git config --global tag.gpgsign false
 cd /work
 git init -q -b quagent-init
-git fetch -q /tmp/repo.bundle '+refs/remotes/*:refs/remotes/*' ` + shellQuote("+"+src+":"+dst) + `
+` + shallowCmd + `git fetch -q /tmp/repo.bundle '+refs/remotes/*:refs/remotes/*' ` + shellQuote("+"+src+":"+dst) + `
 git checkout -q ` + checkout + `
 rm /tmp/repo.bundle`
 	if out, err := g.sh(script, nil); err != nil {
 		return fmt.Errorf("VM 内での取り込みに失敗: %v: %s", err, out)
 	}
 	return nil
+}
+
+// shallowBoundary は repo が shallow clone のとき境界コミットの一覧 (.git/shallow)
+// を返す。shallow でなければ nil を返す。
+func shallowBoundary(repo string) ([]byte, error) {
+	out, err := exec.Command("git", "-C", repo, "rev-parse", "--git-path", "shallow").Output()
+	if err != nil {
+		return nil, fmt.Errorf("shallow の場所を調べられない: %v", err)
+	}
+	path := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(repo, path)
+	}
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("shallow を読めない: %v", err)
+	}
+	return b, nil
 }
 
 // pickHead は VM に渡す先頭を決める。src は host の ref (bundle に入れるもの)、dst は
