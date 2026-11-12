@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/tar"
+	"bytes"
 	"io"
 	"os"
 	"os/exec"
@@ -182,6 +183,48 @@ func TestWriteTarDirExtractsWithTar(t *testing.T) {
 	fi, err := os.Stat(filepath.Join(dst, "d", "x"))
 	if err != nil || fi.Mode().Perm()&0o111 == 0 {
 		t.Fatalf("実行ビットが落ちている: %v, %v", fi, err)
+	}
+}
+
+type swapOnWrite func([]byte) (int, error)
+
+func (f swapOnWrite) Write(p []byte) (int, error) { return f(p) }
+
+// TestWriteTarDirRejectsSwappedSymlink は、WalkDir の Info() のあとで通常ファイルを
+// シンボリックリンクに差し替えても、リンク先のホスト側ファイルを読まないことを確かめる。
+func TestWriteTarDirRejectsSwappedSymlink(t *testing.T) {
+	src := t.TempDir()
+	victim := filepath.Join(src, "victim")
+	if err := os.WriteFile(victim, []byte("benign"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	secretDir := t.TempDir()
+	secret := filepath.Join(secretDir, "secret")
+	if err := os.WriteFile(secret, []byte("TOPSECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	swapped := false
+	swap := swapOnWrite(func(p []byte) (int, error) {
+		if !swapped {
+			swapped = true
+			_ = os.Remove(victim)
+			_ = os.Symlink(secret, victim)
+		}
+		return len(p), nil
+	})
+
+	var archive bytes.Buffer
+	tw := tar.NewWriter(io.MultiWriter(&archive, swap))
+	var stats copyStats
+	if err := writeTarDir(tw, src, false, &stats); err != nil {
+		return // 差し替えを検知して止まるのが正しい
+	}
+	if err := tw.Close(); err != nil {
+		return
+	}
+	if strings.Contains(archive.String(), "TOPSEC") {
+		t.Fatalf("差し替えられたシンボリックリンクを辿り、%s の内容を tar に含めた", secret)
 	}
 }
 

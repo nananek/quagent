@@ -276,8 +276,33 @@ func diagWorkMount(g vmGuest) string {
 	return string(out)
 }
 
+// openSourceFile はコピー元の通常ファイルを、WalkDir が見たものと同じ実体として開く。
+// WalkDir の Info() から os.Open までのあいだにパスをシンボリックリンクへ差し替えられても、
+// O_NOFOLLOW と SameFile でリンク先を読まない。
+func openSourceFile(root *os.Root, rel string, want fs.FileInfo) (*os.File, error) {
+	f, err := root.OpenFile(rel, os.O_RDONLY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	got, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if !got.Mode().IsRegular() || !os.SameFile(want, got) {
+		f.Close()
+		return nil, fmt.Errorf("コピー中にファイルが差し替えられた: %s", rel)
+	}
+	return f, nil
+}
+
 // writeTarDir は src の中身 (src 自身は含めない) を tar に書く。
 func writeTarDir(tw *tar.Writer, src string, skipTmp bool, stats *copyStats) error {
+	root, err := os.OpenRoot(src)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	links := map[[2]uint64]string{}
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -324,7 +349,7 @@ func writeTarDir(tw *tar.Writer, src string, skipTmp bool, stats *copyStats) err
 			}); err != nil {
 				return err
 			}
-			f, err := os.Open(path)
+			f, err := openSourceFile(root, rel, info)
 			if err != nil {
 				return err
 			}
