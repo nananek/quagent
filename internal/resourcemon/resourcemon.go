@@ -19,14 +19,18 @@ const DefaultVirtualDiskBytes = int64(40) * 1024 * 1024 * 1024
 
 // Config は監視のパラメータ。
 type Config struct {
-	WorkDir           string
-	OverlayPath       string
-	BaseDiskPath      string
-	HostSafetyFreeGiB int
-	DiskWarnPercent   int
-	DiskStopPercent   int
-	MaxLogSizeMiB     int
-	Interval          time.Duration
+	WorkDir      string
+	OverlayPath  string
+	BaseDiskPath string
+	// WorkDiskPath / WorkDiskVirtualBytes は --copy の /work 用ディスク。
+	// 空なら監視しない。
+	WorkDiskPath         string
+	WorkDiskVirtualBytes int64
+	HostSafetyFreeGiB    int
+	DiskWarnPercent      int
+	DiskStopPercent      int
+	MaxLogSizeMiB        int
+	Interval             time.Duration
 }
 
 // Monitor はストレージおよびログの動的監視を行う。
@@ -111,26 +115,46 @@ func (m *Monitor) CheckStorage() (alertMsg string, stopReason string, err error)
 		}
 	}
 
-	// 2. overlay.qcow2 の物理消費量とゲスト使用率の計算
-	if m.cfg.OverlayPath != "" {
+	// 2. 仮想ディスクごとの物理消費量とゲスト使用率。root と作業ディスクを
+	// 合算すると、片方が空のぶんもう片方の逼迫が薄まるので、それぞれで見る。
+	type diskUsage struct {
+		label     string
+		allocated int64
+		virtual   int64
+	}
+	var usages []diskUsage
+	if m.cfg.OverlayPath != "" && m.virtualDiskBytes > 0 {
 		var st unix.Stat_t
 		if err := unix.Stat(m.cfg.OverlayPath, &st); err == nil {
-			overlayAllocated := st.Blocks * 512
-			totalAllocated := m.baseAllocated + overlayAllocated
-			if m.virtualDiskBytes > 0 {
-				pct := int(float64(totalAllocated) * 100.0 / float64(m.virtualDiskBytes))
-				allocGiB := float64(totalAllocated) / (1024 * 1024 * 1024)
-				totalGiB := float64(m.virtualDiskBytes) / (1024 * 1024 * 1024)
+			usages = append(usages, diskUsage{
+				label:     "仮想マシンディスク",
+				allocated: m.baseAllocated + st.Blocks*512,
+				virtual:   m.virtualDiskBytes,
+			})
+		}
+	}
+	if m.cfg.WorkDiskPath != "" && m.cfg.WorkDiskVirtualBytes > 0 {
+		var st unix.Stat_t
+		if err := unix.Stat(m.cfg.WorkDiskPath, &st); err == nil {
+			usages = append(usages, diskUsage{
+				label:     "作業ディスク (/work)",
+				allocated: st.Blocks * 512,
+				virtual:   m.cfg.WorkDiskVirtualBytes,
+			})
+		}
+	}
+	for _, u := range usages {
+		pct := int(float64(u.allocated) * 100.0 / float64(u.virtual))
+		allocGiB := float64(u.allocated) / (1024 * 1024 * 1024)
+		totalGiB := float64(u.virtual) / (1024 * 1024 * 1024)
 
-				if pct >= m.cfg.DiskStopPercent {
-					stopReason = fmt.Sprintf("仮想マシンディスク使用量が %d%% に達しました (%.1f GiB / %.1f GiB)", pct, allocGiB, totalGiB)
-					return "", stopReason, nil
-				}
-				if pct >= m.cfg.DiskWarnPercent && !m.warnedDisk {
-					m.warnedDisk = true
-					alertMsg = fmt.Sprintf("仮想マシンディスク使用量が %d%% を超えました (%.1f GiB / %.1f GiB)。不要なファイルやキャッシュの削除を推奨します", pct, allocGiB, totalGiB)
-				}
-			}
+		if pct >= m.cfg.DiskStopPercent {
+			stopReason = fmt.Sprintf("%s使用量が %d%% に達しました (%.1f GiB / %.1f GiB)", u.label, pct, allocGiB, totalGiB)
+			return "", stopReason, nil
+		}
+		if pct >= m.cfg.DiskWarnPercent && !m.warnedDisk {
+			m.warnedDisk = true
+			alertMsg = fmt.Sprintf("%s使用量が %d%% を超えました (%.1f GiB / %.1f GiB)。不要なファイルやキャッシュの削除を推奨します", u.label, pct, allocGiB, totalGiB)
 		}
 	}
 

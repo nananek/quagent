@@ -19,10 +19,12 @@ const GuestUser = "agent"
 // GuestUID は GuestUser の uid (レシピは最初の一般ユーザーとして作るので 1000)。
 const GuestUID = 1000
 
-// DataDisk は guest に追加で見せる raw のディスク。
+// DataDisk は guest に追加で見せるディスク。
 type DataDisk struct {
 	Serial string // guest での識別名 (/dev/disk/by-id/virtio-<Serial>)
 	Path   string // host のイメージ
+	// Format は qemu に渡すイメージ形式 (raw / qcow2)。空なら raw。
+	Format string
 }
 
 // MakeSeed は NoCloud の seed ISO を dir に作り、そのパスを返す。
@@ -187,8 +189,12 @@ func QemuArgv(o QemuOpts) ([]string, error) {
 	for _, d := range o.DataDisks {
 		// オプション値の中のカンマは二重にしてエスケープする
 		path := strings.ReplaceAll(d.Path, ",", ",,")
+		format := d.Format
+		if format == "" {
+			format = "raw"
+		}
 		argv = append(argv,
-			"-drive", fmt.Sprintf("file=%s,if=none,id=%s,format=raw", path, d.Serial),
+			"-drive", fmt.Sprintf("file=%s,if=none,id=%s,format=%s", path, d.Serial, format),
 			"-device", fmt.Sprintf("virtio-blk-pci,drive=%s,serial=%s", d.Serial, d.Serial))
 	}
 	return append(argv, o.Extra...), nil

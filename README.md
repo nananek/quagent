@@ -56,6 +56,8 @@ quagent image build arch       # ベースイメージのビルド (--refresh �
 quagent image ls / rm IMAGE    # ビルド済みイメージの一覧表示・削除
 quagent cache ls / clean       # キャッシュの一覧表示・全削除
 quagent run --image arch       # VM を起動 (--mount-tmp: .tmp をホスト・ゲスト間で同期)
+quagent run --copy --work-size 20G
+                               # git ではないディレクトリをデータごと /work へコピー
 quagent hub                    # Web 遠隔操作モードを起動 (Tailscale 越しにブラウザから操作)
 
 ```
@@ -67,6 +69,41 @@ quagent hub                    # Web 遠隔操作モードを起動 (Tailscale �
   - `agy` (Antigravity CLI、`--dangerously-skip-permissions` 付与)
   - `codex` (Codex CLI、`--dangerously-bypass-approvals-and-sandbox` 付与)
   ※ VM による強固な隔離環境下で動作するため、エージェント側の実行前プロンプト確認はスキップして自律実行されます。
+
+### git ではないディレクトリ（本番コピー）を渡す: `--copy` でデータごと /work に入れる
+
+`--copy` を付けると、git の履歴ではなく `--repo`（既定はカレントディレクトリ）の中身をそのまま VM の `/work` へコピーします。docker-compose 一式、DB の実データを置いたバインドディレクトリ、アップロードファイルなど、git 管理外のファイルを含めて渡せます。
+
+```sh
+cd ~/misskey-prod-copy
+quagent run --copy --work-size 40G
+```
+
+- **ホストの原本は変更しません。** VM の `/work` は run ごとに作る可変サイズの qcow2 ディスクで、コピーした内容は終了時にディスクごと破棄されます。試験中に DB を書き換えてもホストへは返りません。結果を持ち帰りたいファイルだけ `--mount-tmp` で `<コピー元>/.tmp` と受け渡してください（`.tmp` はコピー対象から外れます。`<コピー元>/.tmp` が無ければ受け渡し用に作られます）。
+- **容量:** `--work-size` を省略すると、コピー元の見かけの大きさに余裕を足して自動で決めます。自動で決められるのは 256 GiB までです。それ以上は `--work-size` を明示してください。サイズは仮想容量で、ホストの実消費は書いた分だけです。
+- **コピーされるもの:** 通常ファイル、ディレクトリ、シンボリックリンク、ハードリンクを保持します。パイプ・ソケット・デバイスファイルはコピーしません。所有者は VM の作業ユーザー `agent` になり、パーミッションは umask の範囲で引き継ぎます。
+- **秘密情報:** `.env`、`default.yml`、DB ダンプなどはそのままエージェントから読めます。VM の外向き通信は既定で遮断されますが、テスト用の値に置き換えられるものは置き換えてください。
+- **PR は使いません。** `--copy` は試験用のモードなので `create_pull_request` は理由付きで拒否されます。コード変更を PR にしたい場合は `--copy` を外し、git の履歴ごと渡してください。
+- **Docker イメージ:** 完全にオフラインの環境では、必要なイメージをあらかじめホスト側の Pull-through キャッシュに載せるか、コピー元に `docker save` した tar を置いて VM 内で `docker load` してください。VM から外部レジストリへ直接取りに行くことはありません。
+- **rootless Docker の所有者:** コピーしたファイルは VM の `agent` 所有になります。コンテナ内の非 root ユーザーがバインドディレクトリへ書く構成では、uid マッピングの都合で権限エラーになることがあります。PostgreSQL 公式イメージのように起動時に `chown` するものはそのまま動きますが、うまくいかない場合は named volume に切り替えるか、compose の `user:` を調整してください。
+
+Misskey のアップグレード試験なら、本番の compose 一式を次のような形でコピーしておきます。
+
+```text
+misskey-prod-copy/
+  docker-compose.yml
+  .config/default.yml       # DB のパスワード等は試験用の値に置き換える
+  db/                       # PostgreSQL のデータディレクトリ
+  files/                    # アップロードファイル
+  images/                   # 任意: docker save した misskey / postgres / redis の tar
+```
+
+```sh
+cd misskey-prod-copy
+quagent run --copy --work-size 60G
+```
+
+VM の中では `/work` がこのディレクトリのコピーになっています。あとはエージェントに「ネットワークは使わず、`/work` の compose で現行版を起動して動作確認し、新しいイメージに切り替えてマイグレーションと起動確認をして」と指示します。イメージを `images/` に置いた場合は、先に `docker load -i images/<名前>.tar` で読み込ませてください。
 
 ### 外部プロセスからの承認 (quagent ctl)
 

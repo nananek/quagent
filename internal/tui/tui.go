@@ -31,6 +31,10 @@ type Launch struct {
 	MemMiB int    `json:"mem_mib"`
 	// MountTmp は repo の .tmp と VM の /work/.tmp を受け渡す。
 	MountTmp bool `json:"mount_tmp"`
+	// Copy は git の履歴ではなく、Repo のディレクトリをそのまま /work へコピーする。
+	Copy bool `json:"copy"`
+	// WorkSize は Copy のときの /work ディスク容量 (空なら自動)。
+	WorkSize string `json:"work_size"`
 	// NestedVirt は VM の中で KVM を使えるようにする。
 	NestedVirt bool `json:"nested_virt"`
 	// LocalHead はブランチをローカルの先頭 (未 push のコミットを含む) で渡す。
@@ -333,8 +337,14 @@ func startForm(agents []string) (Launch, error) {
 		agentOpts = append(agentOpts, huh.NewOption(a, a))
 	}
 	if cwd, err := os.Getwd(); err == nil {
-		if top := gitTop(cwd); top != "" {
+		if l.Copy {
+			if l.Repo == "" {
+				l.Repo = cwd
+			}
+		} else if top := gitTop(cwd); top != "" {
 			l.Repo = top
+		} else if l.Repo == "" {
+			l.Repo = cwd
 		}
 	}
 	opts, err := recipeOptions()
@@ -342,6 +352,11 @@ func startForm(agents []string) (Launch, error) {
 		return Launch{}, err
 	}
 	cpus, mem := strconv.Itoa(l.CPUs), strconv.Itoa(l.MemMiB)
+	mode := "git"
+	if l.Copy {
+		mode = "copy"
+	}
+	workSize := l.WorkSize
 	var extras []string
 	if l.MountTmp {
 		extras = append(extras, "tmp")
@@ -361,10 +376,20 @@ func startForm(agents []string) (Launch, error) {
 	}
 	ok := true
 	err = newForm(huh.NewGroup(
-		huh.NewInput().Title("対象 repo").Description("VM の /work にコピーする git repo").
+		huh.NewSelect[string]().Title("渡し方").
+			Description("git の履歴を渡すか、データを含むディレクトリをそのまま渡すか").
+			Options(
+				huh.NewOption("git の履歴ごと (未コミットの変更は渡さない)", "git"),
+				huh.NewOption("ディレクトリをそのままコピー (DB やアップロードも含む)", "copy"),
+			).Value(&mode),
+		huh.NewInput().Title("対象ディレクトリ").Description("VM の /work に渡すディレクトリ").
 			Value(&l.Repo).Validate(func(s string) error {
-			if gitTop(s) == "" {
-				return fmt.Errorf("git repo ではない")
+			fi, err := os.Stat(s)
+			if err != nil || !fi.IsDir() {
+				return fmt.Errorf("ディレクトリではない")
+			}
+			if mode == "git" && gitTop(s) == "" {
+				return fmt.Errorf("git repo ではない。そのままコピーするなら「渡し方」を切り替える")
 			}
 			return nil
 		}),
@@ -376,6 +401,8 @@ func startForm(agents []string) (Launch, error) {
 		huh.NewSelect[string]().Title("エージェント").Options(agentOpts...).Value(&l.Agent),
 		huh.NewInput().Title("CPU").Value(&cpus).Validate(positiveInt),
 		huh.NewInput().Title("メモリ (MiB)").Value(&mem).Validate(positiveInt),
+		huh.NewInput().Title("作業ディスク容量").Description("「そのままコピー」のときの /work の容量 (例: 20G)。空欄ならコピー元から自動").
+			Value(&workSize),
 		huh.NewMultiSelect[string]().Title("オプション").Options(
 			huh.NewOption("repo の .tmp と VM の /work/.tmp を受け渡す (終了時に回収)", "tmp"),
 			huh.NewOption("VM の中で KVM を使えるようにする (入れ子の仮想化)", "nested"),
@@ -389,7 +416,20 @@ func startForm(agents []string) (Launch, error) {
 	if !ok {
 		return Launch{}, errBack
 	}
-	l.Repo = gitTop(l.Repo)
+	l.Copy = mode == "copy"
+	l.WorkSize = strings.TrimSpace(workSize)
+	if l.Copy {
+		if abs, err := filepath.Abs(l.Repo); err == nil {
+			l.Repo = abs
+		}
+	} else {
+		l.Repo = gitTop(l.Repo)
+		if l.Repo == "" {
+			fmt.Println("git repo ではない。そのままコピーするなら「渡し方」を切り替える。")
+			pause()
+			return Launch{}, errBack
+		}
+	}
 	l.MountTmp = slices.Contains(extras, "tmp")
 	l.NestedVirt = slices.Contains(extras, "nested")
 	l.LocalHead = slices.Contains(extras, "local")
