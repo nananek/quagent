@@ -496,6 +496,72 @@ func TestAskReattachFromTerminal(t *testing.T) {
 	}
 }
 
+func TestEnvWithout(t *testing.T) {
+	got := envWithout([]string{"A=1", "TMUX=/tmp/s,1,0", "B=2", "TMUX_PANE=%1"}, "TMUX", "TMUX_PANE")
+	want := []string{"A=1", "B=2"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("envWithout = %v, want %v", got, want)
+	}
+}
+
+// TestRunTmuxNestedAttachesInner は $TMUX の中で switch-client せず、同じ
+// ソケットへ入れ子のクライアントとして attach することを確かめる。
+func TestRunTmuxNestedAttachesInner(t *testing.T) {
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	// どの tmux 呼び出しかと、そのときの TMUX を残す。
+	script := "#!/bin/sh\nprintf 'ARGS %s\\n' \"$*\" >> " + calls +
+		"\nprintf 'ENV %s\\n' \"${TMUX-unset}\" >> " + calls + "\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	t.Setenv("TMUX", "/tmp/tmux-test/sock,123,0")
+	t.Setenv("TMUX_PANE", "%1")
+
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty を開けない: %v", err)
+	}
+	defer ptmx.Close()
+	defer tty.Close()
+	oldIn, oldOut, oldErr := os.Stdin, os.Stdout, os.Stderr
+	os.Stdin, os.Stdout, os.Stderr = tty, tty, tty
+	defer func() { os.Stdin, os.Stdout, os.Stderr = oldIn, oldOut, oldErr }()
+
+	if _, err := ptmx.WriteString("q\n"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- runTmux("sess-test", []string{"true"}, []string{"true"}, make(chan struct{})) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runTmux: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("runTmux が戻らない")
+	}
+
+	b, _ := os.ReadFile(calls)
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	attached := false
+	for i, line := range lines {
+		if strings.Contains(line, "ARGS") && strings.Contains(line, "-S /tmp/tmux-test/sock attach-session -t sess-test") {
+			attached = true
+			if i+1 >= len(lines) || lines[i+1] != "ENV unset" {
+				t.Fatalf("入れ子の attach で TMUX が外れていない: %q", lines)
+			}
+		}
+	}
+	if !attached {
+		t.Fatalf("入れ子の attach-session が呼ばれていない:\n%s", b)
+	}
+	if strings.Contains(string(b), "switch-client") {
+		t.Fatalf("switch-client が呼ばれている:\n%s", b)
+	}
+}
+
 // TestRunTmuxDetachPromptsAndReturns は、デタッチされたときに runTmux がその場で
 // 再アタッチを促し (案内で止まったままにせず) 戻ることを確かめる。tmux は偽物を使う。
 func TestRunTmuxDetachPromptsAndReturns(t *testing.T) {
