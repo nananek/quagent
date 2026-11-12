@@ -10,10 +10,9 @@ import (
 	"github.com/nananek/quagent/internal/paths"
 )
 
-// 起動画面のベースイメージは Arch を先頭に並べ、焼いてあるものは色を
-// 付けず、未ビルドのものはグレー (端末の色) にする。
+// 起動画面のベースイメージは Arch を先頭に並べ、焼いてあるものは目立たせ、
+// 未ビルドのものはグレー (dim) にする。
 func TestRecipeOptions(t *testing.T) {
-	t.Setenv("CLICOLOR_FORCE", "1") // 擬似端末でなくても色を出す
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	// arch だけ焼いてあることにする。
@@ -43,33 +42,17 @@ func TestRecipeOptions(t *testing.T) {
 	}
 	var names []string
 	for _, o := range opts {
-		names = append(names, o.Value)
+		names = append(names, o.value)
 	}
 	if got := strings.Join(names, ","); got != "arch,custom" {
 		t.Fatalf("並び: got %q", got)
 	}
-	if strings.Contains(opts[0].Key, "\x1b[") {
-		t.Fatalf("作成済みに色が付いている: %q", opts[0].Key)
+	if opts[0].dim {
+		t.Fatalf("作成済みがグレーになっている: %q", opts[0].label)
 	}
 	for _, o := range opts[1:] {
-		if !strings.Contains(o.Key, "\x1b[") || !strings.Contains(o.Key, "未作成") {
-			t.Fatalf("未作成がグレーでない: %q", o.Key)
-		}
-	}
-}
-
-func TestEscapeMarkdown(t *testing.T) {
-	cases := []struct {
-		in, want string
-	}{
-		{`plain text`, `plain text`},
-		{`*bold* and _italic_`, `\*bold\* and \_italic\_`},
-		{"`code` and <tag>", "\\`code\\` and \\<tag>"},
-		{`path\with\backslash`, `path\\with\\backslash`},
-	}
-	for _, c := range cases {
-		if got := escapeMarkdown(c.in); got != c.want {
-			t.Errorf("escapeMarkdown(%q) = %q, want %q", c.in, got, c.want)
+		if !o.dim || !strings.Contains(o.label, "未作成") {
+			t.Fatalf("未作成がグレーでない: %q", o.label)
 		}
 	}
 }
@@ -133,16 +116,9 @@ func TestLastLaunchPersistence(t *testing.T) {
 	}
 }
 
-func TestTheme(t *testing.T) {
-	th := theme()
-	if th == nil {
-		t.Fatal("theme() returned nil")
-	}
-}
-
 func TestGitTop(t *testing.T) {
 	// git リポジトリ内: 一時ディレクトリを git init して確認する。
-	// 以前は "/work" 決め打ちだったため CI (/home/runner/work/...) で失敗した。
+	// 以前は "/work" 決め打ちだったため、CI の作業ディレクトリで失敗した。
 	repo := t.TempDir()
 	if out, err := exec.Command("git", "init", repo).CombinedOutput(); err != nil {
 		t.Fatalf("git init %s: %v: %s", repo, err, out)
@@ -228,17 +204,17 @@ func TestAgentRestartOptions(t *testing.T) {
 	}
 
 	for i, a := range agents {
-		if opts[i].Value != a || opts[i].Key != a {
-			t.Errorf("opts[%d] = Key:%q Value:%q, want %q", i, opts[i].Key, opts[i].Value, a)
+		if opts[i].value != a || opts[i].label != a {
+			t.Errorf("opts[%d] = label:%q value:%q, want %q", i, opts[i].label, opts[i].value, a)
 		}
 	}
 
 	last := opts[len(opts)-1]
-	if last.Value != "back" {
-		t.Errorf("last option value = %q, want %q", last.Value, "back")
+	if last.value != "back" {
+		t.Errorf("last option value = %q, want %q", last.value, "back")
 	}
-	if last.Key != "(再起動をやめて) 戻る" {
-		t.Errorf("last option label = %q, want %q", last.Key, "(再起動をやめて) 戻る")
+	if last.label != "(再起動をやめて) 戻る" {
+		t.Errorf("last option label = %q, want %q", last.label, "(再起動をやめて) 戻る")
 	}
 }
 

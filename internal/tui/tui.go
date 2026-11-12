@@ -13,10 +13,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/huh"
-	"github.com/charmbracelet/lipgloss"
-
 	"github.com/nananek/quagent/internal/access"
 	"github.com/nananek/quagent/internal/image"
 	"github.com/nananek/quagent/internal/paths"
@@ -97,9 +93,9 @@ func saveLast(l Launch) {
 func Run(agents []string) (Launch, error) {
 	// 初回 (まだ 1 つも焼いていない) は起動先が無いので、焼き込みへ誘導する。
 	if !hasAnyImage() {
-		if err := newForm(huh.NewGroup(huh.NewNote().
-			Title("ベースイメージがまだ無い").
-			Description("VM を起動するには、先にベースイメージを焼く必要がある。\n次に開く管理画面で焼いてから、起動する。"))).Run(); err != nil {
+		f := newForm("ベースイメージがまだ無い")
+		f.setNote("VM を起動するには、先にベースイメージを焼く必要がある。\n次に開く管理画面で焼いてから、起動する。")
+		if st, err := f.run(); err != nil || st != formSubmitted {
 			return Launch{}, ErrQuit
 		}
 		if err := imagesMenu(); err != nil && !errors.Is(err, errBack) {
@@ -111,16 +107,19 @@ func Run(agents []string) (Launch, error) {
 	}
 	for {
 		var choice string
-		err := newForm(huh.NewGroup(
-			huh.NewSelect[string]().Title("quagent").Options(
-				huh.NewOption("VM を起動", "start"),
-				huh.NewOption("ベースイメージの管理", "images"),
-				huh.NewOption("キャッシュの全クリア", "cache"),
-				huh.NewOption("「以後確認しない」ドメインの管理", "always"),
-				huh.NewOption("終了", "quit"),
-			).Value(&choice),
-		)).Run()
-		if err != nil || choice == "quit" {
+		f := newForm("quagent")
+		f.addSelect("", "", &choice,
+			option{"VM を起動", "start", false},
+			option{"ベースイメージの管理", "images", false},
+			option{"キャッシュの全クリア", "cache", false},
+			option{"「以後確認しない」ドメインの管理", "always", false},
+			option{"終了", "quit", false},
+		)
+		st, err := f.run()
+		if err != nil {
+			return Launch{}, err
+		}
+		if st != formSubmitted || choice == "quit" {
 			return Launch{}, ErrQuit
 		}
 		switch choice {
@@ -163,24 +162,27 @@ func cleanCacheMenu() error {
 	}
 	desc := fmt.Sprintf("現在のキャッシュ: Docker %d レイヤー, 合計 %s", stats.TotalBlobs, proxycache.FormatSize(totalBytes))
 	if totalBytes == 0 {
-		return newForm(huh.NewGroup(huh.NewNote().Title("キャッシュ").Description("キャッシュは空です。"))).Run()
+		f := newForm("キャッシュ")
+		f.setNote("キャッシュは空です。")
+		_, _ = f.run()
+		return nil
 	}
 
 	var confirm bool
-	err = newForm(huh.NewGroup(
-		huh.NewConfirm().
-			Title("キャッシュを全削除しますか?").
-			Description(desc).
-			Value(&confirm),
-	)).Run()
-	if err != nil || !confirm {
+	f := newForm("キャッシュ")
+	f.addConfirm("キャッシュを全削除しますか?", desc, &confirm, "削除", "戻る")
+	st, err := f.run()
+	if err != nil || st != formSubmitted || !confirm {
 		return nil
 	}
 
 	if err := proxycache.CleanCache(paths.ProxyCacheDir()); err != nil {
 		return fmt.Errorf("キャッシュ削除失敗: %w", err)
 	}
-	return newForm(huh.NewGroup(huh.NewNote().Title("完了").Description("キャッシュを全削除しました。"))).Run()
+	done := newForm("完了")
+	done.setNote("キャッシュを全削除しました。")
+	_, _ = done.run()
+	return nil
 }
 
 // AfterChoice はエージェントのセッションが終わったあとに選んだ次の操作。
@@ -193,12 +195,12 @@ type AfterChoice struct {
 }
 
 // agentRestartOptions は再起動先のエージェント候補に「(再起動をやめて) 戻る」を足した選択肢を返す。
-func agentRestartOptions(agents []string) []huh.Option[string] {
-	var opts []huh.Option[string]
+func agentRestartOptions(agents []string) []option {
+	var opts []option
 	for _, a := range agents {
-		opts = append(opts, huh.NewOption(a, a))
+		opts = append(opts, option{label: a, value: a})
 	}
-	opts = append(opts, huh.NewOption("(再起動をやめて) 戻る", "back"))
+	opts = append(opts, option{label: "(再起動をやめて) 戻る", value: "back"})
 	return opts
 }
 
@@ -224,17 +226,15 @@ func AfterSession(agents []string, current string) AfterChoice {
 	action, agent, logs := "restart", current, "keep"
 	agentOpts := agentRestartOptions(agents)
 	for {
-		err := newForm(
-			huh.NewGroup(
-				huh.NewNote().Title("エージェントが終了した").
-					Description("再起動は同じ VM のまま行う。終了すると VM は破棄される (VM の中の作業は残らない)。"),
-				huh.NewSelect[string]().Title("次の操作").Options(
-					huh.NewOption("エージェントを選び直して再起動 (同じ VM のまま)", "restart"),
-					huh.NewOption("終了", "quit"),
-				).Value(&action),
-			),
-		).Run()
-		if err != nil {
+		f := newForm("エージェントが終了した")
+		f.setNote("再起動は同じ VM のまま行う。終了すると VM は破棄される (VM の中の作業は残らない)。")
+		f.noBack = true // Esc で VM を捨てないようにする (選ぶのは「次の操作」だけ)
+		f.addSelect("次の操作", "", &action,
+			option{"エージェントを選び直して再起動 (同じ VM のまま)", "restart", false},
+			option{"終了", "quit", false},
+		)
+		st, err := f.run()
+		if err != nil || st != formSubmitted {
 			return AfterChoice{}
 		}
 		if action == "quit" {
@@ -242,17 +242,13 @@ func AfterSession(agents []string, current string) AfterChoice {
 		}
 
 		picked := initialAgentChoice(agents, current, agent)
-
-		km := huh.NewDefaultKeyMap()
-		km.Quit = key.NewBinding(key.WithKeys("ctrl+c", "esc"))
-
-		err = newForm(
-			huh.NewGroup(
-				huh.NewSelect[string]().Title("エージェント").Options(agentOpts...).Value(&picked),
-			),
-		).WithKeyMap(km).Run()
-
-		if err != nil || picked == "back" {
+		pick := newForm("")
+		pick.addSelect("エージェント", "", &picked, agentOpts...)
+		st, err = pick.run()
+		if err != nil {
+			return AfterChoice{}
+		}
+		if st == formBack || picked == "back" {
 			// 「(再起動をやめて) 戻る」または Esc が押されたら、再起動をやめて次の操作の選択に戻る。
 			continue
 		}
@@ -260,17 +256,13 @@ func AfterSession(agents []string, current string) AfterChoice {
 		return AfterChoice{Restart: true, Agent: picked}
 	}
 
-	err := newForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().Title("この VM のログ").
-				Description("host.log などの host 側の記録 (VM の中のものではない)").
-				Options(
-					huh.NewOption("残す", "keep"),
-					huh.NewOption("残さない", "discard"),
-				).Value(&logs),
-		),
-	).Run()
-	if err != nil {
+	f := newForm("")
+	f.addSelect("この VM のログ", "host.log などの host 側の記録 (VM の中のものではない)", &logs,
+		option{"残す", "keep", false},
+		option{"残さない", "discard", false},
+	)
+	st, err := f.run()
+	if err != nil || st != formSubmitted {
 		return AfterChoice{}
 	}
 	return AfterChoice{Restart: false, DiscardLogs: logs == "discard"}
@@ -310,26 +302,24 @@ func defaultTarget(cwd string, saved Launch) (repo string, copyMode bool) {
 	return cwd, true
 }
 
-// unbuiltStyle は、まだ焼いていないレシピの行をグレーにする。16 色パレットの
-// 8 (明るい黒) なので、明るい背景でも暗い背景でも控えめな灰色になる。
-var unbuiltStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-
-func recipeOptions() ([]huh.Option[string], error) {
+// recipeOptions は焼けるレシピの選択肢を返す。焼いていないレシピは目立たせない。
+func recipeOptions() ([]option, error) {
 	rs, err := image.Recipes()
 	if err != nil {
 		return nil, err
 	}
-	var opts []huh.Option[string]
+	var opts []option
 	for _, r := range rs {
 		label := r.Name + " — " + r.Description
 		if img, err := image.Latest(r.Name); err == nil {
 			label += "  [" + img.Built.Format("2006-01-02") + " に作成]"
+			opts = append(opts, option{label: label, value: r.Name})
 		} else {
 			// 未ビルドのディストロは起動できないので、グレーにして見て分かるようにする
 			// (選ぶと管理画面へ誘導する)。
-			label = unbuiltStyle.Render(label + "  [未作成: 管理画面で焼く]")
+			label += "  [未作成: 管理画面で焼く]"
+			opts = append(opts, option{label: label, value: r.Name, dim: true})
 		}
-		opts = append(opts, huh.NewOption(label, r.Name))
 	}
 	return opts, nil
 }
@@ -347,9 +337,9 @@ func startForm(agents []string) (Launch, error) {
 	if l.Agent == "" {
 		l.Agent = "opencode"
 	}
-	var agentOpts []huh.Option[string]
+	var agentOpts []option
 	for _, a := range agents {
-		agentOpts = append(agentOpts, huh.NewOption(a, a))
+		agentOpts = append(agentOpts, option{label: a, value: a})
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		l.Repo, l.Copy = defaultTarget(cwd, l)
@@ -358,11 +348,11 @@ func startForm(agents []string) (Launch, error) {
 	if err != nil {
 		return Launch{}, err
 	}
-	cpus, mem := strconv.Itoa(l.CPUs), strconv.Itoa(l.MemMiB)
 	mode := "git"
 	if l.Copy {
 		mode = "copy"
 	}
+	cpus, mem := strconv.Itoa(l.CPUs), strconv.Itoa(l.MemMiB)
 	workSize := l.WorkSize
 	var extras []string
 	if l.MountTmp {
@@ -382,47 +372,52 @@ func startForm(agents []string) (Launch, error) {
 		prApproval = append(prApproval, "pr")
 	}
 	ok := true
-	err = newForm(huh.NewGroup(
-		huh.NewSelect[string]().Title("渡し方").
-			Description("git の履歴を渡すか、データを含むディレクトリをそのまま渡すか").
-			Options(
-				huh.NewOption("git の履歴ごと (未コミットの変更は渡さない)", "git"),
-				huh.NewOption("ディレクトリをそのままコピー (DB やアップロードも含む)", "copy"),
-			).Value(&mode),
-		huh.NewInput().Title("対象ディレクトリ").Description("VM の /work に渡すディレクトリ").
-			Value(&l.Repo).Validate(func(s string) error {
-			fi, err := os.Stat(s)
-			if err != nil || !fi.IsDir() {
-				return fmt.Errorf("ディレクトリではない")
-			}
-			if mode == "git" && gitTop(s) == "" {
-				return fmt.Errorf("git repo ではない。そのままコピーするなら「渡し方」を切り替える")
-			}
-			return nil
-		}),
-		huh.NewMultiSelect[string]().Title("PR の作成").
-			Description("エージェントの create_pull_request を承認コンソールで確認してから push する").
-			Options(huh.NewOption("PR を承認制にする", "pr")).
-			Value(&prApproval),
-		huh.NewSelect[string]().Title("ベースイメージ").Options(opts...).Value(&l.Recipe),
-		huh.NewSelect[string]().Title("エージェント").Options(agentOpts...).Value(&l.Agent),
-		huh.NewInput().Title("CPU").Value(&cpus).Validate(positiveInt),
-		huh.NewInput().Title("メモリ (MiB)").Value(&mem).Validate(positiveInt),
-		huh.NewInput().Title("作業ディスク容量").Description("「そのままコピー」のときの /work の容量 (例: 20G)。空欄ならコピー元から自動").
-			Value(&workSize),
-		huh.NewMultiSelect[string]().Title("オプション").Options(
-			huh.NewOption("repo の .tmp と VM の /work/.tmp を受け渡す (終了時に回収)", "tmp"),
-			huh.NewOption("VM の中で KVM を使えるようにする (入れ子の仮想化)", "nested"),
-			huh.NewOption("ブランチをローカルの先頭で渡す (未 push のコミットも渡る)", "local"),
-			huh.NewOption("Web 遠隔操作 (quagent hub) に登録する", "hub"),
-		).Value(&extras),
-		huh.NewConfirm().Title("この設定で起動する?").Affirmative("起動").Negative("戻る").Value(&ok))).Run()
+
+	f := newForm("VM の起動")
+	f.addSelect("渡し方", "git の履歴を渡すか、データを含むディレクトリをそのまま渡すか", &mode,
+		option{"git の履歴ごと (未コミットの変更は渡さない)", "git", false},
+		option{"ディレクトリをそのままコピー (DB やアップロードも含む)", "copy", false},
+	)
+	f.addInput("対象ディレクトリ", "VM の /work に渡すディレクトリ", &l.Repo, func(s string) error {
+		fi, err := os.Stat(s)
+		if err != nil || !fi.IsDir() {
+			return fmt.Errorf("ディレクトリではない")
+		}
+		if mode == "git" && gitTop(s) == "" {
+			return fmt.Errorf("git repo ではない。そのままコピーするなら「渡し方」を切り替える")
+		}
+		return nil
+	})
+	f.addMulti("PR の作成", "エージェントの create_pull_request を承認コンソールで確認してから push する", &prApproval,
+		option{"PR を承認制にする", "pr", false},
+	)
+	f.addSelect("ベースイメージ", "", &l.Recipe, opts...)
+	f.addSelect("エージェント", "", &l.Agent, agentOpts...)
+	f.addInput("CPU", "", &cpus, positiveInt)
+	f.addInput("メモリ (MiB)", "", &mem, positiveInt)
+	f.addInput("作業ディスク容量", "「そのままコピー」のときの /work の容量 (例: 20G)。空欄ならコピー元から自動", &workSize, nil)
+	f.addMulti("オプション", "", &extras,
+		option{"repo の .tmp と VM の /work/.tmp を受け渡す (終了時に回収)", "tmp", false},
+		option{"VM の中で KVM を使えるようにする (入れ子の仮想化)", "nested", false},
+		option{"ブランチをローカルの先頭で渡す (未 push のコミットも渡る)", "local", false},
+		option{"Web 遠隔操作 (quagent hub) に登録する", "hub", false},
+	)
+	f.addConfirm("この設定で起動する?", "", &ok, "起動", "戻る")
+
+	st, err := f.run()
 	if err != nil {
+		return Launch{}, err
+	}
+	switch st {
+	case formAborted:
 		return Launch{}, ErrQuit
+	case formBack:
+		return Launch{}, errBack
 	}
 	if !ok {
 		return Launch{}, errBack
 	}
+
 	l.Copy = mode == "copy"
 	l.WorkSize = strings.TrimSpace(workSize)
 	if l.Copy {
@@ -484,20 +479,22 @@ func imagesMenu() error {
 		}
 		sb.WriteString("\n▶ が起動に使われる (各 OS の最新)。\n利用者のレシピは " + image.RecipesDir() + "/<名前>/ に置く。")
 
-		var opts []huh.Option[string]
+		var opts []option
 		for _, r := range rs {
 			opts = append(opts,
-				huh.NewOption(r.Name+" を焼く / 更新する", "build:"+r.Name))
+				option{label: r.Name + " を焼く / 更新する", value: "build:" + r.Name})
 		}
 		opts = append(opts,
-			huh.NewOption("イメージを個別に消す (最新も消せる)", "delete"),
-			huh.NewOption("古いイメージを消す (各 OS の最新だけ残す)", "prune"),
-			huh.NewOption("戻る", "back"))
+			option{label: "イメージを個別に消す (最新も消せる)", value: "delete"},
+			option{label: "古いイメージを消す (各 OS の最新だけ残す)", value: "prune"},
+			option{label: "戻る", value: "back"},
+		)
 		var choice string
-		if err := newForm(huh.NewGroup(
-			huh.NewNote().Title("ベースイメージ").Description(escapeMarkdown(sb.String())),
-			huh.NewSelect[string]().Options(opts...).Value(&choice),
-		)).Run(); err != nil || choice == "back" {
+		f := newForm("ベースイメージ")
+		f.setNote(sb.String())
+		f.addSelect("", "", &choice, opts...)
+		st, err := f.run()
+		if err != nil || st != formSubmitted || choice == "back" {
 			return errBack
 		}
 		switch {
@@ -540,7 +537,7 @@ func deleteImagesMenu() error {
 		return errBack
 	}
 	seen := map[string]bool{}
-	var opts []huh.Option[string]
+	var opts []option
 	for _, img := range imgs {
 		label := fmt.Sprintf("%s  %s  %.1f GiB", img.Recipe,
 			img.Built.Format("2006-01-02 15:04"), float64(img.Size)/(1<<30))
@@ -548,20 +545,21 @@ func deleteImagesMenu() error {
 			label += "  (最新)"
 			seen[img.Recipe] = true
 		}
-		opts = append(opts, huh.NewOption(label, img.Path))
+		opts = append(opts, option{label: label, value: img.Path})
 	}
 	var picked []string
-	if err := newForm(huh.NewGroup(
-		huh.NewMultiSelect[string]().Title("消すイメージ (space で選択、enter で確定)").
-			Description("各 OS の最新も消せる。起動に使う最新を消すと、次は焼き直しが要る").
-			Options(opts...).Value(&picked),
-	)).Run(); err != nil || len(picked) == 0 {
+	f := newForm("ベースイメージを消す")
+	f.addMulti("消すイメージ (space で選択、enter で確定)",
+		"各 OS の最新も消せる。起動に使う最新を消すと、次は焼き直しが要る", &picked, opts...)
+	st, err := f.run()
+	if err != nil || st != formSubmitted || len(picked) == 0 {
 		return errBack
 	}
 	ok := false
-	if err := newForm(huh.NewGroup(huh.NewConfirm().
-		Title(fmt.Sprintf("%d 個のイメージを消す? (元に戻せない)", len(picked))).
-		Affirmative("消す").Negative("戻る").Value(&ok))).Run(); err != nil || !ok {
+	confirm := newForm("")
+	confirm.addConfirm(fmt.Sprintf("%d 個のイメージを消す? (元に戻せない)", len(picked)), "", &ok, "消す", "戻る")
+	st, err = confirm.run()
+	if err != nil || st != formSubmitted || !ok {
 		return errBack
 	}
 	n := 0
@@ -591,13 +589,12 @@ func buildImage(name string) error {
 	s := loadBuildSettings()
 	cpus, mem := strconv.Itoa(s.CPUs), strconv.Itoa(s.MemMiB)
 	ok := true
-	fields := []huh.Field{
-		huh.NewInput().Title("CPU (焼き込み VM)").Description("ホストの範囲で。多いほどビルドが速い").
-			Value(&cpus).Validate(positiveInt),
-		huh.NewInput().Title("メモリ MiB (焼き込み VM)").Value(&mem).Validate(positiveInt),
-		huh.NewConfirm().Title(name + " を焼く?").Affirmative("焼く").Negative("戻る").Value(&ok),
-	}
-	if err := newForm(huh.NewGroup(fields...)).Run(); err != nil || !ok {
+	f := newForm(name + " を焼く")
+	f.addInput("CPU (焼き込み VM)", "ホストの範囲で。多いほどビルドが速い", &cpus, positiveInt)
+	f.addInput("メモリ MiB (焼き込み VM)", "", &mem, positiveInt)
+	f.addConfirm(name+" を焼く?", "", &ok, "焼く", "戻る")
+	st, err := f.run()
+	if err != nil || st != formSubmitted || !ok {
 		return nil
 	}
 	s.CPUs, _ = strconv.Atoi(cpus)
@@ -618,11 +615,6 @@ func pause() {
 	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
 }
 
-// escapeMarkdown は Note の説明文 (markdown として描画される) の特殊文字を無効にする。
-func escapeMarkdown(s string) string {
-	return strings.NewReplacer(`\`, `\\`, "*", `\*`, "_", `\_`, "`", "\\`", "<", `\<`).Replace(s)
-}
-
 // alwaysMenu は「以後確認しない」ドメインを一覧し、選んだものを取り消す。
 func alwaysMenu() error {
 	list, err := access.LoadAlways(access.AlwaysPath())
@@ -634,16 +626,16 @@ func alwaysMenu() error {
 		pause()
 		return errBack
 	}
-	var opts []huh.Option[string]
+	var opts []option
 	for _, d := range list {
-		opts = append(opts, huh.NewOption(d, d))
+		opts = append(opts, option{label: d, value: d})
 	}
 	var picked []string
-	if err := newForm(huh.NewGroup(
-		huh.NewMultiSelect[string]().Title("取り消すドメイン (space で選択、enter で確定)").
-			Description("全プロジェクト共通。取り消すと次の起動から再び確認される").
-			Options(opts...).Value(&picked),
-	)).Run(); err != nil || len(picked) == 0 {
+	f := newForm("「以後確認しない」ドメイン")
+	f.addMulti("取り消すドメイン (space で選択、enter で確定)",
+		"全プロジェクト共通。取り消すと次の起動から再び確認される", &picked, opts...)
+	st, err := f.run()
+	if err != nil || st != formSubmitted || len(picked) == 0 {
 		return errBack
 	}
 	removed, err := access.RemoveAlways(access.AlwaysPath(), picked)
@@ -653,28 +645,4 @@ func alwaysMenu() error {
 	fmt.Println("取り消した:", strings.Join(removed, " "))
 	pause()
 	return errBack
-}
-
-// newForm は端末の 16 色パレットに従う配色のフォームを作る。実際の色は利用者の
-// 端末の配色で決まるので、明るい背景でも暗い背景でも読める。
-func newForm(groups ...*huh.Group) *huh.Form {
-	return huh.NewForm(groups...).WithTheme(theme())
-}
-
-// theme は ThemeBase16 から、明るい背景で読めない色を外したもの。
-// 白 (7) の文字は端末の既定の文字色に、黄 (3) の印は青 (4) にする。
-func theme() *huh.Theme {
-	t := huh.ThemeBase16()
-	blue := lipgloss.Color("4")
-	for _, f := range []*huh.FieldStyles{&t.Focused, &t.Blurred} {
-		f.Option = f.Option.UnsetForeground()
-		f.UnselectedOption = f.UnselectedOption.UnsetForeground()
-		f.TextInput.Text = f.TextInput.Text.UnsetForeground()
-		f.SelectSelector = f.SelectSelector.Foreground(blue)
-		f.MultiSelectSelector = f.MultiSelectSelector.Foreground(blue)
-		f.NextIndicator = f.NextIndicator.Foreground(blue)
-		f.PrevIndicator = f.PrevIndicator.Foreground(blue)
-		f.TextInput.Prompt = f.TextInput.Prompt.Foreground(blue)
-	}
-	return t
 }
