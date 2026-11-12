@@ -295,6 +295,21 @@ func gitTop(dir string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// defaultTarget は起動フォームの「渡し方」と「対象ディレクトリ」の初期値を決める。
+// TUI は対象のディレクトリで quagent を実行する前提なので、前回の設定ではなく
+// カレントディレクトリから決める。git 管理下なら toplevel を「git の履歴ごと」、
+// そうでなければそのディレクトリを「そのままコピー」の初期値にする。
+// カレントを取れないとき (cwd が空) だけ、前回の値に戻す。
+func defaultTarget(cwd string, saved Launch) (repo string, copyMode bool) {
+	if cwd == "" {
+		return saved.Repo, saved.Copy
+	}
+	if top := gitTop(cwd); top != "" {
+		return top, false
+	}
+	return cwd, true
+}
+
 // unbuiltStyle は、まだ焼いていないレシピの行をグレーにする。16 色パレットの
 // 8 (明るい黒) なので、明るい背景でも暗い背景でも控えめな灰色になる。
 var unbuiltStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
@@ -337,15 +352,7 @@ func startForm(agents []string) (Launch, error) {
 		agentOpts = append(agentOpts, huh.NewOption(a, a))
 	}
 	if cwd, err := os.Getwd(); err == nil {
-		if l.Copy {
-			if l.Repo == "" {
-				l.Repo = cwd
-			}
-		} else if top := gitTop(cwd); top != "" {
-			l.Repo = top
-		} else if l.Repo == "" {
-			l.Repo = cwd
-		}
+		l.Repo, l.Copy = defaultTarget(cwd, l)
 	}
 	opts, err := recipeOptions()
 	if err != nil {
