@@ -34,8 +34,8 @@ func prepareTmp(repo, work string) (dir, img string, err error) {
 	return prepareTmpAt(repo, work, true)
 }
 
-// prepareTmpAt は gitCheck が false のとき (--copy) git の管理状態を調べずに
-// .tmp を用意する。
+// prepareTmpAt は gitCheck が false のとき git の管理状態を調べずに .tmp を用意する
+// (--copy 用)。.tmp はシンボリックリンクを辿らず、実ディレクトリに限る。
 func prepareTmpAt(repo, work string, gitCheck bool) (dir, img string, err error) {
 	dir = filepath.Join(repo, ".tmp")
 	if gitCheck {
