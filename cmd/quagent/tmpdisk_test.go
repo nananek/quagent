@@ -75,6 +75,35 @@ func TestExtractTarRejectsEscape(t *testing.T) {
 	}
 }
 
+func TestPrepareTmpRejectsSymlink(t *testing.T) {
+	for _, gitCheck := range []bool{false, true} {
+		repo := t.TempDir()
+		work := t.TempDir()
+		outside := t.TempDir()
+		if err := os.Symlink(outside, filepath.Join(repo, ".tmp")); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := prepareTmpAt(repo, work, gitCheck); err == nil {
+			t.Fatalf(".tmp がシンボリックリンクでも prepareTmpAt(gitCheck=%v) が受け付けた (回収先: %s)", gitCheck, outside)
+		}
+	}
+}
+
+func TestExtractTarRejectsSymlinkRoot(t *testing.T) {
+	outside := t.TempDir()
+	parent := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(parent, ".tmp")); err != nil {
+		t.Fatal(err)
+	}
+	tr := makeTar(t, tar.Header{Typeflag: tar.TypeReg, Name: "authorized_keys"})
+	if _, _, err := extractTar(tr, filepath.Join(parent, ".tmp")); err == nil {
+		t.Fatal("シンボリックリンクの回収先を受け付けた")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "authorized_keys")); err == nil {
+		t.Fatalf("シンボリックリンクを辿って %s へ書き込んだ", outside)
+	}
+}
+
 func TestTmpRuncmd(t *testing.T) {
 	cmd := tmpRuncmd("1000")
 	for _, want := range []string{
