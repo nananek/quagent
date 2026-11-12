@@ -340,7 +340,7 @@ func run(o runOpts) error {
 			repo, humanBytes(size), humanBytes(data))
 	}
 	if o.MountTmp {
-		dir, img, err := prepareTmp(repo, work, !o.Copy)
+		dir, img, err := prepareTmpAt(repo, work, !o.Copy)
 		if err != nil {
 			return err
 		}

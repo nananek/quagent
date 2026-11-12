@@ -30,8 +30,13 @@ const (
 )
 
 // prepareTmp は host の .tmp を用意し、VM に見せる空のディスクを work に作る。
-// gitCheck が false のとき (--copy) は git の管理状態を調べない。
-func prepareTmp(repo, work string, gitCheck bool) (dir, img string, err error) {
+func prepareTmp(repo, work string) (dir, img string, err error) {
+	return prepareTmpAt(repo, work, true)
+}
+
+// prepareTmpAt は gitCheck が false のとき (--copy) git の管理状態を調べずに
+// .tmp を用意する。
+func prepareTmpAt(repo, work string, gitCheck bool) (dir, img string, err error) {
 	dir = filepath.Join(repo, ".tmp")
 	if gitCheck {
 		// git で管理しているファイルがあると、/work の checkout とディスクが重なる
