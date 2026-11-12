@@ -173,6 +173,36 @@ func TestGitTop(t *testing.T) {
 	}
 }
 
+// defaultTarget は前回の設定を引きずらず、実行したカレントディレクトリから
+// 「渡し方」と「対象ディレクトリ」を決める。
+func TestDefaultTarget(t *testing.T) {
+	repo := t.TempDir()
+	if out, err := exec.Command("git", "init", repo).CombinedOutput(); err != nil {
+		t.Fatalf("git init %s: %v: %s", repo, err, out)
+	}
+	sub := filepath.Join(repo, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	top := gitTop(sub)
+	plain := t.TempDir()
+
+	// git 管理下のカレントなら、前回がコピーモードでも toplevel を git の履歴ごと渡す。
+	if got, copyMode := defaultTarget(sub, Launch{Repo: plain, Copy: true}); got != top || copyMode {
+		t.Errorf("git 管理下: got (%q, %v), want (%q, false)", got, copyMode, top)
+	}
+
+	// git 管理外のカレントなら、前回が git モードでもそのディレクトリをそのまま渡す。
+	if got, copyMode := defaultTarget(plain, Launch{Repo: repo, Copy: false}); got != plain || !copyMode {
+		t.Errorf("git 管理外: got (%q, %v), want (%q, true)", got, copyMode, plain)
+	}
+
+	// カレントを取れないときだけ前回の値を使う。
+	if got, copyMode := defaultTarget("", Launch{Repo: repo, Copy: true}); got != repo || !copyMode {
+		t.Errorf("カレントなし: got (%q, %v), want (%q, true)", got, copyMode, repo)
+	}
+}
+
 func TestHasAnyImage(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	// 初期状態: イメージなし
