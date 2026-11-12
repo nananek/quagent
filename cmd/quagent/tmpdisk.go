@@ -31,15 +31,23 @@ const (
 
 // prepareTmp は host の .tmp を用意し、VM に見せる空のディスクを work に作る。
 func prepareTmp(repo, work string) (dir, img string, err error) {
+	return prepareTmpAt(repo, work, true)
+}
+
+// prepareTmpAt は gitCheck が false のとき git の管理状態を調べずに .tmp を用意する
+// (--copy 用)。.tmp はシンボリックリンクを辿らず、実ディレクトリに限る。
+func prepareTmpAt(repo, work string, gitCheck bool) (dir, img string, err error) {
 	dir = filepath.Join(repo, ".tmp")
-	// git で管理しているファイルがあると、/work の checkout とディスクが重なる
-	if out, _ := exec.Command("git", "-C", repo, "ls-files", "--", ".tmp").Output(); len(strings.TrimSpace(string(out))) > 0 {
-		return "", "", fmt.Errorf(".tmp に git で管理しているファイルがあるので受け渡さない")
+	if gitCheck {
+		// git で管理しているファイルがあると、/work の checkout とディスクが重なる
+		if out, _ := exec.Command("git", "-C", repo, "ls-files", "--", ".tmp").Output(); len(strings.TrimSpace(string(out))) > 0 {
+			return "", "", fmt.Errorf(".tmp に git で管理しているファイルがあるので受け渡さない")
+		}
 	}
 	if err := ensureRealDir(dir); err != nil {
 		return "", "", err
 	}
-	if exec.Command("git", "-C", repo, "check-ignore", "-q", ".tmp/").Run() != nil {
+	if gitCheck && exec.Command("git", "-C", repo, "check-ignore", "-q", ".tmp/").Run() != nil {
 		logf("注意: %s は .gitignore されていない", dir)
 	}
 	img = filepath.Join(work, "tmp.img")

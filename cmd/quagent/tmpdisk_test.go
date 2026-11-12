@@ -76,14 +76,16 @@ func TestExtractTarRejectsEscape(t *testing.T) {
 }
 
 func TestPrepareTmpRejectsSymlink(t *testing.T) {
-	repo := t.TempDir()
-	work := t.TempDir()
-	outside := t.TempDir()
-	if err := os.Symlink(outside, filepath.Join(repo, ".tmp")); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := prepareTmp(repo, work); err == nil {
-		t.Fatalf(".tmp がシンボリックリンクでも prepareTmp が受け付けた (回収先: %s)", outside)
+	for _, gitCheck := range []bool{false, true} {
+		repo := t.TempDir()
+		work := t.TempDir()
+		outside := t.TempDir()
+		if err := os.Symlink(outside, filepath.Join(repo, ".tmp")); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := prepareTmpAt(repo, work, gitCheck); err == nil {
+			t.Fatalf(".tmp がシンボリックリンクでも prepareTmpAt(gitCheck=%v) が受け付けた (回収先: %s)", gitCheck, outside)
+		}
 	}
 }
 
