@@ -1378,11 +1378,11 @@ func runTmux(session string, agent, consoleArgv []string, quit <-chan struct{}) 
 			logf("%v", err)
 		}
 	}
-	// セッションが終わったら、利用者の tmux クライアントは元のセッションへ戻す
-	// (既定の detach-on-destroy on だと、$TMUX の中から使ったときに利用者の tmux が閉じる)
-	if err := tmux("set-option", "-t", session, "detach-on-destroy", "previous"); err != nil {
+	// セッションが終わったら、このセッションに繋いでいるクライアント (入れ子の
+	// 内側の tmux など) を素直に終わらせる。previous にすると、破棄時に別の
+	// セッションへ切り替わって外側の画面が乱れる。
+	if err := tmux("set-option", "-t", session, "detach-on-destroy", "on"); err != nil {
 		logf("%v", err)
-		_ = tmux("set-option", "-t", session, "detach-on-destroy", "off")
 	}
 	// マウス操作を有効にして、承認コンソールのボタンクリックやスクロール、ペイン操作を行えるようにする
 	if err := tmux("set-option", "-t", session, "mouse", "on"); err != nil {
@@ -1400,23 +1400,18 @@ func runTmux(session string, agent, consoleArgv []string, quit <-chan struct{}) 
 	_ = tmux("select-pane", "-t", session+":.0")
 
 	logf("tmux セッション %s に接続 (エージェントを終了すると VM を破棄)", session)
-	// $TMUX の中から使った場合は、その場の窓を switch-client で切り替える。デタッチしても
-	// 利用者の端末は元に戻るので、再アタッチは促さない (同じシェルから戻れる)。
+	// $TMUX の中から使ったときも switch-client せず、その場の窓の中で入れ子の tmux
+	// として attach する。外側のセッションを切り替えないので、終了すると元の
+	// シェルに戻る。起動した窓では quagent (の tmux attach) が前面のコマンドに
+	// なるので、automatic-rename で窓の名前が変わらないよう終わるまで止める。
 	if os.Getenv("TMUX") != "" {
-		// 起動した窓では quagent が前面のコマンドになるので、automatic-rename で窓の
-		// 名前が quagent に変わらないよう、終わるまでその窓だけ止める
 		if restore := holdWindowName(os.Getenv("TMUX_PANE")); restore != nil {
 			defer restore()
 		}
-		if err := tmux("switch-client", "-t", session); err != nil {
-			return err
-		}
-		waitSession(session, nil, quit)
-		return nil
 	}
 
-	// 通常の端末からは attach する。Ctrl-b d でデタッチされても、戻るためだけに別に
-	// SSH を張らなくて済むよう、同じ端末のここで再アタッチを促す。
+	// 通常の端末からも、$TMUX の中からも attach する。Ctrl-b d でデタッチされても、
+	// 戻るためだけに別に SSH を張らなくて済むよう、同じ端末のここで再アタッチを促す。
 	for {
 		att, err := attachSession(session)
 		if err != nil {
@@ -1435,9 +1430,23 @@ func runTmux(session string, agent, consoleArgv []string, quit <-chan struct{}) 
 }
 
 // attachSession は tmux セッションへ端末つきで接続し、クライアントが終了したら閉じる
-// channel を返す。
+// channel を返す。$TMUX の中から呼ばれたときは、同じサーバーのセッションへ
+// 「入れ子のクライアント」として繋ぐ。tmux は既定で入れ子を拒否するため、この
+// 子プロセスだけ TMUX / TMUX_PANE を外し、ソケットは -S で明示する。
 func attachSession(session string) (<-chan struct{}, error) {
-	att := exec.Command("tmux", "attach-session", "-t", session)
+	args := []string{"attach-session", "-t", session}
+	env := os.Environ()
+	if v := os.Getenv("TMUX"); v != "" {
+		if i := strings.IndexByte(v, ','); i >= 0 {
+			v = v[:i]
+		}
+		if v != "" {
+			args = append([]string{"-S", v}, args...)
+			env = envWithout(env, "TMUX", "TMUX_PANE")
+		}
+	}
+	att := exec.Command("tmux", args...)
+	att.Env = env
 	att.Stdin, att.Stdout, att.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := att.Start(); err != nil {
 		return nil, err
@@ -1445,6 +1454,23 @@ func attachSession(session string) (<-chan struct{}, error) {
 	done := make(chan struct{})
 	go func() { _ = att.Wait(); close(done) }()
 	return done, nil
+}
+
+// envWithout は env から key=value の行を除いたものを返す。
+func envWithout(env []string, keys ...string) []string {
+	drop := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		drop[k] = true
+	}
+	out := make([]string, 0, len(env))
+	for _, e := range env {
+		k, _, _ := strings.Cut(e, "=")
+		if drop[k] {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // waitSession はセッションが終わるか quit されるまで見張る。attach クライアント (att) が
