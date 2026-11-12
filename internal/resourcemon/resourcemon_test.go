@@ -173,6 +173,43 @@ func TestNewWithBaseDisk(t *testing.T) {
 	}
 }
 
+func TestCheckStorageWorkDisk(t *testing.T) {
+	tmp := t.TempDir()
+	workDisk := filepath.Join(tmp, "work.qcow2")
+	if err := os.WriteFile(workDisk, make([]byte, 9<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mon := New(Config{
+		WorkDir:              tmp,
+		WorkDiskPath:         workDisk,
+		WorkDiskVirtualBytes: 10 << 20,
+		HostSafetyFreeGiB:    1,
+		DiskWarnPercent:      80,
+		DiskStopPercent:      95,
+	})
+	mon.SetVirtualDiskBytes(0)
+	mon.SetBaseAllocated(0)
+
+	alert, stop, err := mon.CheckStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alert == "" || stop != "" {
+		t.Fatalf("作業ディスクの 80%% 警告が出ない: alert=%q stop=%q", alert, stop)
+	}
+
+	if err := os.WriteFile(workDisk, make([]byte, 10<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, stop, err = mon.CheckStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stop == "" {
+		t.Fatal("作業ディスクの 95%% 停止が出ない")
+	}
+}
+
 func TestCheckStorage_HostSafetyLimit(t *testing.T) {
 	tmp := t.TempDir()
 	mon := New(Config{

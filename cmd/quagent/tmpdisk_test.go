@@ -106,7 +106,7 @@ func TestPrepareTmp(t *testing.T) {
 		t.Fatalf("git init: %v: %s", err, out)
 	}
 
-	dir, img, err := prepareTmp(repoDir, workDir)
+	dir, img, err := prepareTmp(repoDir, workDir, true)
 	if err != nil {
 		t.Fatalf("prepareTmp failed: %v", err)
 	}

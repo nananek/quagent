@@ -34,7 +34,7 @@ const usage = `usage:
   quagent ctl list | watch | decide             承認の流れを読む・判断する (外部プロセス向け)
   quagent cache ls | clean [docker|go|cargo|npm|pypi|all]  ローカルキャッシュの一覧・削除
   quagent hub                                    Web 遠隔操作モードを起動 (Tailscale 越しにブラウザから操作)
-  quagent run [--repo DIR] [--image RECIPE] [--cpus N] [--mem MiB] [--agent opencode|claude|agy|codex] [--allow "d1 d2"] [--mount-tmp] [--nested-virt] [--local-head] [--pr-approval[=false]] [--hub]
+  quagent run [--repo DIR] [--copy] [--work-size SIZE] [--image RECIPE] [--cpus N] [--mem MiB] [--agent opencode|claude|agy|codex] [--allow "d1 d2"] [--mount-tmp] [--nested-virt] [--local-head] [--pr-approval[=false]] [--hub]
                                                VM を起動し、tmux でエージェントと承認コンソールを開く
 `
 
@@ -64,7 +64,8 @@ func dispatch(args []string) error {
 			return err
 		}
 		return run(runOpts{Repo: l.Repo, Recipe: l.Recipe, CPUs: l.CPUs, MemMiB: l.MemMiB,
-			MountTmp: l.MountTmp, NestedVirt: l.NestedVirt, LocalHead: l.LocalHead, Agent: l.Agent, PRApproval: l.PRApproval, Interactive: true, Hub: l.Hub,
+			MountTmp: l.MountTmp, Copy: l.Copy, WorkSize: l.WorkSize,
+			NestedVirt: l.NestedVirt, LocalHead: l.LocalHead, Agent: l.Agent, PRApproval: l.PRApproval, Interactive: true, Hub: l.Hub,
 			AfterSession: afterSession})
 	}
 	switch args[0] {
@@ -197,11 +198,13 @@ func cmdImage(args []string) error {
 
 func cmdRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	repo := fs.String("repo", "", "VM に渡す git repo (既定: cwd の git toplevel)")
+	repo := fs.String("repo", "", "VM に渡すディレクトリ (既定: cwd。git repo なら履歴ごと、--copy ならそのまま)")
 	cpus := fs.Int("cpus", 4, "VM の CPU 数")
 	mem := fs.Int("mem", 8192, "VM のメモリ (MiB)")
 	recipe := fs.String("image", image.DefaultRecipe, "使うベースイメージのレシピ (quagent image recipes)")
 	agent := fs.String("agent", DefaultAgent, "VM 内で動かすエージェント ("+strings.Join(agentNames(), " / ")+")")
+	copyDir := fs.Bool("copy", false, "git の履歴ではなく、--repo (既定 cwd) のディレクトリをそのまま VM の /work へコピーする")
+	workSize := fs.String("work-size", "", "--copy の /work ディスク容量 (例: 20G)。空ならコピー元から自動")
 	mountTmp := fs.Bool("mount-tmp", false, "repo の .tmp と VM の /work/.tmp (64 MiB) を受け渡す (起動時にコピー、終了時に回収)")
 	localHead := fs.Bool("local-head", false, "checkout 中のブランチをローカルの先頭 (未 push のコミットを含む) で渡す。既定は upstream の先頭")
 	nested := fs.Bool("nested-virt", false, "VM の中で KVM を使えるようにする (VM の中で VM を動かすとき)")
@@ -218,6 +221,8 @@ func cmdRun(args []string) error {
 		MemMiB:      *mem,
 		Allow:       strings.Fields(*allow),
 		Interactive: interactive,
+		Copy:        *copyDir,
+		WorkSize:    *workSize,
 		MountTmp:    *mountTmp,
 		NestedVirt:  *nested,
 		LocalHead:   *localHead,

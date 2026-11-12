@@ -112,6 +112,7 @@ func TestQemuArgvAllOptions(t *testing.T) {
 		NestedVirt: true,
 		DataDisks: []DataDisk{
 			{Serial: "datadisk1", Path: "/path/to/disk,with,commas"},
+			{Serial: "datadisk2", Path: "/path/to/disk2", Format: "qcow2"},
 		},
 		Extra: []string{"-snapshot", "-daemonize"},
 	}
@@ -143,16 +144,21 @@ func TestQemuArgvAllOptions(t *testing.T) {
 		t.Errorf("expected vsock device with guest-cid=12345 in argv: %v", argv)
 	}
 
-	// DataDisks with escaped commas
-	diskFound := false
+	// DataDisks with escaped commas / format
+	diskFound, qcowFound := false, false
 	for _, a := range argv {
-		if strings.Contains(a, "/path/to/disk,,with,,commas") {
+		if strings.Contains(a, "/path/to/disk,,with,,commas") && strings.Contains(a, "format=raw") {
 			diskFound = true
-			break
+		}
+		if strings.Contains(a, "/path/to/disk2") && strings.Contains(a, "format=qcow2") {
+			qcowFound = true
 		}
 	}
 	if !diskFound {
 		t.Errorf("expected escaped comma disk path in argv: %v", argv)
+	}
+	if !qcowFound {
+		t.Errorf("expected qcow2 data disk in argv: %v", argv)
 	}
 
 	// Extra

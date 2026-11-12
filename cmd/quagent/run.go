@@ -50,6 +50,11 @@ type runOpts struct {
 	Interactive bool
 	// MountTmp は host の repo の .tmp と VM の /work/.tmp を受け渡す (tmpdisk.go)。
 	MountTmp bool
+	// Copy は repo を git の履歴ではなくディレクトリそのものとして /work へコピーする
+	// (workdisk.go)。docker-compose のデータなど git 管理外のファイルを渡すときに使う。
+	Copy bool
+	// WorkSize は --copy の /work ディスクの容量 (例: 20G)。空ならコピー元から自動。
+	WorkSize string
 	// NestedVirt は VM の中で KVM を使えるようにする (VM の中で VM を動かす開発用)。
 	NestedVirt bool
 	// LocalHead は checkout 中のブランチをローカルの先頭 (未 push のコミットを含む) で
@@ -242,7 +247,12 @@ func run(o runOpts) error {
 			return fmt.Errorf("codex のサブスクリプションを使えない: %w", err)
 		}
 	}
-	repo, err := repoRoot(o.Repo)
+	var repo string
+	if o.Copy {
+		repo, err = copySource(o.Repo)
+	} else {
+		repo, err = repoRoot(o.Repo)
+	}
 	if err != nil {
 		return err
 	}
@@ -312,8 +322,25 @@ func run(o runOpts) error {
 	}()
 	var tmpDir string
 	var disks []vm.DataDisk
+	var workImg string
+	var workDiskBytes int64
+	if o.Copy {
+		logf("コピー元の大きさを調べる: %s", repo)
+		size, data, err := workDiskSize(repo, o.WorkSize, o.MountTmp)
+		if err != nil {
+			return err
+		}
+		img, err := prepareWorkDisk(work, size, data)
+		if err != nil {
+			return err
+		}
+		workImg, workDiskBytes = img, size
+		disks = append(disks, vm.DataDisk{Serial: workSerial, Path: img, Format: "qcow2"})
+		logf("%s を VM の /work (容量 %s、実データ %s) へコピーする (host の原本は変更しない)",
+			repo, humanBytes(size), humanBytes(data))
+	}
 	if o.MountTmp {
-		dir, img, err := prepareTmp(repo, work)
+		dir, img, err := prepareTmp(repo, work, !o.Copy)
 		if err != nil {
 			return err
 		}
@@ -519,6 +546,11 @@ func run(o runOpts) error {
 	if tmpDir != "" {
 		tmpCmd = tmpRuncmd(strconv.Itoa(vm.GuestUID))
 	}
+	// 作業ディスクは /work を置き換えるので、/work/.tmp のマウントより先に実行する。
+	workCmd := ""
+	if workImg != "" {
+		workCmd = workRuncmd(strconv.Itoa(vm.GuestUID))
+	}
 	// HTTPS を終端するときは、使い捨て CA を guest の信頼ストアに入れ、自前の
 	// 証明書束を見る実装 (Node / Bun など) にも環境変数で教える。信頼を入れてから
 	// エージェントを起動する (runcmd の先頭で update-ca-certificates)。
@@ -605,9 +637,9 @@ bootcmd:
 runcmd:
   # 再起動のとき作業ユーザーが差し替えられるよう、/entrypoint.sh の実体は作業ユーザーのホームに置く
   - [sh, -c, "install -o %s -g %s -m 755 /entrypoint.sh %s && ln -sf %s /entrypoint.sh"]
-%s%s%s%s  - [sh, -c, "mkdir -p /run/quagent-seed && mount -o ro /dev/disk/by-label/cidata /run/quagent-seed && install -m 755 /run/quagent-seed/quagent-guest /usr/local/bin/quagent-guest && umount /run/quagent-seed"]
+%s%s%s%s%s  - [sh, -c, "mkdir -p /run/quagent-seed && mount -o ro /dev/disk/by-label/cidata /run/quagent-seed && install -m 755 /run/quagent-seed/quagent-guest /usr/local/bin/quagent-guest && umount /run/quagent-seed"]
   - [systemd-run, --unit=quagent-guest, --uid=%s, -p, Restart=always, /usr/local/bin/quagent-guest, %s, "%d", "%d"]
-`, indentBlock(entrypoint, "      "), extraFiles, sandboxFile, hostsvc.GuestHost, maskCmd(sshUnits()), vm.GuestUser, vm.GuestUser, entrypointPath, entrypointPath, trustCmd, tmpCmd, dockerSetupCmd, pkgCacheCmd, vm.GuestUser, guestCommand, svc.Port, proxyCachePort)
+`, indentBlock(entrypoint, "      "), extraFiles, sandboxFile, hostsvc.GuestHost, maskCmd(sshUnits()), vm.GuestUser, vm.GuestUser, entrypointPath, entrypointPath, workCmd, trustCmd, tmpCmd, dockerSetupCmd, pkgCacheCmd, vm.GuestUser, guestCommand, svc.Port, proxyCachePort)
 
 	// 時刻の表示 (承認の期限やコミットの日時) を host とそろえる
 	if tz := hostTimezone(); tz != "" {
@@ -713,13 +745,15 @@ runcmd:
 		monCtx, monCancel := context.WithCancel(context.Background())
 		defer monCancel()
 		mon := resourcemon.New(resourcemon.Config{
-			WorkDir:           work,
-			OverlayPath:       overlay,
-			BaseDiskPath:      base,
-			HostSafetyFreeGiB: resPolicy.HostSafetyFreeGiB,
-			DiskWarnPercent:   resPolicy.DiskWarnPercent,
-			DiskStopPercent:   resPolicy.DiskStopPercent,
-			MaxLogSizeMiB:     resPolicy.MaxLogSizeMiB,
+			WorkDir:              work,
+			OverlayPath:          overlay,
+			BaseDiskPath:         base,
+			WorkDiskPath:         workImg,
+			WorkDiskVirtualBytes: workDiskBytes,
+			HostSafetyFreeGiB:    resPolicy.HostSafetyFreeGiB,
+			DiskWarnPercent:      resPolicy.DiskWarnPercent,
+			DiskStopPercent:      resPolicy.DiskStopPercent,
+			MaxLogSizeMiB:        resPolicy.MaxLogSizeMiB,
 		})
 		mon.OnAlert = func(msg string) {
 			con.Log("[警告] " + msg)
@@ -792,19 +826,27 @@ runcmd:
 	if err != nil {
 		return err
 	}
-	forge, err := newPRForge(cfg, repo)
-	if err != nil {
-		return err
-	}
-	publisher := &pr.Publisher{
-		Repo: repo, Work: work, Protected: protected, Forge: forge,
-		GuestURL: g.gitURL(), GitConfig: []string{"protocol.ext.allow=always"},
-		MarkPub: strings.TrimSpace(string(markPub)), MinInterval: 10 * time.Second,
-	}
-	if o.PRApproval {
-		publisher.Approve = func(req pr.Request) error {
-			return con.AskPR(console.PRInfo{Branch: req.Branch, Base: req.Base, Title: req.Title, Body: req.Body})
+	// --copy はデータ込みのディレクトリを試験するためのモードなので、PR は作らない。
+	// MCP の create_pull_request は残し、呼ばれたら理由を返す。
+	var publisher mcpsrv.PRPublisher
+	if o.Copy {
+		publisher = unavailablePublisher{reason: "「そのままコピー (--copy)」で起動しているので PR を作れない。git の履歴を渡すなら --copy を外す"}
+	} else {
+		forge, err := newPRForge(cfg, repo)
+		if err != nil {
+			return err
 		}
+		p := &pr.Publisher{
+			Repo: repo, Work: work, Protected: protected, Forge: forge,
+			GuestURL: g.gitURL(), GitConfig: []string{"protocol.ext.allow=always"},
+			MarkPub: strings.TrimSpace(string(markPub)), MinInterval: 10 * time.Second,
+		}
+		if o.PRApproval {
+			p.Approve = func(req pr.Request) error {
+				return con.AskPR(console.PRInfo{Branch: req.Branch, Base: req.Base, Title: req.Title, Body: req.Body})
+			}
+		}
+		publisher = p
 	}
 	svc.Mux.Handle(mcpsrv.Path, mcpsrv.Handler(mgr, publisher, con.Log,
 		toolServerTools(cfg, con.Log)...))
@@ -835,9 +877,19 @@ runcmd:
 		return err
 	}
 
-	logf("repo を /work へコピー: %s", repo)
-	if err := copyRepo(g, repo, work, markKey, o.LocalHead); err != nil {
-		return err
+	if o.Copy {
+		logf("ディレクトリを /work へコピー: %s", repo)
+		st, err := copyDir(g, repo, tmpDir != "")
+		if err != nil {
+			return err
+		}
+		logf("/work へ %d ファイル / %d ディレクトリ / %d リンク (%s) をコピーした (スキップ: %d)",
+			st.Files, st.Dirs, st.Links, humanBytes(st.Bytes), st.Skipped)
+	} else {
+		logf("repo を /work へコピー: %s", repo)
+		if err := copyRepo(g, repo, work, markKey, o.LocalHead); err != nil {
+			return err
+		}
 	}
 	if tmpDir != "" {
 		if err := copyInTmp(g, tmpDir); err != nil {
@@ -1523,9 +1575,16 @@ func repoRoot(dir string) (string, error) {
 	}
 	out, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output()
 	if err != nil {
-		return "", fmt.Errorf("git repo ではない: %s", dir)
+		return "", fmt.Errorf("git repo ではない: %s (git 管理外のディレクトリを渡すなら --copy を付ける)", dir)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// unavailablePublisher は PR を作れない run 用の PRPublisher。
+type unavailablePublisher struct{ reason string }
+
+func (p unavailablePublisher) Publish(pr.Request) (pr.Result, error) {
+	return pr.Result{}, fmt.Errorf("%s", p.reason)
 }
 
 // copyRepo は host で checkout しているブランチを履歴ごと (git bundle) VM の /work に
