@@ -18,16 +18,14 @@ const maxSkillsIn = 16 << 20
 // ディレクトリが存在しないか通常ファイルが無い場合は count = 0, buf = nil, err = nil を返す。
 // 通常ファイルとディレクトリのみを含め、サイズ上限 (maxSkillsIn) を超えるとエラーを返す。
 func archiveSkills(dir string) (*bytes.Buffer, int, error) {
-	st, err := os.Stat(dir)
+	root, err := openDirNoSymlink(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, 0, nil
 	}
 	if err != nil {
 		return nil, 0, err
 	}
-	if !st.IsDir() {
-		return nil, 0, fmt.Errorf("%s はディレクトリではない", dir)
-	}
+	defer root.Close()
 
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
@@ -76,13 +74,16 @@ func archiveSkills(dir string) (*bytes.Buffer, int, error) {
 			}); err != nil {
 				return err
 			}
-			f, err := os.Open(path)
+			f, err := openRegularNoFollow(root, rel, info)
 			if err != nil {
 				return err
 			}
-			defer f.Close()
 			_, err = io.CopyN(tw, f, info.Size())
-			return err
+			cerr := f.Close()
+			if err != nil {
+				return err
+			}
+			return cerr
 		}
 		return nil
 	})

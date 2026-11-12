@@ -36,7 +36,7 @@ func prepareTmp(repo, work string) (dir, img string, err error) {
 	if out, _ := exec.Command("git", "-C", repo, "ls-files", "--", ".tmp").Output(); len(strings.TrimSpace(string(out))) > 0 {
 		return "", "", fmt.Errorf(".tmp に git で管理しているファイルがあるので受け渡さない")
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := ensureRealDir(dir); err != nil {
 		return "", "", err
 	}
 	if exec.Command("git", "-C", repo, "check-ignore", "-q", ".tmp/").Run() != nil {
@@ -72,10 +72,15 @@ func copyInTmp(g vmGuest, dir string) error {
 	if out, err := g.sh("grep -q ' /work/.tmp ' /proc/mounts", nil); err != nil {
 		return fmt.Errorf("/work/.tmp が VM でマウントされていない (cloud-init の準備に失敗): %v: %s\nVM 内の診断:\n%s", err, out, diagTmpMount(g))
 	}
+	root, err := openDirNoSymlink(dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	var total int64
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -97,13 +102,16 @@ func copyInTmp(g vmGuest, dir string) error {
 			if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: filepath.ToSlash(rel), Mode: 0o644, Size: info.Size(), ModTime: info.ModTime()}); err != nil {
 				return err
 			}
-			f, err := os.Open(path)
+			f, err := openRegularNoFollow(root, rel, info)
 			if err != nil {
 				return err
 			}
-			defer f.Close()
 			_, err = io.CopyN(tw, f, info.Size())
-			return err
+			cerr := f.Close()
+			if err != nil {
+				return err
+			}
+			return cerr
 		}
 		return nil
 	})
@@ -153,7 +161,7 @@ func collectTmp(g vmGuest, dir string) (files int, size int64, err error) {
 // (0644) とディレクトリ (0755) だけを dir の中に作り、リンク・特殊ファイルは捨てる。
 // host 側にリンクなど通常ファイル以外が同じ名前であれば上書きしない。
 func extractTar(r io.Reader, dir string) (files int, size int64, err error) {
-	root, err := os.OpenRoot(dir)
+	root, err := openDirNoSymlink(dir)
 	if err != nil {
 		return 0, 0, err
 	}
