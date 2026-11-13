@@ -638,38 +638,6 @@ func (fl *field) check() error {
 	return fl.validate(fl.input.Value())
 }
 
-// summary はフォーカスしていないときに出す現在値。
-func (fl *field) summary() string {
-	switch fl.kind {
-	case fieldSelect:
-		if fl.cursor >= 0 && fl.cursor < len(fl.opts) {
-			return fl.opts[fl.cursor].label
-		}
-	case fieldMulti:
-		var labels []string
-		for i, o := range fl.opts {
-			if fl.chosen[i] {
-				labels = append(labels, o.label)
-			}
-		}
-		if len(labels) == 0 {
-			return "(なし)"
-		}
-		return strings.Join(labels, ", ")
-	case fieldInput:
-		if fl.input.Value() == "" {
-			return "(未入力)"
-		}
-		return fl.input.Value()
-	case fieldConfirm:
-		if fl.flag != nil && *fl.flag {
-			return fl.yes
-		}
-		return fl.no
-	}
-	return ""
-}
-
 // ---- 描画 ----
 
 type lineKind int
@@ -725,17 +693,20 @@ func (f *form) layout() []formLine {
 		out = append(out, newLine("", lineBlank, -1, 0))
 	}
 
+	// 項目はフォーカスに関係なく全部開いたまま描く。フォーカスで変わるのは
+	// 見出しの印と色だけで、行数や並びは動かさない (折りたたむと画面が跳ねる)。
 	const indent = "  "
 	for i, fl := range f.fields {
-		focused := i == f.focus
-		if fl.title != "" {
-			if focused {
-				out = append(out, newLine(indent+styleFocus.Render("❯ "+fl.title), lineTitle, i, 0))
-			} else {
-				out = append(out, newLine(indent+styleLabel.Render(fl.title), lineTitle, i, 0))
-			}
+		titleMarker := "  "
+		titleStyle := styleLabel
+		if i == f.focus {
+			titleMarker = styleCursor.Render("❯ ")
+			titleStyle = styleFocus
 		}
-		if focused && fl.desc != "" {
+		if fl.title != "" {
+			out = append(out, newLine(indent+titleMarker+titleStyle.Render(fl.title), lineTitle, i, 0))
+		}
+		if fl.desc != "" {
 			for _, l := range wrapWords(fl.desc, w-4) {
 				out = append(out, newLine(indent+indent+styleDim.Render(l), lineDesc, i, 0))
 			}
@@ -743,12 +714,6 @@ func (f *form) layout() []formLine {
 
 		switch fl.kind {
 		case fieldSelect:
-			if !focused {
-				for _, l := range wrapWords(fl.summary(), w-4) {
-					out = append(out, newLine(indent+indent+styleDim.Render(l), lineDesc, i, 0))
-				}
-				break
-			}
 			for j, o := range fl.opts {
 				marker := "  "
 				if j == fl.cursor {
@@ -770,12 +735,6 @@ func (f *form) layout() []formLine {
 			}
 
 		case fieldMulti:
-			if !focused {
-				for _, l := range wrapWords(fl.summary(), w-4) {
-					out = append(out, newLine(indent+indent+styleDim.Render(l), lineDesc, i, 0))
-				}
-				break
-			}
 			for j, o := range fl.opts {
 				marker := "  "
 				if j == fl.cursor {
@@ -800,35 +759,23 @@ func (f *form) layout() []formLine {
 			}
 
 		case fieldInput:
-			if focused {
-				fl.input.Width = max(8, w-6)
-				out = append(out, newLine(indent+"> "+fl.input.View(), lineInput, i, 0))
-			} else {
-				for _, l := range wrapWords(fl.summary(), w-4) {
-					out = append(out, newLine(indent+indent+styleDim.Render(l), lineDesc, i, 0))
-				}
-			}
+			fl.input.Width = max(8, w-6)
+			out = append(out, newLine(indent+"> "+fl.input.View(), lineInput, i, 0))
 
 		case fieldConfirm:
-			if focused {
-				yesStyle, noStyle := styleButtonOff, styleButtonOn
-				if fl.flag != nil && *fl.flag {
-					yesStyle, noStyle = styleButtonOn, styleButtonOff
-				}
-				yesText := "[ " + fl.yes + " ]"
-				noText := "[ " + fl.no + " ]"
-				x0 := runewidth.StringWidth(indent)
-				x1 := x0 + runewidth.StringWidth(yesText)
-				x2 := x1 + 2
-				x3 := x2 + runewidth.StringWidth(noText)
-				ln := newLine(indent+yesStyle.Render(yesText)+"  "+noStyle.Render(noText), lineButtons, i, 0)
-				ln.x = [4]int{x0, x1, x2, x3}
-				out = append(out, ln)
-			} else {
-				for _, l := range wrapWords(fl.summary(), w-4) {
-					out = append(out, newLine(indent+indent+styleDim.Render(l), lineDesc, i, 0))
-				}
+			yesStyle, noStyle := styleButtonOff, styleButtonOn
+			if fl.flag != nil && *fl.flag {
+				yesStyle, noStyle = styleButtonOn, styleButtonOff
 			}
+			yesText := "[ " + fl.yes + " ]"
+			noText := "[ " + fl.no + " ]"
+			x0 := runewidth.StringWidth(indent)
+			x1 := x0 + runewidth.StringWidth(yesText)
+			x2 := x1 + 2
+			x3 := x2 + runewidth.StringWidth(noText)
+			ln := newLine(indent+yesStyle.Render(yesText)+"  "+noStyle.Render(noText), lineButtons, i, 0)
+			ln.x = [4]int{x0, x1, x2, x3}
+			out = append(out, ln)
 		}
 
 		if fl.err != nil {
