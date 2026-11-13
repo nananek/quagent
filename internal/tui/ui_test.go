@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -56,6 +57,79 @@ func TestFormSelectByMouse(t *testing.T) {
 	}
 	if f.focus != 0 {
 		t.Errorf("focus = %d, want 0", f.focus)
+	}
+}
+
+// 項目はフォーカスに関係なく全部開いたまま描き、フォーカスを移しても行数と並びが
+// 変わらない (折りたたんで画面が跳ねない)。
+func TestFormKeepsAllFieldsOpen(t *testing.T) {
+	var sel, input string
+	var multi []string
+	var ok bool
+	f := newForm("")
+	f.addSelect("選択", "選択の説明", &sel, option{label: "a", value: "a"}, option{label: "b", value: "b"})
+	f.addMulti("複数", "複数の説明", &multi, option{label: "x", value: "x"}, option{label: "y", value: "y"})
+	f.addInput("入力", "入力の説明", &input, nil)
+	f.addConfirm("確認", "確認の説明", &ok, "はい", "いいえ")
+	f.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
+	f.setFocus(0)
+
+	// どの項目も、フォーカスしていなくても選択肢・入力欄・ボタン・説明が揃っている。
+	for _, tc := range []struct {
+		kind  lineKind
+		field int
+		opt   int
+	}{
+		{lineOption, 0, 0}, {lineOption, 0, 1},
+		{lineOption, 1, 0}, {lineOption, 1, 1},
+		{lineInput, 2, 0},
+		{lineButtons, 3, 0},
+		{lineDesc, 0, 0}, {lineDesc, 1, 0}, {lineDesc, 2, 0}, {lineDesc, 3, 0},
+	} {
+		if findLine(f, tc.kind, tc.field, tc.opt) < 0 {
+			t.Errorf("kind=%d field=%d opt=%d の行が無い (開いていない)", tc.kind, tc.field, tc.opt)
+		}
+	}
+
+	shape := func() []string {
+		var out []string
+		for _, ln := range f.layout() {
+			out = append(out, fmt.Sprintf("%d:%d:%d", ln.kind, ln.field, ln.opt))
+		}
+		return out
+	}
+	before := shape()
+	f.setFocus(2)
+	after := shape()
+	if len(before) != len(after) {
+		t.Fatalf("フォーカス移動で行数が変わった: %d -> %d", len(before), len(after))
+	}
+	for i := range before {
+		if before[i] != after[i] {
+			t.Fatalf("フォーカス移動で %d 行目が変わった: %q -> %q", i, before[i], after[i])
+		}
+	}
+}
+
+// フォーカスしていない項目の選択肢も、クリックで選べる。
+func TestFormClickSelectsInInactiveField(t *testing.T) {
+	a, b := "a", "x"
+	f := newForm("")
+	f.addSelect("A", "", &a, option{label: "a", value: "a"}, option{label: "b", value: "b"})
+	f.addSelect("B", "", &b, option{label: "x", value: "x"}, option{label: "y", value: "y"})
+	f.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	f.setFocus(0)
+
+	i := findLine(f, lineOption, 1, 1)
+	if i < 0 {
+		t.Fatal("フォーカスしていない項目の選択肢の行が見つからない")
+	}
+	clickLine(f, i)
+	if b != "y" {
+		t.Errorf("クリック後 = %q, want y", b)
+	}
+	if f.focus != 1 {
+		t.Errorf("focus = %d, want 1", f.focus)
 	}
 }
 
