@@ -897,7 +897,7 @@ runcmd:
 		}
 		defer finishTmp(g, tmpDir, work)
 	}
-	if err := copySkills(g, cfg.SkillsDirResolved()); err != nil {
+	if err := copySkills(g, cfg.SkillsDirResolved(), cfg.SkillsMaxBytes()); err != nil {
 		return err
 	}
 	if err := setupRules(g); err != nil {

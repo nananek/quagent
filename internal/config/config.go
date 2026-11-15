@@ -59,6 +59,21 @@ type Config struct {
 	Hub *HubPolicy `json:"hub,omitempty"`
 	// SkillsDir はユーザー共通スキルの置き場 (ホスト側)。未指定なら paths.SkillsDir()。
 	SkillsDir string `json:"skills_dir,omitempty"`
+	// SkillsMaxMiB は VM へ渡す共通スキルの合計サイズ上限 (MiB, 既定: 16)。
+	// スキルは起動時にまるごと VM へコピーするため、ここで上限を決める。
+	SkillsMaxMiB int `json:"skills_max_mib,omitempty"`
+}
+
+// DefaultSkillsMaxMiB は共通スキルの合計サイズ上限の既定値 (MiB)。
+const DefaultSkillsMaxMiB = 16
+
+// SkillsMaxBytes は VM へ渡す共通スキルの合計サイズ上限をバイトで返す
+// (未指定なら DefaultSkillsMaxMiB)。
+func (c *Config) SkillsMaxBytes() int64 {
+	if c != nil && c.SkillsMaxMiB > 0 {
+		return int64(c.SkillsMaxMiB) << 20
+	}
+	return DefaultSkillsMaxMiB << 20
 }
 
 // SkillsDirResolved は共通スキルのホスト側パスを返す (未指定なら paths.SkillsDir())。

@@ -11,13 +11,10 @@ import (
 	"path/filepath"
 )
 
-// maxSkillsIn は VM へ渡すホスト側スキルの合計サイズ上限 (16 MiB)。
-const maxSkillsIn = 16 << 20
-
 // archiveSkills は hostSkillsDir 配下のスキル群を tar アーカイブにまとめる。
 // ディレクトリが存在しないか通常ファイルが無い場合は count = 0, buf = nil, err = nil を返す。
-// 通常ファイルとディレクトリのみを含め、サイズ上限 (maxSkillsIn) を超えるとエラーを返す。
-func archiveSkills(dir string) (*bytes.Buffer, int, error) {
+// 通常ファイルとディレクトリのみを含め、合計が limit バイトを超えるとエラーを返す。
+func archiveSkills(dir string, limit int64) (*bytes.Buffer, int, error) {
 	root, err := openDirNoSymlink(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, 0, nil
@@ -56,8 +53,8 @@ func archiveSkills(dir string) (*bytes.Buffer, int, error) {
 				ModTime:  info.ModTime(),
 			})
 		case info.Mode().IsRegular():
-			if total+info.Size() > maxSkillsIn {
-				return fmt.Errorf("%s が大きすぎる (VM へ渡すスキルは合計 %d MiB まで)", dir, maxSkillsIn>>20)
+			if total+info.Size() > limit {
+				return fmt.Errorf("%s が大きすぎる (VM へ渡すスキルは合計 %d MiB まで。skills_max_mib で変更できる)", dir, limit>>20)
 			}
 			total += info.Size()
 			count++
@@ -116,8 +113,9 @@ done`
 
 // copySkills は host の共通スキルディレクトリから VM の ~/.quagent/skills へ
 // スキル群を安全に転送し、各エージェントのスキル探索パスへシンボリックリンクを展開する。
-func copySkills(g vmGuest, dir string) error {
-	buf, count, err := archiveSkills(dir)
+// limit は転送する合計サイズの上限 (バイト)。
+func copySkills(g vmGuest, dir string, limit int64) error {
+	buf, count, err := archiveSkills(dir, limit)
 	if err != nil {
 		return err
 	}

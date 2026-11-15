@@ -8,10 +8,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/nananek/quagent/internal/config"
 )
 
+// defaultSkillsMaxIn は設定未指定時の合計サイズ上限 (skills_max_mib の既定)。
+const defaultSkillsMaxIn = config.DefaultSkillsMaxMiB << 20
+
 func TestArchiveSkillsNonExistent(t *testing.T) {
-	buf, count, err := archiveSkills(filepath.Join(t.TempDir(), "not-exist"))
+	buf, count, err := archiveSkills(filepath.Join(t.TempDir(), "not-exist"), defaultSkillsMaxIn)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -22,7 +27,7 @@ func TestArchiveSkillsNonExistent(t *testing.T) {
 
 func TestArchiveSkillsEmpty(t *testing.T) {
 	tmp := t.TempDir()
-	buf, count, err := archiveSkills(tmp)
+	buf, count, err := archiveSkills(tmp, defaultSkillsMaxIn)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -55,7 +60,7 @@ func TestArchiveSkillsValid(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	buf, count, err := archiveSkills(tmp)
+	buf, count, err := archiveSkills(tmp, defaultSkillsMaxIn)
 	if err != nil {
 		t.Fatalf("archiveSkills failed: %v", err)
 	}
@@ -106,24 +111,65 @@ func TestArchiveSkillsTooLarge(t *testing.T) {
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// maxSkillsIn (16 MiB) を超えるファイルを作成
+	// 上限 (16 MiB) を超えるファイルを作成
 	bigFile := filepath.Join(skillDir, "big.dat")
 	f, err := os.Create(bigFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.Truncate(maxSkillsIn + 1024); err != nil {
+	if err := f.Truncate(defaultSkillsMaxIn + 1024); err != nil {
 		f.Close()
 		t.Fatal(err)
 	}
 	f.Close()
 
-	_, _, err = archiveSkills(tmp)
+	_, _, err = archiveSkills(tmp, defaultSkillsMaxIn)
 	if err == nil {
 		t.Fatal("expected error for oversized skills directory, got nil")
 	}
 	if !strings.Contains(err.Error(), "大きすぎる") {
 		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestArchiveSkillsCustomLimit(t *testing.T) {
+	tmp := t.TempDir()
+	skillDir := filepath.Join(tmp, "large-skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bigFile := filepath.Join(skillDir, "big.dat")
+	f, err := os.Create(bigFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(defaultSkillsMaxIn + 1024); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	f.Close()
+
+	// 既定の上限では弾かれる
+	if _, _, err := archiveSkills(tmp, defaultSkillsMaxIn); err == nil {
+		t.Fatal("expected error with the default limit")
+	}
+
+	// 上限を緩めれば通る
+	buf, count, err := archiveSkills(tmp, 64<<20)
+	if err != nil {
+		t.Fatalf("archiveSkills with relaxed limit failed: %v", err)
+	}
+	if count != 1 || buf == nil {
+		t.Fatalf("expected count=1 and non-nil buf, got count=%d, buf=%v", count, buf)
+	}
+}
+
+func TestSkillsMaxBytes(t *testing.T) {
+	if got, want := (&config.Config{}).SkillsMaxBytes(), int64(defaultSkillsMaxIn); got != want {
+		t.Errorf("default = %d, want %d", got, want)
+	}
+	if got, want := (&config.Config{SkillsMaxMiB: 64}).SkillsMaxBytes(), int64(64)<<20; got != want {
+		t.Errorf("skills_max_mib=64 = %d, want %d", got, want)
 	}
 }
 
