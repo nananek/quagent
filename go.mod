@@ -12,7 +12,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	golang.org/x/net v0.62.0
 	golang.org/x/sys v0.50.0
-	golang.org/x/term v0.47.0
+	golang.org/x/term v0.48.0
 )
 
 require (
