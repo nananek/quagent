@@ -46,6 +46,9 @@ type Request struct {
 	Body   string
 	// Base は PR の向き先。空なら origin の既定ブランチ。
 	Base string
+	// Draft は PR をドラフトにするか。nil なら、作成時は通常の PR を作り、
+	// 既存 PR のドラフト状態は変えない。
+	Draft *bool
 }
 
 // Result は依頼の結果。
@@ -56,6 +59,7 @@ type Result struct {
 	Head    string `json:"head"`    // push したコミット
 	Signed  int    `json:"signed"`  // 今回署名し直したコミット数
 	Created bool   `json:"created"` // PR を新しく作った
+	Draft   bool   `json:"draft"`   // 依頼後の PR のドラフト状態
 }
 
 // Publisher は 1 つの run の PR 作成を担う。
@@ -543,19 +547,28 @@ func (p *Publisher) finish(req Request, base, head string, signed int) (Result, 
 	}
 	if ok {
 		res.URL = existing.URL
+		res.Draft = existing.Draft
 		if existing.Title != req.Title || existing.Body != req.Body {
 			if err := p.Forge.EditPR(existing, req.Title, req.Body); err != nil {
 				return res, fmt.Errorf("PR のタイトル・本文を更新できない: %w", err)
 			}
 		}
+		if req.Draft != nil && *req.Draft != existing.Draft {
+			if err := p.Forge.SetDraft(existing, *req.Draft); err != nil {
+				return res, fmt.Errorf("PR のドラフト状態を更新できない: %w", err)
+			}
+			res.Draft = *req.Draft
+		}
 		return res, nil
 	}
-	created, err := p.Forge.CreatePR(req.Branch, base, req.Title, req.Body)
+	draft := req.Draft != nil && *req.Draft
+	created, err := p.Forge.CreatePR(req.Branch, base, req.Title, req.Body, draft)
 	if err != nil {
 		return res, fmt.Errorf("push はしたが PR を作れない: %w", err)
 	}
 	res.URL = created.URL
 	res.Created = true
+	res.Draft = draft
 	return res, nil
 }
 

@@ -21,11 +21,15 @@ func (dummyApplier) SetGrants([]netns.Grant) error                         { ret
 func (dummyApplier) SetRelaxations(map[string]headerpolicy.HostRule) error { return nil }
 
 type testPublisher struct {
-	res pr.Result
-	err error
+	res  pr.Result
+	err  error
+	last *pr.Request
 }
 
 func (p testPublisher) Publish(req pr.Request) (pr.Result, error) {
+	if p.last != nil {
+		*p.last = req
+	}
 	return p.res, p.err
 }
 
@@ -101,8 +105,10 @@ func TestHandlerToolsIntegration(t *testing.T) {
 	logf := func(s string) {
 		logs = append(logs, s)
 	}
+	var lastReq pr.Request
 	pub := testPublisher{
-		res: pr.Result{Created: true, Signed: 2, URL: "https://github.com/org/repo/pull/1"},
+		res:  pr.Result{Created: true, Signed: 2, URL: "https://github.com/org/repo/pull/1"},
+		last: &lastReq,
 	}
 
 	h := Handler(mgr, pub, logf)
@@ -174,6 +180,9 @@ func TestHandlerToolsIntegration(t *testing.T) {
 				t.Errorf("create_pull_request の必須項目に %q が無い: %v", key, schema["required"])
 			}
 		}
+		if required["draft"] {
+			t.Errorf("draft を必須にしている: %v", schema["required"])
+		}
 	}
 
 	// 2. request_network_access (auto-approved domain)
@@ -223,6 +232,7 @@ func TestHandlerToolsIntegration(t *testing.T) {
 			"branch": "feature/test",
 			"title":  "Test PR",
 			"body":   "PR body",
+			"draft":  true,
 		},
 	})
 	if err != nil {
@@ -230,6 +240,9 @@ func TestHandlerToolsIntegration(t *testing.T) {
 	}
 	if prCall.IsError {
 		t.Fatalf("create_pull_request returned error: %v", prCall.Content)
+	}
+	if lastReq.Draft == nil || !*lastReq.Draft {
+		t.Errorf("draft が Publisher に渡っていない: %+v", lastReq)
 	}
 	if len(logs) == 0 || !strings.Contains(logs[0], "PR を作成") {
 		t.Errorf("expected log message for PR creation, got %v", logs)
