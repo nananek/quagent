@@ -1431,6 +1431,13 @@ func (m model) renderPendingTab(availHeight int) string {
 		sb.WriteString(Sanitize(r.Text) + "\n")
 	case "prrequest":
 		sb.WriteString(fmt.Sprintf("%s %s → %s\n", styleLabel.Render("ブランチ:"), Sanitize(r.Branch), Sanitize(r.Base)))
+		if r.Draft != nil {
+			state := "解除して通常の PR にする"
+			if *r.Draft {
+				state = "ドラフトとして作成・維持する"
+			}
+			sb.WriteString(fmt.Sprintf("%s %s\n", styleLabel.Render("ドラフト:"), state))
+		}
 		sb.WriteString(fmt.Sprintf("%s %s\n", styleLabel.Render("タイトル:"), Sanitize(r.Title)))
 		// 本文が空のまま作ると、何を変えた PR か読めない。空を黙って隠さず明示する。
 		if b := strings.TrimSpace(r.Body); b == "" {

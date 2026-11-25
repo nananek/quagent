@@ -48,6 +48,7 @@ type Msg struct {
 	Base   string `json:"base,omitempty"`
 	Title  string `json:"title,omitempty"`
 	Body   string `json:"body,omitempty"`
+	Draft  *bool  `json:"draft,omitempty"`
 
 	// 動的ヘッダ・メソッド緩和 (relaxrequest / relaxsettled) の内容。
 	RelaxHost    string   `json:"relax_host,omitempty"`
@@ -158,6 +159,8 @@ type PRInfo struct {
 	Base   string
 	Title  string
 	Body   string
+	// Draft は PR のドラフト状態の希望。nil なら現状維持 (新規は通常の PR)。
+	Draft *bool
 }
 
 type prRequest struct {
@@ -432,7 +435,7 @@ func (s *Server) settlePR(id int, status access.Status) {
 
 func prRequestMsg(r *prRequest) Msg {
 	return Msg{Type: "prrequest", ID: r.id, Branch: r.info.Branch, Base: r.info.Base,
-		Title: r.info.Title, Body: r.info.Body,
+		Title: r.info.Title, Body: r.info.Body, Draft: r.info.Draft,
 		Deadline: r.created.Add(access.DecisionTimeout).Format("15:04:05")}
 }
 

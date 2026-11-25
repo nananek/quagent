@@ -843,7 +843,7 @@ runcmd:
 		}
 		if o.PRApproval {
 			p.Approve = func(req pr.Request) error {
-				return con.AskPR(console.PRInfo{Branch: req.Branch, Base: req.Base, Title: req.Title, Body: req.Body})
+				return con.AskPR(console.PRInfo{Branch: req.Branch, Base: req.Base, Title: req.Title, Body: req.Body, Draft: req.Draft})
 			}
 		}
 		publisher = p

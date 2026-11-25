@@ -146,6 +146,7 @@ type giteaPR struct {
 	Title   string `json:"title"`
 	Body    string `json:"body"`
 	State   string `json:"state"`
+	Draft   bool   `json:"draft"`
 	Head    struct {
 		Ref  string `json:"ref"`
 		Repo struct {
@@ -231,7 +232,7 @@ func (f *GiteaForge) OpenPR(branch string) (PullRequest, bool, error) {
 			if it.HTMLURL == "" {
 				continue
 			}
-			return PullRequest{URL: it.HTMLURL, Number: it.Number, Title: it.Title, Body: it.Body}, true, nil
+			return PullRequest{URL: it.HTMLURL, Number: it.Number, Title: it.Title, Body: it.Body, Draft: it.Draft}, true, nil
 		}
 		if len(list) < giteaPageSize {
 			break
@@ -241,15 +242,19 @@ func (f *GiteaForge) OpenPR(branch string) (PullRequest, bool, error) {
 }
 
 // CreatePR は PR を作成して返す。
-func (f *GiteaForge) CreatePR(branch, base, title, body string) (PullRequest, error) {
+func (f *GiteaForge) CreatePR(branch, base, title, body string, draft bool) (PullRequest, error) {
 	owner, repo, err := f.repoPath()
 	if err != nil {
 		return PullRequest{}, err
 	}
 	path := "repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + "/pulls"
-	_, data, err := f.do(http.MethodPost, path, map[string]string{
+	payload := map[string]any{
 		"head": branch, "base": base, "title": title, "body": body,
-	})
+	}
+	if draft {
+		payload["draft"] = true
+	}
+	_, data, err := f.do(http.MethodPost, path, payload)
 	if err != nil {
 		return PullRequest{}, err
 	}
@@ -260,7 +265,7 @@ func (f *GiteaForge) CreatePR(branch, base, title, body string) (PullRequest, er
 	if created.HTMLURL == "" {
 		return PullRequest{}, fmt.Errorf("Gitea API が PR の URL を返さない")
 	}
-	return PullRequest{URL: created.HTMLURL, Number: created.Number, Title: title, Body: body}, nil
+	return PullRequest{URL: created.HTMLURL, Number: created.Number, Title: title, Body: body, Draft: draft}, nil
 }
 
 // EditPR は既存 PR のタイトル・本文を更新する。
@@ -275,5 +280,20 @@ func (f *GiteaForge) EditPR(pr PullRequest, title, body string) error {
 	path := fmt.Sprintf("repos/%s/%s/pulls/%d",
 		url.PathEscape(owner), url.PathEscape(repo), pr.Number)
 	_, _, err = f.do(http.MethodPatch, path, map[string]string{"title": title, "body": body})
+	return err
+}
+
+// SetDraft は既存 PR のドラフト状態を変える。
+func (f *GiteaForge) SetDraft(pr PullRequest, draft bool) error {
+	if pr.Number <= 0 {
+		return fmt.Errorf("PR の番号が無い")
+	}
+	owner, repo, err := f.repoPath()
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("repos/%s/%s/pulls/%d",
+		url.PathEscape(owner), url.PathEscape(repo), pr.Number)
+	_, _, err = f.do(http.MethodPatch, path, map[string]any{"draft": draft})
 	return err
 }

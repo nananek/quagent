@@ -153,6 +153,7 @@ type prIn struct {
 	Title  string `json:"title" jsonschema:"Pull request title"`
 	Body   string `json:"body" jsonschema:"Pull request description (markdown). Pass the finalized text of your PR body file; an empty body is rejected."`
 	Base   string `json:"base,omitempty" jsonschema:"Branch to merge into. Defaults to the repository's default branch."`
+	Draft  *bool  `json:"draft,omitempty" jsonschema:"Create the pull request as a draft. For an existing PR, true makes it a draft and false marks it ready for review; omit to leave the draft state unchanged."`
 }
 
 // PRPublisher は PR の作成・更新 (pr.Publisher)。
@@ -296,9 +297,10 @@ func Handler(m *access.Manager, pub PRPublisher, logf func(string), extra ...fun
 		Description: "Publish a branch of /work as a pull request on the repository's forge (GitHub or Gitea, depending on config). " +
 			"Commit your work on a non-protected branch first. " +
 			"The host fetches the branch, signs the commits, pushes it and opens the PR (you have no forge credentials and cannot push yourself). " +
-			"Call again with the same branch after adding commits to update the PR. Do not rewrite already-published commits.",
+			"Call again with the same branch after adding commits to update the PR. Do not rewrite already-published commits. " +
+			"Set draft=true to create a draft PR or turn an existing PR back into a draft. Set draft=false to mark an existing draft PR ready for review; omit draft to keep its current state.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in prIn) (*mcp.CallToolResult, pr.Result, error) {
-		res, err := pub.Publish(pr.Request{Branch: in.Branch, Title: in.Title, Body: in.Body, Base: in.Base})
+		res, err := pub.Publish(pr.Request{Branch: in.Branch, Title: in.Title, Body: in.Body, Base: in.Base, Draft: in.Draft})
 		if err != nil {
 			logf("PR の作成に失敗 (" + in.Branch + "): " + err.Error())
 			return nil, pr.Result{}, err
@@ -307,7 +309,11 @@ func Handler(m *access.Manager, pub PRPublisher, logf func(string), extra ...fun
 		if res.Created {
 			verb = "作成"
 		}
-		logf(fmt.Sprintf("PR を%s: %s (署名 %d コミット, 本文 %d バイト) %s", verb, in.Branch, res.Signed, len(in.Body), res.URL))
+		state := ""
+		if res.Draft {
+			state = " (ドラフト)"
+		}
+		logf(fmt.Sprintf("PR を%s: %s (署名 %d コミット, 本文 %d バイト) %s%s", verb, in.Branch, res.Signed, len(in.Body), res.URL, state))
 		return nil, res, nil
 	})
 

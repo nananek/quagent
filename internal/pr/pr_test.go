@@ -537,6 +537,88 @@ func TestFinishWithGH(t *testing.T) {
 	if len(calls) != 2 || !strings.HasPrefix(calls[1], "pr create ") {
 		t.Fatalf("新しい PR を作っていない: %v", calls)
 	}
+
+	// 4. 既存のドラフト PR に draft=false を渡すと通常の PR に戻す
+	boolPtr := func(b bool) *bool { return &b }
+	calls = nil
+	p.Forge = &GHForge{Dir: p.Repo, Run: func(dir string, args ...string) ([]byte, error) {
+		record(args...)
+		viewJSON := func(draft bool) []byte {
+			b, _ := json.Marshal(map[string]any{
+				"url": url, "state": "OPEN", "title": "title", "body": "body", "number": 123, "isDraft": draft,
+			})
+			return b
+		}
+		switch args[1] {
+		case "view":
+			return viewJSON(true), nil
+		case "ready":
+			return nil, nil
+		}
+		return nil, fmt.Errorf("unexpected args: %v", args)
+	}}
+	res, err = p.finish(Request{Branch: "feature", Title: "title", Body: "body", Draft: boolPtr(false)}, "main", "commit1", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Draft {
+		t.Fatalf("ドラフトのまま: %+v", res)
+	}
+	if len(calls) != 2 || calls[1] != "pr ready "+url {
+		t.Fatalf("ドラフトを解除していない: %v", calls)
+	}
+
+	// 5. 既存の通常 PR に draft=true を渡すとドラフトに戻す
+	calls = nil
+	p.Forge = &GHForge{Dir: p.Repo, Run: func(dir string, args ...string) ([]byte, error) {
+		record(args...)
+		viewJSON := func(draft bool) []byte {
+			b, _ := json.Marshal(map[string]any{
+				"url": url, "state": "OPEN", "title": "title", "body": "body", "number": 123, "isDraft": draft,
+			})
+			return b
+		}
+		switch args[1] {
+		case "view":
+			return viewJSON(false), nil
+		case "ready":
+			return nil, nil
+		}
+		return nil, fmt.Errorf("unexpected args: %v", args)
+	}}
+	res, err = p.finish(Request{Branch: "feature", Title: "title", Body: "body", Draft: boolPtr(true)}, "main", "commit1", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Draft {
+		t.Fatalf("ドラフトになっていない: %+v", res)
+	}
+	if len(calls) != 2 || calls[1] != "pr ready "+url+" --undo" {
+		t.Fatalf("ドラフトに戻していない: %v", calls)
+	}
+
+	// 6. 新規 PR は draft=true なら --draft 付きで作る
+	calls = nil
+	p.Forge = &GHForge{Dir: p.Repo, Run: func(dir string, args ...string) ([]byte, error) {
+		record(args...)
+		switch args[1] {
+		case "view":
+			return viewJSON("CLOSED", "title", "body"), nil
+		case "create":
+			return []byte("https://github.com/org/repo/pull/789\n"), nil
+		}
+		return nil, fmt.Errorf("unexpected args: %v", args)
+	}}
+	res3, err := p.finish(Request{Branch: "draft-feature", Title: "title", Body: "body", Draft: boolPtr(true)}, "main", "commit3", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res3.Created || !res3.Draft {
+		t.Fatalf("unexpected res: %+v", res3)
+	}
+	if len(calls) != 2 || !strings.Contains(calls[1], "--draft") {
+		t.Fatalf("--draft を付けていない: %v", calls)
+	}
 }
 
 // git 呼び出し時に transfer.fsckObjects=true が有効になっていることを確かめる。

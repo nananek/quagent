@@ -328,7 +328,15 @@ func approvalSummary(m console.Msg) (title, body string, ok bool) {
 	case "relaxrequest":
 		return "ヘッダ緩和の申請", "ホスト: " + m.RelaxHost + "\n理由: " + m.Reason, true
 	case "prrequest":
-		return "PR 作成の承認", m.Branch + " → " + m.Base + "\n" + m.Title, true
+		summary := m.Branch + " → " + m.Base + "\n" + m.Title
+		if m.Draft != nil {
+			if *m.Draft {
+				summary += "\nドラフトとして作成・維持"
+			} else {
+				summary += "\nドラフトを解除"
+			}
+		}
+		return "PR 作成の承認", summary, true
 	case "dockerrequest":
 		return "Docker イメージの取得", m.DockerRegistry + "/" + m.DockerRepository + ":" + m.DockerReference, true
 	case "batchrequest":

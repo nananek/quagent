@@ -150,7 +150,7 @@ func TestGiteaForgeOpenPR(t *testing.T) {
 				// 開いていてブランチも fork 元も一致するもの (大小文字は無視)
 				map[string]any{
 					"number": 77, "html_url": "https://gitea.example/org/repo/pulls/77",
-					"title": "title", "body": "body", "state": "open",
+					"title": "title", "body": "body", "state": "open", "draft": true,
 					"head": map[string]any{"ref": "feature", "repo": map[string]any{"full_name": "ORG/Repo"}},
 				},
 			)
@@ -166,7 +166,7 @@ func TestGiteaForgeOpenPR(t *testing.T) {
 		t.Fatal("一致する PR を見つけられなかった")
 	}
 	if got.URL != "https://gitea.example/org/repo/pulls/77" || got.Number != 77 ||
-		got.Title != "title" || got.Body != "body" {
+		got.Title != "title" || got.Body != "body" || !got.Draft {
 		t.Errorf("unexpected PR: %+v", got)
 	}
 	mu.Lock()
@@ -221,7 +221,7 @@ func TestGiteaForgeCreatePR(t *testing.T) {
 		})
 	}, "org", "repo")
 
-	got, err := f.CreatePR("feature", "main", "title", "body")
+	got, err := f.CreatePR("feature", "main", "title", "body", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,6 +284,72 @@ func TestGiteaForgeEditPR(t *testing.T) {
 	}
 }
 
+func TestGiteaForgeDraft(t *testing.T) {
+	var mu sync.Mutex
+	var created, patched map[string]any
+	f, _ := newTestGitea(t, func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var body map[string]any
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Errorf("body を読めない: %v", err)
+		}
+		switch r.Method {
+		case http.MethodPost:
+			mu.Lock()
+			created = body
+			mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"number": 42, "html_url": "https://gitea.example/org/repo/pulls/42", "draft": true,
+			})
+		case http.MethodPatch:
+			if r.URL.Path != "/api/v1/repos/org/repo/pulls/42" {
+				t.Errorf("path = %q", r.URL.Path)
+			}
+			mu.Lock()
+			patched = body
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"number": 42})
+		default:
+			t.Errorf("method = %s", r.Method)
+		}
+	}, "org", "repo")
+
+	got, err := f.CreatePR("feature", "main", "title", "body", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Draft {
+		t.Errorf("ドラフトとして作られていない: %+v", got)
+	}
+	mu.Lock()
+	if created["draft"] != true {
+		t.Errorf("作成時に draft を送っていない: %+v", created)
+	}
+	mu.Unlock()
+
+	if err := f.SetDraft(PullRequest{Number: 42}, false); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	if patched["draft"] != false {
+		t.Errorf("解除時に draft=false を送っていない: %+v", patched)
+	}
+	mu.Unlock()
+
+	// 番号が無ければ API を呼ばない
+	requests := 0
+	f2, _ := newTestGitea(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+	}, "org", "repo")
+	if err := f2.SetDraft(PullRequest{}, true); err == nil {
+		t.Error("番号の無い PR が通った")
+	}
+	if requests != 0 {
+		t.Errorf("番号が無いのに API を呼んだ: %d", requests)
+	}
+}
+
 func TestGiteaForgeAPIErrors(t *testing.T) {
 	f, _ := newTestGitea(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -301,7 +367,7 @@ func TestGiteaForgeAPIErrors(t *testing.T) {
 		w.WriteHeader(http.StatusConflict)
 		_, _ = w.Write([]byte(`already exists`))
 	}, "org", "repo")
-	if _, err := f2.CreatePR("feature", "main", "t", "b"); err == nil {
+	if _, err := f2.CreatePR("feature", "main", "t", "b", false); err == nil {
 		t.Fatal("409 が通った")
 	} else if !strings.Contains(err.Error(), "409") || !strings.Contains(err.Error(), "already exists") {
 		t.Errorf("status か本文が抜けている: %v", err)
