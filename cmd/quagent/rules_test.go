@@ -18,6 +18,9 @@ func TestGuestRulesContent(t *testing.T) {
 		"rootless Docker",
 		"再現可能な検証手順",
 		"マシン固有事情",
+		"ドラフト PR",
+		"draft=true",
+		"draft=false",
 	}
 	for _, kw := range requiredKeywords {
 		if !strings.Contains(guestRulesContent, kw) {
